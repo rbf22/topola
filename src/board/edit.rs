@@ -33,9 +33,9 @@ impl Edit for BoardDataEdit {
     }
 
     fn merge(&mut self, edit: Self) {
-        self.pinname_nodes.merge(edit.pinname_nodes);
-        self.bands_by_id.merge(edit.bands_by_id);
-        self.bands_by_name.merge(edit.bands_by_name);
+        Edit::merge(&mut self.pinname_nodes, edit.pinname_nodes);
+        Edit::merge(&mut self.bands_by_id, edit.bands_by_id);
+        Edit::merge(&mut self.bands_by_name, edit.bands_by_name);
     }
 }
 

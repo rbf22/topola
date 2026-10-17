@@ -103,10 +103,10 @@ impl<
     }
 
     fn merge(&mut self, edit: Self) {
-        self.dots.merge(edit.dots);
-        self.segs.merge(edit.segs);
-        self.bends.merge(edit.bends);
-        self.compounds.merge(edit.compounds);
+        Edit::merge(&mut self.dots, edit.dots);
+        Edit::merge(&mut self.segs, edit.segs);
+        Edit::merge(&mut self.bends, edit.bends);
+        Edit::merge(&mut self.compounds, edit.compounds);
     }
 }
 

@@ -388,6 +388,7 @@ impl<
         BboxedIndex::new(Bbox::new(aabb), GenericNode::Compound(compound))
     }
 
+    #[allow(dead_code)]
     fn shape(&self, primitive: PI) -> PrimitiveShape {
         if let Ok(dot) = <PI as TryInto<DI>>::try_into(primitive) {
             self.geometry.dot_shape(dot)
@@ -412,6 +413,7 @@ impl<
         }
     }
 
+    #[allow(dead_code)]
     fn test_envelopes(&self) -> bool {
         !self.rtree.iter().any(|wrapper| {
             // TODO: Test envelopes of compounds too.
@@ -461,7 +463,7 @@ impl<
         self.geometry.remove_compound(compound);
     }
 
-    fn add_to_compound<I>(&mut self, primitive: I, label: Cel, compound: GenericIndex<CW>)
+    fn add_to_compound<I>(&mut self, _primitive: I, _label: Cel, _compound: GenericIndex<CW>)
     where
         I: Copy + GetIndex,
     {

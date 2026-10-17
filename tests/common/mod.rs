@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: MIT
 
+// Helpers shared across test binaries; not every consumer uses all of them.
+#![allow(dead_code)]
+
 use std::{fs::File, io::BufReader};
 
 use topola::{

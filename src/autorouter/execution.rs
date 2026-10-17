@@ -28,7 +28,7 @@ use super::{
     Autorouter, PlanarAutorouteOptions,
 };
 
-type Type = PinSelection;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -205,7 +205,7 @@ impl<M> GetTimeoutProgress for ExecutionStepper<M> {
     fn timeout_progress(&self) -> Option<LinearScale<f64, LinearScale<f64>>> {
         match self {
             ExecutionStepper::MultilayerAutoroute(autoroute) => autoroute.timeout_progress(),
-            ExecutionStepper::PlanarAutoroute(autoroute) => None,
+            ExecutionStepper::PlanarAutoroute(_autoroute) => None,
             ExecutionStepper::TopoAutoroute(..) => None,
             ExecutionStepper::PlaceVia(..) => None,
             ExecutionStepper::RemoveBands(..) => None,

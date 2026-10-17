@@ -21,7 +21,7 @@ use crate::{
         graph::{GetMaybeNet, IsInLayer, MakePrimitiveRef, PrimitiveIndex, PrimitiveWeight},
         loose::{GetPrevNextLoose, Loose, LooseIndex},
         primitive::{
-            GenericPrimitive, GetCore, GetJoints, GetLimbs, GetOtherJoint, MakePrimitiveShape,
+            GenericPrimitive, GetCore, GetJoints, GetLimbs, GetOtherJoint,
         },
         rules::AccessRules,
         seg::{
@@ -1048,6 +1048,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         }
     }
 
+    #[allow(dead_code)]
     fn test_if_looses_dont_infringe_each_other(&self) -> bool {
         !self
             .primitive_nodes()

@@ -171,7 +171,6 @@ impl ConnectedComponents {
                 dot_unionfind.union(common.index(), joints.0.index());
                 dot_unionfind.union(common.index(), joints.1.index());
             }
-            _ => (),
         }
     }
 

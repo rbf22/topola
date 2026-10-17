@@ -575,7 +575,7 @@ impl Navmesh {
         };
 
         let checked_center = match checked_binavnode {
-            BinavnodeNodeIndex::FixedDot(dot) => {
+            BinavnodeNodeIndex::FixedDot(_dot) => {
                 // FIXME: This has a lot of false positives, so we return false instead.
                 return false;
                 //dot.primitive_ref(layout.drawing()).shape().center()

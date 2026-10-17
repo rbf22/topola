@@ -387,7 +387,7 @@ impl Anterouter {
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
         recorder: &mut BoardEdit,
-        ratvertex: NodeIndex<usize>,
+        _ratvertex: NodeIndex<usize>,
         ratline: RatlineUid,
         source_dot: FixedDotIndex,
         bbox: AABB<[f64; 2]>,

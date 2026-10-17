@@ -803,7 +803,7 @@ impl SpecctraDesign {
         _maybe_pin: Option<String>,
         flip: bool,
     ) -> Vec<FixedDotIndex> {
-        let MIN_FIRST_CHAIN_ELEMENT_LENGTH = 100.0;
+        let min_first_chain_element_length = 100.0;
         let mut maybe_first_chain_segment = None;
         let mut fillets = vec![];
 
@@ -818,7 +818,7 @@ impl SpecctraDesign {
 
         let last_first_segment = Line::new(last_pos, first_pos);
 
-        if last_first_segment.length::<Euclidean>() >= MIN_FIRST_CHAIN_ELEMENT_LENGTH {
+        if last_first_segment.length::<Euclidean>() >= min_first_chain_element_length {
             maybe_first_chain_segment = Some((Line::new(last_pos, first_pos), 0));
         }
 
@@ -836,7 +836,7 @@ impl SpecctraDesign {
             if math::angle_between(curr_segment01.delta().into(), curr_segment12.delta().into())
                 .abs()
                 > 30.0_f64.to_radians()
-                || curr_segment12.length::<Euclidean>() >= MIN_FIRST_CHAIN_ELEMENT_LENGTH
+                || curr_segment12.length::<Euclidean>() >= min_first_chain_element_length
             {
                 if let Some((first_chain_segment, first_chain_index)) = maybe_first_chain_segment {
                     if index - first_chain_index >= 3 {
