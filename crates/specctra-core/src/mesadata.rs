@@ -299,18 +299,9 @@ mod tests {
 
         // A and B share cls1's clearance; C is unclassed and falls back to the
         // structure rule.
-        assert_eq!(
-            mesadata.clearance(&cond("A"), &cond("B")),
-            Some(200.0)
-        );
-        assert_eq!(
-            mesadata.clearance(&cond("A"), &cond("C")),
-            Some(200.0)
-        );
-        assert_eq!(
-            mesadata.clearance(&cond("C"), &cond("C")),
-            Some(100.0)
-        );
+        assert_eq!(mesadata.clearance(&cond("A"), &cond("B")), Some(200.0));
+        assert_eq!(mesadata.clearance(&cond("A"), &cond("C")), Some(200.0));
+        assert_eq!(mesadata.clearance(&cond("C"), &cond("C")), Some(100.0));
 
         // Different layers never have a clearance constraint between them.
         let other_layer = Conditions {

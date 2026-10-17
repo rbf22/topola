@@ -170,6 +170,24 @@ impl PlanarAutorouteExecutionStepper {
             self.layout_edits.push(navcord.recorder);
         }
     }
+
+    /// Finishes routing early: the in-flight ratline's partial band is
+    /// undone, while already routed bands are kept. The stepper must be
+    /// stepped once more so that it produces the accumulated edit.
+    pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        if self.curr_ratline_index >= self.configuration.ratlines.len() {
+            return;
+        }
+
+        if let Some(taken_route) = self.route.take() {
+            // Undo the in-flight ratline's partially drawn band.
+            let (_thetastar, navcord, ..) = taken_route.dissolve();
+            let edit = BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
+            autorouter.board.apply_edit(&edit.reverse());
+        }
+
+        self.curr_ratline_index = self.configuration.ratlines.len();
+    }
 }
 
 impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteContinueStatus>

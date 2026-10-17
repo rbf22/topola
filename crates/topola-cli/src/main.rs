@@ -98,29 +98,37 @@ fn main() -> Result<(), std::io::Error> {
     for entry in done {
         let mut last_report = Instant::now();
         let start = Instant::now();
-        let status = invoker.execute_with_progress(entry.command().clone(), |execute| {
-            if last_report.elapsed() >= Duration::from_secs(2) {
-                let progress = execute.estimate_progress();
-                let value = *progress.value();
-                let maximum = *progress.maximum();
-                let pct = if maximum > 0 {
-                    100.0 * value as f64 / maximum as f64
-                } else {
-                    0.0
-                };
-                eprintln!(
-                    "[topola] {} elapsed, routed {}/{} ({:.1}%)",
-                    humantime(start.elapsed()),
-                    value,
-                    maximum,
-                    pct
-                );
-                let _ = std::io::stderr().flush();
-                last_report = Instant::now();
-            }
-        });
+        let status = invoker.execute_with_timeout(
+            entry.command().clone(),
+            args.max_seconds.map(Duration::from_secs_f64),
+            |execute| {
+                if last_report.elapsed() >= Duration::from_secs(2) {
+                    let progress = execute.estimate_progress();
+                    let value = *progress.value();
+                    let maximum = *progress.maximum();
+                    let pct = if maximum > 0 {
+                        100.0 * value as f64 / maximum as f64
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "[topola] {} elapsed, routed {}/{} ({:.1}%)",
+                        humantime(start.elapsed()),
+                        value,
+                        maximum,
+                        pct
+                    );
+                    let _ = std::io::stderr().flush();
+                    last_report = Instant::now();
+                }
+            },
+        );
         match status {
-            Ok(()) => eprintln!(
+            Ok(true) => eprintln!(
+                "[topola] timed out after {}, keeping routed bands",
+                humantime(start.elapsed())
+            ),
+            Ok(false) => eprintln!(
                 "[topola] command finished in {}",
                 humantime(start.elapsed())
             ),

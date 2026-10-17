@@ -79,8 +79,7 @@ impl AccessShape for DotShape {
     }
 
     fn intersects_with_bbox(&self, bbox: &AABB<[f64; 2]>) -> bool {
-        bbox.distance_2(&[self.circle.pos.x(), self.circle.pos.y()])
-            < self.circle.r * self.circle.r
+        bbox.distance_2(&[self.circle.pos.x(), self.circle.pos.y()]) < self.circle.r * self.circle.r
     }
 }
 
@@ -108,9 +107,7 @@ impl AccessPrimitiveShape for DotShape {
                 Euclidean::distance(&self.circle.pos, &other.circle.pos)
                     < self.circle.r + other.circle.r
             }
-            PrimitiveShape::Seg(other) => {
-                other.distance_to_point(self.circle.pos) < self.circle.r
-            }
+            PrimitiveShape::Seg(other) => other.distance_to_point(self.circle.pos) < self.circle.r,
             PrimitiveShape::Bend(other) => {
                 for point in math::intersect_circles(&self.circle, &other.inner_circle()) {
                     if other.between_ends(point) {

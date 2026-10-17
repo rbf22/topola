@@ -20,9 +20,7 @@ use crate::{
         gear::GearIndex,
         graph::{GetMaybeNet, IsInLayer, MakePrimitiveRef, PrimitiveIndex, PrimitiveWeight},
         loose::{GetPrevNextLoose, Loose, LooseIndex},
-        primitive::{
-            GenericPrimitive, GetCore, GetJoints, GetLimbs, GetOtherJoint,
-        },
+        primitive::{GenericPrimitive, GetCore, GetJoints, GetLimbs, GetOtherJoint},
         rules::AccessRules,
         seg::{
             FixedSegIndex, FixedSegWeight, LoneLooseSegIndex, LoneLooseSegWeight, SegIndex,

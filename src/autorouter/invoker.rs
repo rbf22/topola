@@ -5,6 +5,7 @@
 //! Manages the execution of routing commands within the autorouting system.
 
 use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
 use contracts_try::debug_requires;
 use derive_getters::{Dissolve, Getters};
@@ -159,6 +160,38 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
             if let ControlFlow::Break(..) = status {
                 self.history.set_undone(std::iter::empty());
                 return Ok(());
+            }
+
+            on_progress(&execute);
+        }
+    }
+
+    /// Executes a command like [`Invoker::execute_with_progress`], but
+    /// finishes it early once `timeout` has elapsed. Early finishing keeps
+    /// already routed bands and undoes only in-flight partial work.
+    ///
+    /// Returns `true` when the command was finished early due to the timeout.
+    pub fn execute_with_timeout(
+        &mut self,
+        command: Command,
+        timeout: Option<Duration>,
+        mut on_progress: impl FnMut(&ExecutionStepper<M>),
+    ) -> Result<bool, InvokerError> {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let mut execute = self.execute_stepper(command)?;
+        let mut timed_out = false;
+
+        loop {
+            let status = execute.step(self)?;
+
+            if let ControlFlow::Break(..) = status {
+                self.history.set_undone(std::iter::empty());
+                return Ok(timed_out);
+            }
+
+            if !timed_out && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                execute.finish_early(&mut self.autorouter);
+                timed_out = true;
             }
 
             on_progress(&execute);

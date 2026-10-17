@@ -38,6 +38,9 @@ pub struct PlanarAutorouteReconfigurator {
     timeout: TimeVsProgressAccumulatorTimeout,
     reconfigurer: PlanarAutorouteReconfigurer,
     options: PlanarAutorouteOptions,
+    /// Set by [`PlanarAutorouteReconfigurator::finish_early`] to prevent any
+    /// further reconfiguration once early finishing is requested.
+    finished: bool,
 }
 
 impl PlanarAutorouteReconfigurator {
@@ -69,7 +72,16 @@ impl PlanarAutorouteReconfigurator {
             // Note: I assume here that the first permutation is the same as the original order.
             reconfigurer,
             options,
+            finished: false,
         })
+    }
+
+    /// Finishes routing early, keeping already routed bands. The next
+    /// `step()` produces the accumulated edit without triggering another
+    /// reconfiguration.
+    pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        self.stepper.finish_early(autorouter);
+        self.finished = true;
     }
 
     fn reconfigure(
@@ -110,9 +122,10 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
         autorouter: &mut Autorouter<M>,
     ) -> Result<ControlFlow<Option<BoardEdit>, PlanarAutorouteReconfiguratorStatus>, AutorouterError>
     {
-        if !self
-            .timeout
-            .update(*self.estimate_progress().subscale().value() as f64)
+        if !self.finished
+            && !self
+                .timeout
+                .update(*self.estimate_progress().subscale().value() as f64)
         {
             return self.reconfigure(autorouter);
         }
@@ -123,7 +136,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status)))
             }
             Err(err) => {
-                if !self.options.permutate {
+                if self.finished || !self.options.permutate {
                     return Err(err);
                 }
                 self.reconfigure(autorouter)

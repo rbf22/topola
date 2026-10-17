@@ -42,6 +42,9 @@ pub struct MultilayerAutorouteReconfigurator {
     timeout: TimeVsProgressAccumulatorTimeout,
     reconfigurer: MultilayerAutorouteReconfigurer,
     options: MultilayerAutorouteOptions,
+    /// Set by [`MultilayerAutorouteReconfigurator::finish_early`] to prevent
+    /// any further reconfiguration once early finishing is requested.
+    finished: bool,
 }
 
 impl MultilayerAutorouteReconfigurator {
@@ -76,7 +79,16 @@ impl MultilayerAutorouteReconfigurator {
             timeout: TimeVsProgressAccumulatorTimeout::new_from_options(options.timeout),
             reconfigurer,
             options,
+            finished: false,
         })
+    }
+
+    /// Finishes routing early, keeping already routed bands. The next
+    /// `step()` produces the accumulated edit without triggering another
+    /// reconfiguration.
+    pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        self.stepper.finish_early(autorouter);
+        self.finished = true;
     }
 
     fn reconfigure(
@@ -115,9 +127,10 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
         autorouter: &mut Autorouter<M>,
     ) -> Result<ControlFlow<Option<BoardEdit>, MultilayerReconfiguratorStatus>, AutorouterError>
     {
-        if !self
-            .timeout
-            .update(*self.estimate_progress().value() as f64)
+        if !self.finished
+            && !self
+                .timeout
+                .update(*self.estimate_progress().value() as f64)
         {
             return self.reconfigure(autorouter);
         }
@@ -137,6 +150,9 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                 ))
             }
             Err(err) => {
+                if self.finished {
+                    return Err(err);
+                }
                 self.reconfigurer
                     .process_planar_result(autorouter, Err(err.clone()));
                 self.reconfigure(autorouter)

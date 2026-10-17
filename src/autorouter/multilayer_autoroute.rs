@@ -74,6 +74,12 @@ impl MultilayerAutorouteExecutionStepper {
             options: options.clone(),
         })
     }
+
+    /// Finishes routing early, keeping already routed bands. See
+    /// [`PlanarAutorouteReconfigurator::finish_early`].
+    pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        self.planar.finish_early(autorouter);
+    }
 }
 
 impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteReconfiguratorStatus>

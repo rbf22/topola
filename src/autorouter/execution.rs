@@ -28,8 +28,6 @@ use super::{
     Autorouter, PlanarAutorouteOptions,
 };
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     Autoroute(PinSelection, PlanarAutorouteOptions), // TODO: Rename to PlanarAutoroute.
@@ -146,6 +144,28 @@ impl<M: AccessMesadata + Clone> Step<Invoker<M>, String> for ExecutionStepper<M>
                 invoker.ongoing_command = None;
                 Err(err)
             }
+        }
+    }
+}
+
+impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
+    /// Finishes the executed command early, keeping already routed bands and
+    /// undoing only in-flight partial work. The stepper must be stepped once
+    /// more so that it records the accumulated edit.
+    ///
+    /// Unlike [`Abort::abort`], which rolls the command back entirely, this
+    /// retains completed work. Commands that cannot finish early cleanly are
+    /// aborted instead.
+    pub fn finish_early(&mut self, autorouter: &mut Autorouter<M>) {
+        match self {
+            ExecutionStepper::MultilayerAutoroute(autoroute) => autoroute.finish_early(autorouter),
+            ExecutionStepper::PlanarAutoroute(autoroute) => autoroute.finish_early(autorouter),
+            ExecutionStepper::TopoAutoroute(autoroute) => {
+                autoroute.abort(&mut ());
+            }
+            ExecutionStepper::PlaceVia(..)
+            | ExecutionStepper::RemoveBands(..)
+            | ExecutionStepper::MeasureLength(..) => (),
         }
     }
 }

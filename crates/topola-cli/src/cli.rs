@@ -42,4 +42,10 @@ pub struct Cli {
         help = "Route all nets except the named nets (comma-separated)"
     )]
     pub exclude_nets: Vec<String>,
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        help = "Finish routing early after this many seconds, keeping already routed bands"
+    )]
+    pub max_seconds: Option<f64>,
 }
