@@ -140,6 +140,7 @@ impl SpecctraDesign {
                                     name: "__Via".to_string(),
                                     x: dot_shape.center().x(),
                                     y: dot_shape.center().y(),
+                                    r#type: Some("route".to_string()),
                                     net: mesadata
                                         .net_netname(net)
                                         .ok_or_else(|| {
