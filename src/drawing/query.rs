@@ -219,30 +219,31 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         intersector: PrimitiveIndex,
         it: impl Iterator<Item = PrimitiveIndex> + 'a,
     ) -> impl Iterator<Item = Infringement> + 'a {
-        let conditions = intersector.primitive_ref(self).conditions();
+        let intersector_primitive = intersector.primitive_ref(self);
+        let conditions = intersector_primitive.conditions();
+        let intersector_shape = intersector_primitive.shape();
 
         it.filter_map(move |primitive_node| {
-            let infringee_conditions = primitive_node.primitive_ref(self).conditions();
+            let infringee_primitive = primitive_node.primitive_ref(self);
+            let infringee_conditions = infringee_primitive.conditions();
 
             let epsilon = 1.0;
-            let inflated_infringer_shape = intersector.primitive_ref(self).shape().inflate(match (
-                &conditions,
-                infringee_conditions,
-            ) {
-                (None, _) | (_, None) => return None,
-                (Some(lhs), Some(rhs)) => {
-                    let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
-                        return None;
-                    };
+            let inflated_infringer_shape =
+                intersector_shape.inflate(match (&conditions, infringee_conditions) {
+                    (None, _) | (_, None) => return None,
+                    (Some(lhs), Some(rhs)) => {
+                        let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
+                            return None;
+                        };
 
-                    // Note the epsilon comparison.
-                    // XXX: Epsilon is probably too large. But what should
-                    // it be exactly then?
-                    (clearance - epsilon).clamp(0.0, f64::INFINITY)
-                }
-            });
+                        // Note the epsilon comparison.
+                        // XXX: Epsilon is probably too large. But what should
+                        // it be exactly then?
+                        (clearance - epsilon).clamp(0.0, f64::INFINITY)
+                    }
+                });
 
-            let infringee_shape = primitive_node.primitive_ref(self).shape();
+            let infringee_shape = infringee_primitive.shape();
 
             inflated_infringer_shape
                 .intersects(&infringee_shape)
@@ -258,8 +259,9 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         &self,
         node: PrimitiveIndex,
     ) -> impl Iterator<Item = GenericNode<PrimitiveIndex, GenericIndex<CW>>> + '_ {
-        let limiting_shape = node.primitive_ref(self).shape().inflate(
-            node.primitive_ref(self)
+        let node_primitive = node.primitive_ref(self);
+        let limiting_shape = node_primitive.shape().inflate(
+            node_primitive
                 .maybe_net()
                 .map(|net| self.rules().largest_clearance(Some(net)))
                 .unwrap_or(0.0),
@@ -268,7 +270,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         self.recording_geometry_with_rtree()
             .rtree()
             .locate_in_envelope_intersecting(
-                &limiting_shape.envelope_3d(0.0, node.primitive_ref(self).layer()),
+                &limiting_shape.envelope_3d(0.0, node_primitive.layer()),
             )
             .map(|wrapper| wrapper.data)
     }
@@ -278,7 +280,9 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         collider: PrimitiveIndex,
         predicate: &impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> Option<Collision> {
-        let collider_shape = collider.primitive_ref(self).shape();
+        let collider_primitive = collider.primitive_ref(self);
+        let collider_shape = collider_primitive.shape();
+        let collider_layer = collider_primitive.layer();
 
         self.recording_geometry_with_rtree()
             .rtree()
@@ -303,11 +307,13 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             })
             .filter(|collidee| predicate(&self, collider, *collidee))
             .find_map(|collidee| {
-                if collider.primitive_ref(self).layer() != collidee.primitive_ref(self).layer() {
+                let collidee_primitive = collidee.primitive_ref(self);
+
+                if collider_layer != collidee_primitive.layer() {
                     return None;
                 }
 
-                let collidee_shape = collidee.primitive_ref(self).shape();
+                let collidee_shape = collidee_primitive.shape();
 
                 if collider_shape.intersects(&collidee_shape) {
                     Some(Collision(collider_shape, collidee_shape, collidee))

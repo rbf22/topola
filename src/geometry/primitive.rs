@@ -142,18 +142,82 @@ pub struct SegShape {
 
 impl SegShape {
     fn polygon(&self) -> Polygon {
+        let [p1, p2, p3, p4] = self.corners();
+
+        polygon![p1.0, p2.0, p3.0, p4.0]
+    }
+
+    /// The four corners of the segment's rectangular footprint, in the same
+    /// order as the exterior ring of [`SegShape::polygon`].
+    fn corners(&self) -> [Point; 4] {
         let tangent_vector = self.to - self.from;
         let tangent_vector_norm = Euclidean::distance(&tangent_vector, &point! {x: 0.0, y: 0.0});
         let unit_tangent_vector = tangent_vector / tangent_vector_norm;
 
         let normal = unit_tangent_vector.rotate_around_point(-90., point! {x: 0.0, y: 0.0});
 
-        let p1 = self.from - normal * (self.width / 2.);
-        let p2 = self.from + normal * (self.width / 2.);
-        let p3 = self.to + normal * (self.width / 2.);
-        let p4 = self.to - normal * (self.width / 2.);
+        [
+            self.from - normal * (self.width / 2.),
+            self.from + normal * (self.width / 2.),
+            self.to + normal * (self.width / 2.),
+            self.to - normal * (self.width / 2.),
+        ]
+    }
 
-        polygon![p1.0, p2.0, p3.0, p4.0]
+    /// The four edges of the segment's rectangular footprint, equivalent to
+    /// `self.polygon().exterior().lines()` but without allocating.
+    fn edges(&self) -> [Line; 4] {
+        let [p1, p2, p3, p4] = self.corners();
+
+        [
+            Line::new(p1, p2),
+            Line::new(p2, p3),
+            Line::new(p3, p4),
+            Line::new(p4, p1),
+        ]
+    }
+
+    /// Intersection test for the segments' rectangular footprints via the
+    /// separating axis theorem. Exactly equivalent to
+    /// `self.polygon().intersects(&other.polygon())` but without allocating.
+    fn rect_intersects_rect(&self, other: &SegShape) -> bool {
+        let axes = |seg: &SegShape| {
+            let tangent_vector = seg.to - seg.from;
+            let length = Euclidean::distance(&seg.to, &seg.from);
+            let unit_tangent_vector = tangent_vector / length;
+            let normal = unit_tangent_vector.rotate_around_point(-90., point! {x: 0.0, y: 0.0});
+            (unit_tangent_vector, normal, length / 2.0)
+        };
+
+        // Preserve the old code path for degenerate segments, where the
+        // polygon degenerates to NaN or a point.
+        if Euclidean::distance(&self.to, &self.from) == 0.0
+            || Euclidean::distance(&other.to, &other.from) == 0.0
+        {
+            return self.polygon().intersects(&other.polygon());
+        }
+
+        let center_a = (self.from + self.to) / 2.0;
+        let center_b = (other.from + other.to) / 2.0;
+        let delta = center_b - center_a;
+
+        let (t_a, n_a, hl_a) = axes(self);
+        let (t_b, n_b, hl_b) = axes(other);
+        let (hw_a, hw_b) = (self.width / 2.0, other.width / 2.0);
+
+        for axis in [t_a, n_a, t_b, n_b] {
+            let separation = (delta.x() * axis.x() + delta.y() * axis.y()).abs();
+            let extent_a = (t_a.x() * axis.x() + t_a.y() * axis.y()).abs() * hl_a
+                + hw_a * (n_a.x() * axis.x() + n_a.y() * axis.y()).abs();
+            let extent_b = (t_b.x() * axis.x() + t_b.y() * axis.y()).abs() * hl_b
+                + hw_b * (n_b.x() * axis.x() + n_b.y() * axis.y()).abs();
+
+            if separation > extent_a + extent_b {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Distance to the segment's rectangular footprint, computed in the
@@ -238,9 +302,9 @@ impl AccessPrimitiveShape for SegShape {
 
         match other {
             PrimitiveShape::Dot(..) => unreachable!(),
-            PrimitiveShape::Seg(other) => self.polygon().intersects(&other.polygon()),
+            PrimitiveShape::Seg(other) => self.rect_intersects_rect(other),
             PrimitiveShape::Bend(other) => {
-                for segment in self.polygon().exterior().lines() {
+                for segment in self.edges() {
                     let inner_circle = other.inner_circle();
                     let outer_circle = other.outer_circle();
 
@@ -497,6 +561,44 @@ mod tests {
                         actual,
                         expected,
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seg_rect_intersection_matches_polygon_intersection() {
+        let seg = SegShape {
+            from: point! {x: -3.0, y: -4.0},
+            to: point! {x: 5.0, y: 6.0},
+            width: 1.3,
+        };
+
+        // Sweep a second segment of varying orientation, width and position
+        // across the first, comparing the SAT result against polygon
+        // intersection at each position. The grid is dense enough to cross
+        // the touching boundary many times.
+        for angle_deg in (0..360).step_by(13) {
+            let angle = (angle_deg as f64).to_radians();
+            let dir = point! {x: angle.cos(), y: angle.sin()};
+            let other = SegShape {
+                from: dir * -4.5,
+                to: dir * 4.5,
+                width: 0.7,
+            };
+
+            for dx100 in (-1200..=1200).step_by(11) {
+                for dy100 in (-1200..=1200).step_by(11) {
+                    let offset = point! {x: dx100 as f64 / 100.0, y: dy100 as f64 / 100.0};
+                    let moved = SegShape {
+                        from: other.from + offset,
+                        to: other.to + offset,
+                        width: other.width,
+                    };
+
+                    let expected = seg.polygon().intersects(&moved.polygon());
+                    let actual = seg.rect_intersects_rect(&moved);
+                    assert_eq!(actual, expected, "seg {:?} other {:?}", seg, moved,);
                 }
             }
         }
