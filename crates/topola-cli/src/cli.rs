@@ -27,4 +27,19 @@ pub struct Cli {
         help = "JSON-like file with .cmd extension, containing sequence of available commands "
     )]
     pub commands: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "NETS",
+        value_delimiter = ',',
+        help = "Route only the named nets (comma-separated). By default, all pads on the first layer are selected"
+    )]
+    pub nets: Vec<String>,
+    #[arg(
+        long,
+        value_name = "NETS",
+        value_delimiter = ',',
+        conflicts_with = "nets",
+        help = "Route all nets except the named nets (comma-separated)"
+    )]
+    pub exclude_nets: Vec<String>,
 }

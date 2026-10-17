@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     board::{AccessMesadata, BandName, Board, ResolvedSelector},
-    drawing::graph::{MakePrimitiveRef, PrimitiveIndex},
+    drawing::graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
     geometry::{
         shape::{AccessShape, Shape},
         GenericNode, GetLayer,
@@ -85,6 +85,45 @@ impl PinSelection {
             if let Some(selector) = PinSelector::try_from_node(board, GenericNode::Primitive(node))
             {
                 this.0.insert(selector);
+            }
+        }
+
+        this
+    }
+
+    /// Selects all pins whose net is named in `netnames`.
+    pub fn new_select_nets(
+        board: &Board<impl AccessMesadata>,
+        netnames: &BTreeSet<String>,
+    ) -> Self {
+        Self::select_by_net_pred(board, |netname| netnames.contains(netname))
+    }
+
+    /// Selects all pins whose net is not named in `netnames`.
+    pub fn new_select_all_except_nets(
+        board: &Board<impl AccessMesadata>,
+        netnames: &BTreeSet<String>,
+    ) -> Self {
+        Self::select_by_net_pred(board, |netname| !netnames.contains(netname))
+    }
+
+    fn select_by_net_pred(board: &Board<impl AccessMesadata>, pred: impl Fn(&str) -> bool) -> Self {
+        let mut this = Self::default();
+
+        for primitive in board.layout().drawing().primitive_nodes() {
+            let maybe_netname = primitive
+                .primitive_ref(board.layout().drawing())
+                .maybe_net()
+                .and_then(|net| board.mesadata().net_netname(net));
+
+            if let Some(netname) = maybe_netname {
+                if pred(netname) {
+                    if let Some(selector) =
+                        PinSelector::try_from_node(board, GenericNode::Primitive(primitive))
+                    {
+                        this.0.insert(selector);
+                    }
+                }
             }
         }
 
