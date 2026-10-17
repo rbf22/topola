@@ -80,7 +80,8 @@ cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]
