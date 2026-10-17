@@ -52,9 +52,6 @@ impl PlanarAutorouteReconfigurer {
                 options,
             ),
         )
-        /*RatlinesPermuter::RatlineCuts(RatlineCutsRatlinePermuter::new(
-            autorouter, ratlines, presorter, options,
-        ))*/
     }
 }
 
@@ -231,72 +228,3 @@ impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReco
         })
     }
 }
-
-pub struct RatlineCutsPlanarAutorouteReconfigurer {
-    //sccs: Vec<Vec<NodeIndex<usize>>>,
-}
-
-/*impl RatlineCutsPlanarAutorouteReconfigurer {
-    pub fn new(
-        _autorouter: &mut Autorouter<impl AccessMesadata>,
-        _ratlines: Vec<RatlineUid>,
-        _presorter: SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer,
-        _options: &PlanarAutorouteOptions,
-    ) -> Self {
-        /*Self {
-            sccs: presorter.dissolve(),
-        }*/
-        Self {}
-    }
-}*/
-
-/*impl MakeNextPlanarAutorouteConfiguration for RatlineCutsPlanarAutorouteReconfigurer {
-    fn next_configuration(
-        &mut self,
-        autorouter: &mut Autorouter<impl AccessMesadata>,
-        stepper: &PlanarAutorouteExecutionStepper,
-    ) -> Option<Vec<RatlineUid>> {
-        let curr_ratline = stepper.configuration().ratlines[*stepper.curr_ratline_index()];
-        let terminating_dots = stepper
-            .configuration()
-            .terminating_dots
-            .get(&(curr_ratline,));
-        let bands_cut_by_ratline: Vec<_> = autorouter
-            .board()
-            .layout()
-            .bands_between_nodes(
-                terminating_dots
-                    .0
-                    .primitive_ref(autorouter.board().layout().drawing())
-                    .layer(),
-                GenericNode::Primitive(terminating_dots.0.into()),
-                GenericNode::Primitive(terminating_dots.1.into()),
-            )
-            .collect();
-
-        // Find the first ratline corresponding to a band that is cut.
-        let first_cut_ratline_index = stepper
-            .configuration()
-            .ratlines
-            .iter()
-            .position(|ratline| {
-                for (band_uid, _) in &bands_cut_by_ratline {
-                    if ratline.ref_(autorouter).band_termseg() == band_uid.0
-                        || ratline.ref_(autorouter).band_termseg() == band_uid.1
-                    {
-                        return true;
-                    }
-                }
-
-                false
-            })
-            .unwrap();
-
-        // Swap the first ratline corresponding to a band that is cut with the
-        // ratline that we have failed routing.
-        let mut ratlines = stepper.configuration().ratlines.clone();
-        ratlines.swap(*stepper.curr_ratline_index(), first_cut_ratline_index);
-
-        Some(ratlines)
-    }
-}*/

@@ -222,14 +222,6 @@ pub fn poly_ext_handover<I: Copy>(
     };
 
     // compute flow (direction toward which to shift the positions)
-    /*
-    let (flow_src, flow_trg) = match (source_sense, target_sense) {
-        (CoCw, CoCw) => (Cw, CoCw),
-        (Cw, CoCw) => (Cw, Cw),
-        (CoCw, Cw) => (CoCw, CoCw),
-        (Cw, Cw) => (CoCw, Cw),
-    };
-    */
     let (flow_src, flow_trg) = (inv_target_sense, source_sense);
 
     let mut modified = true;

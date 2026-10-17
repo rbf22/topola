@@ -162,13 +162,6 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         self.infringements_except(infringer, predicate).next()
     }
 
-    /*pub(super) fn infringements<'a>(
-        &'a self,
-        infringer: PrimitiveIndex,
-    ) -> impl Iterator<Item = Infringement> + 'a {
-        self.infringements_except(infringer, &|_, _, _| true)
-    }*/
-
     fn infringements_except<'a>(
         &'a self,
         infringer: PrimitiveIndex,
