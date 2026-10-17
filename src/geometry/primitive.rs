@@ -6,7 +6,7 @@ use std::f64::consts::TAU;
 
 use enum_dispatch::enum_dispatch;
 use geo::algorithm::line_measures::{Distance, Euclidean};
-use geo::{point, polygon, Contains, Intersects, Line, Point, Polygon, Rect, Rotate};
+use geo::{point, polygon, Contains, Intersects, Line, Point, Polygon, Rotate};
 use rstar::{RTreeObject, AABB};
 
 use crate::{
@@ -79,8 +79,8 @@ impl AccessShape for DotShape {
     }
 
     fn intersects_with_bbox(&self, bbox: &AABB<[f64; 2]>) -> bool {
-        let bbox = Rect::new(bbox.lower(), bbox.upper());
-        Euclidean::distance(&self.circle.pos, &bbox.to_polygon()) < self.circle.r
+        bbox.distance_2(&[self.circle.pos.x(), self.circle.pos.y()])
+            < self.circle.r * self.circle.r
     }
 }
 
@@ -109,7 +109,7 @@ impl AccessPrimitiveShape for DotShape {
                     < self.circle.r + other.circle.r
             }
             PrimitiveShape::Seg(other) => {
-                Euclidean::distance(&self.circle.pos, &other.polygon()) < self.circle.r
+                other.distance_to_point(self.circle.pos) < self.circle.r
             }
             PrimitiveShape::Bend(other) => {
                 for point in math::intersect_circles(&self.circle, &other.inner_circle()) {
@@ -157,6 +157,26 @@ impl SegShape {
         let p4 = self.to - normal * (self.width / 2.);
 
         polygon![p1.0, p2.0, p3.0, p4.0]
+    }
+
+    /// Distance to the segment's rectangular footprint, computed in the
+    /// segment's local frame where it is axis-aligned. This is exactly
+    /// `Euclidean::distance(pos, self.polygon())` but without materialising
+    /// the polygon.
+    fn distance_to_point(&self, p: Point) -> f64 {
+        let tangent = self.to - self.from;
+        let length = Euclidean::distance(&self.to, &self.from);
+
+        if length == 0.0 {
+            return Euclidean::distance(&p, &self.from);
+        }
+
+        let rel = p - self.from;
+        let along = (rel.x() * tangent.x() + rel.y() * tangent.y()) / length;
+        let perp = (-rel.x() * tangent.y() + rel.y() * tangent.x()) / length;
+        let d_along = along - along.clamp(0.0, length);
+        let d_perp = perp - perp.clamp(-self.width / 2., self.width / 2.);
+        (d_along * d_along + d_perp * d_perp).sqrt()
     }
 
     pub fn middle_line(&self) -> Line {
@@ -436,5 +456,52 @@ impl RTreeObject for PrimitiveShape {
     type Envelope = AABB<[f64; 2]>;
     fn envelope(&self) -> Self::Envelope {
         AccessShape::bbox(self, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use geo::algorithm::line_measures::{Distance, Euclidean};
+    use geo::point;
+
+    use super::*;
+
+    #[test]
+    fn seg_distance_to_point_matches_polygon_distance() {
+        let segs = [
+            SegShape {
+                from: point! {x: 0.0, y: 0.0},
+                to: point! {x: 10.0, y: 0.0},
+                width: 2.0,
+            },
+            SegShape {
+                from: point! {x: -3.0, y: -4.0},
+                to: point! {x: 5.0, y: 6.0},
+                width: 1.3,
+            },
+            SegShape {
+                from: point! {x: 7.0, y: 1.0},
+                to: point! {x: -2.0, y: -5.0},
+                width: 0.4,
+            },
+        ];
+
+        for seg in segs {
+            for x100 in (-800..=1200).step_by(7) {
+                for y100 in (-800..=800).step_by(7) {
+                    let p = point! {x: x100 as f64 / 100.0, y: y100 as f64 / 100.0};
+                    let expected = Euclidean::distance(&p, &seg.polygon());
+                    let actual = seg.distance_to_point(p);
+                    assert!(
+                        (actual - expected).abs() < 1e-9,
+                        "seg {:?} p {:?}: got {}, want {}",
+                        seg,
+                        p,
+                        actual,
+                        expected,
+                    );
+                }
+            }
+        }
     }
 }
