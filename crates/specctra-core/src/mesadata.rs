@@ -90,6 +90,14 @@ pub struct SpecctraMesadata {
     /// A map that associates network indices with their respective net class names.
     /// This is used to apply net class-specific routing rules to each net.
     net_netclass: BTreeMap<usize, String>,
+
+    // net -> clearance, resolved via net class (or structure rule) at load time
+    /// Net ids are dense indices assigned by `from_pcb`, so a flat vector gives
+    /// O(1) lookups on the collision-check hot path.
+    net_clearance: Vec<f64>,
+
+    /// Maximum clearance across all net class rules, computed once at load.
+    largest_clearance: f64,
 }
 
 impl SpecctraMesadata {
@@ -153,12 +161,32 @@ impl SpecctraMesadata {
                 .extend_from_slice(&rule.clearances);
         }
 
+        let structure_rule = SpecctraRule::from_dsn(&structure_rule);
+
+        let net_clearance = (0..net_netname.len())
+            .map(|net| {
+                net_netclass
+                    .get(&net)
+                    .and_then(|netclass| class_rules.get(netclass))
+                    .unwrap_or(&structure_rule)
+                    .clearance
+            })
+            .collect();
+
+        let largest_clearance = class_rules
+            .values()
+            .map(|rule| rule.clearance)
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+
         Self {
-            structure_rule: SpecctraRule::from_dsn(&structure_rule),
+            structure_rule,
             class_rules,
             layer_layername,
             net_netname,
             net_netclass,
+            net_clearance,
+            largest_clearance,
         }
     }
 
@@ -176,18 +204,21 @@ impl AccessRules for SpecctraMesadata {
             return None;
         }
 
-        let clearance1 = self.rule(conditions1.net).clearance;
-        let clearance2 = self.rule(conditions2.net).clearance;
+        let net_clearance = |net| {
+            self.net_clearance
+                .get(net)
+                .copied()
+                .unwrap_or(self.structure_rule.clearance)
+        };
 
-        Some(f64::max(clearance1, clearance2))
+        Some(f64::max(
+            net_clearance(conditions1.net),
+            net_clearance(conditions2.net),
+        ))
     }
 
     fn largest_clearance(&self, _maybe_net: Option<usize>) -> f64 {
-        self.class_rules
-            .values()
-            .map(|rule| rule.clearance)
-            .reduce(f64::max)
-            .unwrap_or(0.0)
+        self.largest_clearance
     }
 }
 
@@ -214,5 +245,96 @@ impl AccessMesadata for SpecctraMesadata {
 
     fn netname_net(&self, netname: &str) -> Option<usize> {
         self.net_netname.get_by_right(netname).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use crate::{
+        mesadata::{AccessMesadata, SpecctraMesadata},
+        read::ListTokenizer,
+        rules::{AccessRules, Conditions},
+        structure::DsnFile,
+    };
+
+    fn mesadata(dsn: &str) -> SpecctraMesadata {
+        let mut tokenizer = ListTokenizer::new(Cursor::new(dsn.as_bytes()));
+        let file: DsnFile = tokenizer.read_value().unwrap();
+        SpecctraMesadata::from_pcb(&file.pcb)
+    }
+
+    #[test]
+    fn clearance_uses_net_class_rules() {
+        let mesadata = mesadata(
+            r#"(pcb test
+                 (resolution um 10)
+                 (structure
+                   (layer F.Cu (type signal) (property (index 0)))
+                   (boundary (path pcb 0 0 0 1000 0 1000 1000 0 1000 0 0))
+                   (via "Via")
+                   (rule (width 100) (clearance 100)))
+                 (placement)
+                 (library)
+                 (network
+                   (net A (pins P-1))
+                   (net B (pins P-2))
+                   (net C (pins P-3))
+                   (class cls1 A B
+                     (circuit (use_via Via))
+                     (rule (width 200) (clearance 200)))
+                   (class cls2 ""
+                     (circuit (use_via Via))
+                     (rule (width 300) (clearance 300))))
+                 (wiring))"#,
+        );
+
+        let net = |netname| mesadata.netname_net(netname).unwrap();
+        let cond = |netname| Conditions {
+            net: net(netname),
+            maybe_region: None,
+            maybe_layer: Some(0),
+        };
+
+        // A and B share cls1's clearance; C is unclassed and falls back to the
+        // structure rule.
+        assert_eq!(
+            mesadata.clearance(&cond("A"), &cond("B")),
+            Some(200.0)
+        );
+        assert_eq!(
+            mesadata.clearance(&cond("A"), &cond("C")),
+            Some(200.0)
+        );
+        assert_eq!(
+            mesadata.clearance(&cond("C"), &cond("C")),
+            Some(100.0)
+        );
+
+        // Different layers never have a clearance constraint between them.
+        let other_layer = Conditions {
+            net: net("A"),
+            maybe_region: None,
+            maybe_layer: Some(1),
+        };
+        assert_eq!(mesadata.clearance(&cond("A"), &other_layer), None);
+
+        assert_eq!(mesadata.largest_clearance(Some(net("A"))), 300.0);
+        assert_eq!(mesadata.largest_clearance(None), 300.0);
+
+        // The cached per-net clearances must agree with the rule lookup they
+        // replace.
+        for net in 0..3 {
+            let cached = Conditions {
+                net,
+                maybe_region: None,
+                maybe_layer: Some(0),
+            };
+            assert_eq!(
+                mesadata.clearance(&cached, &cached),
+                Some(mesadata.rule(net).clearance),
+            );
+        }
     }
 }
