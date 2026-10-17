@@ -502,7 +502,13 @@ pub struct Class {
 
 #[derive(ReadDsn, WriteSes, Debug, Clone, PartialEq)]
 pub struct Circuit {
-    pub use_via: String,
+    pub use_via: UseVia,
+}
+
+#[derive(ReadDsn, WriteSes, Debug, Clone, PartialEq)]
+pub struct UseVia {
+    #[anon_vec]
+    pub names: Vec<String>,
 }
 
 #[derive(ReadDsn, WriteSes, Debug, Clone, PartialEq)]

@@ -138,6 +138,19 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
     /// This function is used to pass the [`Command`] to [`Invoker::execute_stepper`]
     /// function, and control its execution status.
     pub fn execute(&mut self, command: Command) -> Result<(), InvokerError> {
+        self.execute_with_progress(command, |_| {})
+    }
+
+    /// Executes a command, invoking `on_progress` after each step.
+    ///
+    /// The callback receives the ongoing [`ExecutionStepper`], from which a
+    /// progress estimate may be obtained via
+    /// [`EstimateProgress::estimate_progress`].
+    pub fn execute_with_progress(
+        &mut self,
+        command: Command,
+        mut on_progress: impl FnMut(&ExecutionStepper<M>),
+    ) -> Result<(), InvokerError> {
         let mut execute = self.execute_stepper(command)?;
 
         loop {
@@ -147,6 +160,8 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
                 self.history.set_undone(std::iter::empty());
                 return Ok(());
             }
+
+            on_progress(&execute);
         }
     }
 
