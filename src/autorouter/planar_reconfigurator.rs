@@ -41,6 +41,7 @@ pub struct PlanarAutorouteReconfigurator {
     /// Set by [`PlanarAutorouteReconfigurator::finish_early`] to prevent any
     /// further reconfiguration once early finishing is requested.
     finished: bool,
+    reconfiguration_count: usize,
 }
 
 impl PlanarAutorouteReconfigurator {
@@ -73,6 +74,7 @@ impl PlanarAutorouteReconfigurator {
             reconfigurer,
             options,
             finished: false,
+            reconfiguration_count: 0,
         })
     }
 
@@ -84,11 +86,21 @@ impl PlanarAutorouteReconfigurator {
         self.finished = true;
     }
 
+    /// Whether the number of reconfigurations has reached
+    /// [`PlanarAutorouteOptions::max_reconfigurations`]. Always `false` when
+    /// no limit is set.
+    fn reconfiguration_budget_exhausted(&self) -> bool {
+        self.options
+            .max_reconfigurations
+            .is_some_and(|max| self.reconfiguration_count >= max)
+    }
+
     fn reconfigure(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
     ) -> Result<ControlFlow<Option<BoardEdit>, PlanarAutorouteReconfiguratorStatus>, AutorouterError>
     {
+        self.reconfiguration_count += 1;
         self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
 
         loop {
@@ -127,7 +139,11 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                 .timeout
                 .update(*self.estimate_progress().subscale().value() as f64)
         {
-            return self.reconfigure(autorouter);
+            if self.reconfiguration_budget_exhausted() {
+                self.finish_early(autorouter);
+            } else {
+                return self.reconfigure(autorouter);
+            }
         }
 
         match self.stepper.step(autorouter) {
@@ -138,6 +154,13 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
             Err(err) => {
                 if self.finished || !self.options.permutate {
                     return Err(err);
+                }
+                if self.reconfiguration_budget_exhausted() {
+                    // Out of reconfiguration attempts: finish early, keeping
+                    // the bands routed so far instead of failing the whole
+                    // command.
+                    self.finish_early(autorouter);
+                    return self.step(autorouter);
                 }
                 self.reconfigure(autorouter)
             }

@@ -51,6 +51,11 @@ pub struct PlanarAutorouteOptions {
     pub permutate: bool,
     pub router: RouterOptions,
     pub timeout: TimeoutOptions,
+    /// Maximum number of reconfigurations (e.g. ratline order
+    /// permutations) before routing finishes early, keeping whatever has
+    /// been routed so far. `None` means no limit.
+    #[serde(default)]
+    pub max_reconfigurations: Option<usize>,
 }
 
 #[derive(Error, Debug, Clone)]

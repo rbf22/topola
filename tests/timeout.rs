@@ -30,6 +30,7 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
                 initial: 1.0,
                 progress_bonus: 0.005,
             },
+            max_reconfigurations: None,
         },
     )
 }
@@ -71,4 +72,49 @@ fn generous_timeout_completes_normally() {
 
     let (mut autorouter, ..) = invoker.dissolve();
     common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
+#[test]
+fn zero_reconfigurations_completes_normally() {
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+    let Command::Autoroute(selection, mut options) =
+        autoroute_command(invoker.autorouter().board())
+    else {
+        unreachable!()
+    };
+    options.max_reconfigurations = Some(0);
+
+    let timed_out = invoker
+        .execute_with_timeout(
+            Command::Autoroute(selection, options),
+            Some(Duration::from_secs(120)),
+            |_| {},
+        )
+        .unwrap();
+    assert!(!timed_out);
+
+    let (mut autorouter, ..) = invoker.dissolve();
+    common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
+#[test]
+fn planar_autoroute_options_deserialize_without_max_reconfigurations() {
+    // Older `.cmd` files do not carry `max_reconfigurations`.
+    let options: PlanarAutorouteOptions = serde_json::from_str(
+        r#"{
+            "principal_layer": 0,
+            "presort_by": "RatlineIntersectionCountAndLength",
+            "permutate": true,
+            "router": {
+                "wrap_around_bands": true,
+                "squeeze_through_under_bends": false,
+                "routed_band_width": 100.0
+            },
+            "timeout": {"initial": 1.0, "progress_bonus": 0.005}
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(options.max_reconfigurations, None);
 }

@@ -68,6 +68,7 @@ impl MenuBar {
                         initial: 1.0,
                         progress_bonus: 0.005,
                     },
+                    max_reconfigurations: None,
                 },
                 timeout: TimeoutOptions {
                     initial: 5.0,

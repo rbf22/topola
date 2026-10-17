@@ -85,6 +85,7 @@ fn main() -> Result<(), std::io::Error> {
                         initial: 1.0,
                         progress_bonus: 0.005,
                     },
+                    max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
                 },
             ),
             None,

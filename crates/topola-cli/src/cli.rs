@@ -48,4 +48,10 @@ pub struct Cli {
         help = "Finish routing early after this many seconds, keeping already routed bands"
     )]
     pub max_seconds: Option<f64>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Stop trying new route orderings after this many reconfigurations, keeping already routed bands"
+    )]
+    pub max_reconfigurations: Option<u64>,
 }
