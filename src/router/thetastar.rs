@@ -8,8 +8,9 @@
 // Petgraph's original copyright line is
 // Copyright (c) 2015
 
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::hash_map::Entry;
+use std::collections::{BinaryHeap, HashMap};
+use std::hash::Hash;
 
 use std::ops::{ControlFlow, Sub};
 
@@ -25,19 +26,19 @@ use crate::stepper::{EstimateProgress, LinearScale, Step};
 pub struct PathTracker<G>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
 {
-    predecessors: BTreeMap<G::NodeId, G::NodeId>,
+    predecessors: HashMap<G::NodeId, G::NodeId>,
 }
 
 impl<G> PathTracker<G>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
 {
     fn new() -> PathTracker<G> {
         PathTracker {
-            predecessors: BTreeMap::new(),
+            predecessors: HashMap::new(),
         }
     }
 
@@ -67,7 +68,7 @@ where
 pub trait ThetastarStrategy<G, K, R>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy,
 {
@@ -124,7 +125,7 @@ pub enum ThetastarState<N: Copy, E: Copy> {
 pub struct ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -134,9 +135,9 @@ where
     #[getter(skip)]
     frontier: BinaryHeap<MinScored<K, G::NodeId>>,
     /// Also known as the g-scores, or just g.
-    scores: BTreeMap<G::NodeId, K>,
+    scores: HashMap<G::NodeId, K>,
     /// Also known as the f-scores, or just f.
-    estimated_costs: BTreeMap<G::NodeId, K>,
+    estimated_costs: HashMap<G::NodeId, K>,
     #[getter(skip)]
     path_tracker: PathTracker<G>,
     // FIXME: To work around edge references borrowing from the graph we collect then reiterate over them.
@@ -159,7 +160,7 @@ pub enum ThetastarError {
 impl<G, K> ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -174,8 +175,8 @@ where
             state: ThetastarState::Scanning,
             graph,
             frontier: BinaryHeap::new(),
-            scores: BTreeMap::new(),
-            estimated_costs: BTreeMap::new(),
+            scores: HashMap::new(),
+            estimated_costs: HashMap::new(),
             path_tracker: PathTracker::<G>::new(),
             edge_ids: Vec::new(),
             progress_estimate_value: K::default(),
@@ -216,7 +217,7 @@ impl<G, K, R, S: ThetastarStrategy<G, K, R>>
     Step<S, (K, Vec<G::NodeId>, R), ThetastarState<G::NodeId, G::EdgeId>> for ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -259,7 +260,9 @@ where
                         }
                     }
 
-                    self.edge_ids = self.graph.edges(navnode).map(|edge| edge.id()).collect();
+                    self.edge_ids.clear();
+                    self.edge_ids
+                        .extend(self.graph.edges(navnode).map(|edge| edge.id()));
 
                     self.state = ThetastarState::VisitFrontierNavedge(navnode);
                 }
@@ -403,7 +406,7 @@ where
 impl<G, K> EstimateProgress for ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord,
+    G::NodeId: Eq + Ord + Hash,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {

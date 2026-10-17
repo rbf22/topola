@@ -40,7 +40,7 @@ use super::{
     RouterOptions,
 };
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NavnodeIndex(pub NodeIndex<usize>);
 
 impl core::fmt::Debug for NavnodeIndex {
