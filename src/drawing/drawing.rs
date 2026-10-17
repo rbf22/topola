@@ -8,7 +8,7 @@ use geo::{Point, Polygon};
 use petgraph::visit::Walker;
 
 use core::fmt;
-use rstar::{RTree, AABB};
+use rstar::AABB;
 use thiserror::Error;
 
 use crate::{
@@ -33,7 +33,7 @@ use crate::{
         edit::{ApplyGeometryEdit, GeometryEdit},
         primitive::PrimitiveShape,
         recording_with_rtree::RecordingGeometryWithRtree,
-        with_rtree::BboxedIndex,
+        with_rtree::GeometryRTree,
         AccessBendWeight, AccessDotWeight, AccessSegWeight, GenericNode, Geometry, GetLayer,
         GetOffset, GetSetPos, GetWidth,
     },
@@ -169,7 +169,7 @@ impl<CW, Cel, R> Drawing<CW, Cel, R> {
         self.recording_geometry_with_rtree.geometry()
     }
 
-    pub fn rtree(&self) -> &RTree<BboxedIndex<GenericNode<PrimitiveIndex, GenericIndex<CW>>>> {
+    pub fn rtree(&self) -> &GeometryRTree<PrimitiveIndex, CW> {
         self.recording_geometry_with_rtree.rtree()
     }
 

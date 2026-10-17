@@ -5,16 +5,14 @@
 use std::collections::btree_map::Entry as BTreeMapEntry;
 
 use geo::Point;
-use rstar::RTree;
 
 use crate::graph::{GenericIndex, GetIndex};
 
 use super::{
     compound::ManageCompounds,
     edit::{ApplyGeometryEdit, GeometryEdit},
-    with_rtree::{BboxedIndex, GeometryWithRtree},
-    AccessBendWeight, AccessDotWeight, AccessSegWeight, GenericNode, Geometry, GetLayer, GetWidth,
-    Retag,
+    with_rtree::{GeometryRTree, GeometryWithRtree},
+    AccessBendWeight, AccessDotWeight, AccessSegWeight, Geometry, GetLayer, GetWidth, Retag,
 };
 
 #[derive(Debug)]
@@ -39,7 +37,7 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
         self.geometry_with_rtree.geometry()
     }
 
-    pub fn rtree(&self) -> &RTree<BboxedIndex<GenericNode<PI, GenericIndex<CW>>>> {
+    pub fn rtree(&self) -> &GeometryRTree<PI, CW> {
         self.geometry_with_rtree.rtree()
     }
 

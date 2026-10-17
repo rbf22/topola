@@ -6,7 +6,10 @@ use contracts_try::debug_invariant;
 use derive_getters::Getters;
 use geo::Point;
 use petgraph::visit::Walker;
-use rstar::{primitives::GeomWithData, Envelope, RTree, RTreeObject, AABB};
+use rstar::{
+    primitives::GeomWithData, Envelope, RStarInsertionStrategy, RTree, RTreeObject, RTreeParams,
+    AABB,
+};
 
 use crate::{
     geometry::{
@@ -40,10 +43,28 @@ impl RTreeObject for Bbox {
 
 pub type BboxedIndex<I> = GeomWithData<Bbox, I>;
 
+/// Custom R-tree parameters for the geometry index. Compared to the defaults
+/// (MIN_SIZE 3, MAX_SIZE 6, REINSERTION_COUNT 2) these favour the router's
+/// remove+reinsert-heavy workload: larger nodes make a shallower tree, so
+/// each removal and insertion traverses less, while the lower reinsertion
+/// count reduces per-insert bookkeeping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TopolaRTreeParams;
+
+impl RTreeParams for TopolaRTreeParams {
+    const MIN_SIZE: usize = 5;
+    const MAX_SIZE: usize = 16;
+    const REINSERTION_COUNT: usize = 1;
+    type DefaultInsertionStrategy = RStarInsertionStrategy;
+}
+
+pub type GeometryRTree<PI, CW> =
+    RTree<BboxedIndex<GenericNode<PI, GenericIndex<CW>>>, TopolaRTreeParams>;
+
 #[derive(Debug, Getters)]
 pub struct GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> {
     geometry: Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
-    rtree: RTree<BboxedIndex<GenericNode<PI, GenericIndex<CW>>>>,
+    rtree: GeometryRTree<PI, CW>,
     layer_count: usize,
 }
 
@@ -85,7 +106,7 @@ impl<
     pub fn new(layer_count: usize) -> Self {
         Self {
             geometry: Geometry::new(),
-            rtree: RTree::new(),
+            rtree: RTree::new_with_params(),
             layer_count,
         }
     }
