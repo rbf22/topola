@@ -96,10 +96,12 @@ impl MultilayerPreconfigurer {
             return Some(ratline_endpoint_dot);
         }
 
+        // Anonymous endpoint dots (e.g. wire-end dots on partially routed
+        // boards) have no pin name, so no same-pin terminating dot exists on
+        // other layers.
         let pinname = autorouter
             .board()
-            .node_pinname(&GenericNode::Primitive(ratline_endpoint_dot.into()))
-            .unwrap();
+            .node_pinname(&GenericNode::Primitive(ratline_endpoint_dot.into()))?;
 
         autorouter.board().pinname_nodes(pinname).find_map(|node| {
             if let GenericNode::Primitive(PrimitiveIndex::FixedDot(dot)) = node {

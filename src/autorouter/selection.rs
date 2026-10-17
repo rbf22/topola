@@ -70,8 +70,70 @@ impl PinSelector {
     }
 }
 
+/// Serializable representation of [`PinSelection`]. The legacy form is a
+/// bare list of pin selectors, as emitted by older versions and `.cmd`
+/// files. The extended form also carries net names so that a node can be
+/// selected by its net, not only by pin name. This matters on partially
+/// routed boards, where ratline endpoints are anonymous wire-end dots
+/// without pin names.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PinSelectionRepr {
+    Legacy(BTreeSet<PinSelector>),
+    Extended {
+        pins: BTreeSet<PinSelector>,
+        #[serde(default)]
+        net_names: BTreeSet<String>,
+        #[serde(default)]
+        nets_excluded: bool,
+    },
+}
+
+impl From<PinSelection> for PinSelectionRepr {
+    fn from(selection: PinSelection) -> Self {
+        if selection.net_names.is_empty() && !selection.nets_excluded {
+            Self::Legacy(selection.pins)
+        } else {
+            Self::Extended {
+                pins: selection.pins,
+                net_names: selection.net_names,
+                nets_excluded: selection.nets_excluded,
+            }
+        }
+    }
+}
+
+impl From<PinSelectionRepr> for PinSelection {
+    fn from(repr: PinSelectionRepr) -> Self {
+        match repr {
+            PinSelectionRepr::Legacy(pins) => Self {
+                pins,
+                net_names: BTreeSet::new(),
+                nets_excluded: false,
+            },
+            PinSelectionRepr::Extended {
+                pins,
+                net_names,
+                nets_excluded,
+            } => Self {
+                pins,
+                net_names,
+                nets_excluded,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct PinSelection(pub BTreeSet<PinSelector>);
+#[serde(into = "PinSelectionRepr", from = "PinSelectionRepr")]
+pub struct PinSelection {
+    pub pins: BTreeSet<PinSelector>,
+    /// Nets whose nodes count as selected even when they do not match a
+    /// pin selector. When `nets_excluded` is set, nodes on all nets except
+    /// these are selected instead.
+    pub net_names: BTreeSet<String>,
+    pub nets_excluded: bool,
+}
 
 impl PinSelection {
     pub fn new() -> Self {
@@ -84,7 +146,7 @@ impl PinSelection {
         for node in board.layout().drawing().layer_primitive_nodes(layer) {
             if let Some(selector) = PinSelector::try_from_node(board, GenericNode::Primitive(node))
             {
-                this.0.insert(selector);
+                this.pins.insert(selector);
             }
         }
 
@@ -96,7 +158,9 @@ impl PinSelection {
         board: &Board<impl AccessMesadata>,
         netnames: &BTreeSet<String>,
     ) -> Self {
-        Self::select_by_net_pred(board, |netname| netnames.contains(netname))
+        let mut this = Self::select_by_net_pred(board, |netname| netnames.contains(netname));
+        this.net_names = netnames.clone();
+        this
     }
 
     /// Selects all pins whose net is not named in `netnames`.
@@ -104,7 +168,10 @@ impl PinSelection {
         board: &Board<impl AccessMesadata>,
         netnames: &BTreeSet<String>,
     ) -> Self {
-        Self::select_by_net_pred(board, |netname| !netnames.contains(netname))
+        let mut this = Self::select_by_net_pred(board, |netname| !netnames.contains(netname));
+        this.net_names = netnames.clone();
+        this.nets_excluded = true;
+        this
     }
 
     fn select_by_net_pred(board: &Board<impl AccessMesadata>, pred: impl Fn(&str) -> bool) -> Self {
@@ -121,7 +188,7 @@ impl PinSelection {
                     if let Some(selector) =
                         PinSelector::try_from_node(board, GenericNode::Primitive(primitive))
                     {
-                        this.0.insert(selector);
+                        this.pins.insert(selector);
                     }
                 }
             }
@@ -131,11 +198,30 @@ impl PinSelection {
     }
 
     pub fn contains_node(&self, board: &Board<impl AccessMesadata>, node: NodeIndex) -> bool {
-        PinSelector::try_from_node(board, node).is_some_and(|selector| self.0.contains(&selector))
+        // A node also counts as selected when its net is in `net_names` (or,
+        // when `nets_excluded`, outside of it). This makes net selections work
+        // on anonymous primitives, such as the wire-end dots that become
+        // ratline endpoints on partially routed boards.
+        if !self.net_names.is_empty() || self.nets_excluded {
+            if let NodeIndex::Primitive(primitive) = node {
+                let on_listed_net = primitive
+                    .primitive_ref(board.layout().drawing())
+                    .maybe_net()
+                    .and_then(|net| board.mesadata().net_netname(net))
+                    .is_some_and(|netname| self.net_names.contains(netname));
+
+                if on_listed_net != self.nets_excluded {
+                    return true;
+                }
+            }
+        }
+
+        PinSelector::try_from_node(board, node)
+            .is_some_and(|selector| self.pins.contains(&selector))
     }
 
     pub fn selectors(&self) -> impl Iterator<Item = &PinSelector> {
-        self.0.iter()
+        self.pins.iter()
     }
 }
 
@@ -297,7 +383,7 @@ impl Selection {
                 ResolvedSelector::Pin { pin_name, layer } => {
                     if let Some(x) = PinSelector::try_from_pin_and_layer_id(board, pin_name, layer)
                     {
-                        self.pin_selection.0.insert(x);
+                        self.pin_selection.pins.insert(x);
                     }
                 }
             }
@@ -306,7 +392,7 @@ impl Selection {
 
     pub fn select_at_node(&mut self, board: &Board<impl AccessMesadata>, node: NodeIndex) {
         if let Some(selector) = PinSelector::try_from_node(board, node) {
-            self.pin_selection.0.insert(selector);
+            self.pin_selection.pins.insert(selector);
         } else if let Some(selector) = BandSelector::try_from_node(board, node) {
             self.band_selection.0.insert(selector);
         }
@@ -314,10 +400,10 @@ impl Selection {
 
     pub fn toggle_at_node(&mut self, board: &Board<impl AccessMesadata>, node: NodeIndex) {
         if let Some(selector) = PinSelector::try_from_node(board, node) {
-            if self.pin_selection.0.contains(&selector) {
-                self.pin_selection.0.remove(&selector);
+            if self.pin_selection.pins.contains(&selector) {
+                self.pin_selection.pins.remove(&selector);
             } else {
-                self.pin_selection.0.insert(selector);
+                self.pin_selection.pins.insert(selector);
             }
         } else if let Some(selector) = BandSelector::try_from_node(board, node) {
             if self.band_selection.0.contains(&selector) {
@@ -336,7 +422,7 @@ impl Selection {
 
 impl<'a> core::ops::BitXorAssign<&'a Selection> for Selection {
     fn bitxor_assign(&mut self, rhs: &'a Selection) {
-        self.pin_selection.0 = &self.pin_selection.0 ^ &rhs.pin_selection.0;
+        self.pin_selection.pins = &self.pin_selection.pins ^ &rhs.pin_selection.pins;
         self.band_selection.0 = &self.band_selection.0 ^ &rhs.band_selection.0;
     }
 }

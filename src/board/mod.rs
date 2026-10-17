@@ -284,28 +284,34 @@ impl<M: AccessMesadata> Board<M> {
         target: FixedDotIndex,
         band: BandUid,
     ) -> bool {
-        let source_pinname = self
+        // Endpoint dots may be anonymous (e.g. wire-end dots on partially
+        // routed boards), in which case there is no pin-pair band name and
+        // the band is tracked by its endpoint pair only.
+        let ep = EtchedPath {
+            end_points: (source, target).into(),
+        };
+        let maybe_bandname = self
             .node_pinname(&GenericNode::Primitive(source.into()))
-            .unwrap()
-            .to_string();
-        let target_pinname = self
-            .node_pinname(&GenericNode::Primitive(target.into()))
-            .unwrap()
-            .to_string();
-        let bandname = BandName::from((source_pinname, target_pinname));
+            .zip(self.node_pinname(&GenericNode::Primitive(target.into())))
+            .map(|(source_pinname, target_pinname)| {
+                BandName::from((source_pinname.to_string(), target_pinname.to_string()))
+            });
 
-        if self.band_bandname.get_by_right(&bandname).is_some() {
+        let already_exists = match &maybe_bandname {
+            Some(bandname) => self.band_bandname.get_by_right(bandname).is_some(),
+            None => self.bands_by_id.get_by_left(&ep).is_some(),
+        };
+
+        if already_exists {
             false
         } else {
-            let ep = EtchedPath {
-                end_points: (source, target).into(),
-            };
-
             self.bands_by_id.insert(ep, band);
             recorder.bands_by_id.insert(ep, (None, Some(band)));
 
-            self.band_bandname.insert(band, bandname.clone());
-            recorder.bands_by_name.insert(bandname, (None, Some(band)));
+            if let Some(bandname) = maybe_bandname {
+                self.band_bandname.insert(band, bandname.clone());
+                recorder.bands_by_name.insert(bandname, (None, Some(band)));
+            }
 
             true
         }
@@ -316,13 +322,20 @@ impl<M: AccessMesadata> Board<M> {
         source: FixedDotIndex,
         target: FixedDotIndex,
     ) -> Option<BandUid> {
-        let source_pinname = self
+        if let Some((source_pinname, target_pinname)) = self
             .node_pinname(&GenericNode::Primitive(source.into()))
-            .unwrap();
-        let target_pinname = self
-            .node_pinname(&GenericNode::Primitive(target.into()))
-            .unwrap();
-        self.band_between_pins(source_pinname, target_pinname)
+            .zip(self.node_pinname(&GenericNode::Primitive(target.into())))
+        {
+            self.band_between_pins(source_pinname, target_pinname)
+        } else {
+            // Anonymous endpoint dots have no pin-pair band name, so look the
+            // band up by its endpoint pair directly.
+            self.bands_by_id
+                .get_by_left(&EtchedPath {
+                    end_points: (source, target).into(),
+                })
+                .copied()
+        }
     }
 
     /// Removes the band between the two nodes.
@@ -335,18 +348,19 @@ impl<M: AccessMesadata> Board<M> {
         let ep = EtchedPath {
             end_points: (source, target).into(),
         };
-        let source_pinname = self
+        let maybe_bandname = self
             .node_pinname(&GenericNode::Primitive(source.into()))
-            .unwrap()
-            .to_string();
-        let target_pinname = self
-            .node_pinname(&GenericNode::Primitive(target.into()))
-            .unwrap()
-            .to_string();
+            .zip(self.node_pinname(&GenericNode::Primitive(target.into())))
+            .map(|(source_pinname, target_pinname)| {
+                BandName::from((source_pinname.to_string(), target_pinname.to_string()))
+            });
+        let maybe_band = maybe_bandname
+            .as_ref()
+            .and_then(|bandname| self.band_bandname.get_by_right(bandname).cloned());
 
-        let bandname = BandName::from((source_pinname, target_pinname));
-        let maybe_band = self.band_bandname.get_by_right(&bandname).cloned();
-        self.band_bandname.remove_by_right(&bandname);
+        if let Some(bandname) = &maybe_bandname {
+            self.band_bandname.remove_by_right(bandname);
+        }
 
         if let Some((_, uid)) = self.bands_by_id.remove_by_left(&ep) {
             let (from, _) = uid.into();
@@ -362,7 +376,7 @@ impl<M: AccessMesadata> Board<M> {
             recorder
                 .board_data_edit
                 .bands_by_name
-                .insert(bandname, (Some(uid), None));
+                .insert(maybe_bandname.unwrap(), (Some(uid), None));
         }
 
         Ok(())
