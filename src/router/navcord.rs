@@ -22,13 +22,13 @@ use crate::{
         primitive::{GetLimbs, GetWeight, MakePrimitiveShape},
         rules::{AccessRules, Conditions},
         seg::SegIndex,
-        AlreadyConnected, Collision, Drawing, DrawingException,
+        AlreadyConnected, Collision, Drawing, DrawingException, Infringement,
     },
     geometry::{
         primitive::{AccessPrimitiveShape, BendShape, PrimitiveShape, SegShape},
         shape::{AccessShape, MeasureLength},
     },
-    graph::MakeRef,
+    graph::{GetIndex, MakeRef},
     layout::{Layout, LayoutEdit},
     math::{self, Circle, RotationSense},
 };
@@ -151,6 +151,78 @@ pub enum GhostReplay {
     Finish,
 }
 
+/// Whether `index` still names a live primitive on the board.
+///
+/// Memoized verdicts are proven against the ambient board state at
+/// record time, but merges, rip-ups and bow updates can remove or
+/// replace the primitives they refer to before the verdict is
+/// replayed — within the same attempt, and across attempts for
+/// retained search states (which are keyed by the board snapshot at
+/// dissolve time, not per entry). A dead reference proves the verdict
+/// was recorded under a different board, so it must be re-evaluated
+/// rather than replayed.
+fn primitive_live<R: AccessRules>(layout: &Layout<R>, index: PrimitiveIndex) -> bool {
+    layout.drawing().geometry().has_primitive(index.index())
+}
+
+fn drawing_exception_refs_live<R: AccessRules>(layout: &Layout<R>, err: &DrawingException) -> bool {
+    match err {
+        DrawingException::Infringement(Infringement(.., obstacle))
+        | DrawingException::Collision(Collision(.., obstacle)) => primitive_live(layout, *obstacle),
+        DrawingException::AlreadyConnected(AlreadyConnected(_, index)) => {
+            primitive_live(layout, *index)
+        }
+        DrawingException::NoTangents(..) => true,
+    }
+}
+
+fn draw_exception_refs_live<R: AccessRules>(layout: &Layout<R>, err: &DrawException) -> bool {
+    match err {
+        DrawException::CannotFinishIn(dot, inner) => {
+            primitive_live(layout, PrimitiveIndex::FixedDot(*dot))
+                && drawing_exception_refs_live(layout, inner)
+        }
+        DrawException::CannotWrapAround(gear, inner) => {
+            primitive_live(layout, (*gear).into()) && drawing_exception_refs_live(layout, inner)
+        }
+        DrawException::NoBitangents(..) => true,
+    }
+}
+
+fn navcorder_exception_refs_live<R: AccessRules>(
+    layout: &Layout<R>,
+    err: &NavcorderException,
+) -> bool {
+    match err {
+        NavcorderException::CannotDraw(err) => draw_exception_refs_live(layout, err),
+        NavcorderException::CannotWrap => true,
+    }
+}
+
+fn ghost_replay_refs_live<R: AccessRules>(layout: &Layout<R>, replay: &GhostReplay) -> bool {
+    match replay {
+        GhostReplay::Wrap(cane) => primitive_live(layout, cane.gear.into()),
+        GhostReplay::Finish => true,
+    }
+}
+
+impl ProbeMemoEntry {
+    /// Whether every primitive index the entry refers to still names a
+    /// live primitive — see `primitive_live` for why a dead reference
+    /// means the recorded verdict must be re-evaluated.
+    pub(crate) fn refs_live<R: AccessRules>(&self, layout: &Layout<R>) -> bool {
+        let verdict_live = match &self.verdict {
+            ProbeVerdict::Drawn { replay, .. } => ghost_replay_refs_live(layout, replay),
+            ProbeVerdict::Backtrackable | ProbeVerdict::Terminal => true,
+        };
+        verdict_live
+            && self
+                .obstacles
+                .iter()
+                .all(|&obstacle| primitive_live(layout, obstacle))
+    }
+}
+
 /// One cane step on the navcord's path: either kept purely virtually or
 /// materialized into the board.
 #[derive(Debug)]
@@ -234,6 +306,24 @@ impl NavcordSearchState {
     /// retained state is worth storing.
     pub fn entry_count(&self) -> usize {
         self.probe_memo.len() + self.step_memo.len()
+    }
+
+    /// Drops every memo entry referring to a primitive that no longer
+    /// exists. Such an entry was proven under a different ambient board
+    /// state than the one the state is stored under, and since hand-out
+    /// requires the current board to match that stored snapshot exactly,
+    /// the entry could never be validly replayed — pruning it now saves
+    /// the per-hit liveness checks later.
+    pub fn retain_live_refs<R: AccessRules>(&mut self, layout: &Layout<R>) {
+        self.step_memo.values_mut().for_each(|by_path| {
+            by_path.retain(|_, entry| match entry {
+                Ok((replay, _)) => ghost_replay_refs_live(layout, replay),
+                Err(err) => navcorder_exception_refs_live(layout, err),
+            })
+        });
+        self.probe_memo
+            .values_mut()
+            .for_each(|by_path| by_path.retain(|_, entry| entry.refs_live(layout)));
     }
 }
 
@@ -575,19 +665,32 @@ impl Navcord {
             .step_memo
             .get(&self.path_id())
             .and_then(|by_path| by_path.get(&(materialized, to)))
+            .cloned()
         {
-            crate::metrics::incr(&crate::metrics::METRICS.step_memo_hits);
-            return match entry.clone() {
-                Ok((replay, length)) => {
-                    match replay {
-                        GhostReplay::Wrap(cane) => self.canes.push(PathCane::Virtual(cane)),
-                        GhostReplay::Finish => self.virtual_finish = true,
-                    }
-                    self.push_path(to);
-                    Ok(length)
-                }
-                Err(err) => Err(err),
+            // A verdict recorded under a different ambient board state
+            // can embed dead primitive references; re-evaluate it.
+            let refs_live = match &entry {
+                Ok((replay, _)) => ghost_replay_refs_live(layout, replay),
+                Err(err) => navcorder_exception_refs_live(layout, err),
             };
+            if !refs_live {
+                self.step_memo
+                    .get_mut(&self.path_id())
+                    .map(|by_path| by_path.remove(&(materialized, to)));
+            } else {
+                crate::metrics::incr(&crate::metrics::METRICS.step_memo_hits);
+                return match entry {
+                    Ok((replay, length)) => {
+                        match replay {
+                            GhostReplay::Wrap(cane) => self.canes.push(PathCane::Virtual(cane)),
+                            GhostReplay::Finish => self.virtual_finish = true,
+                        }
+                        self.push_path(to);
+                        Ok(length)
+                    }
+                    Err(err) => Err(err),
+                };
+            }
         }
 
         let verdict = match self.ghost_step_to(layout, navmesh, to) {

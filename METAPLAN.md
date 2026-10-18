@@ -236,12 +236,36 @@ done). What remained was per-probe bookkeeping cost:
         entries) are dropped to bound memory; store holds ≤8 entries.
         Channel-probing deliberately stays off this path since its
         relaxed-rule verdicts would poison real routing.
+        `TOPOLA_NO_SEARCH_STATE=1` disables retention for A/B checks.
         Measured on candE (55s, `--multilayer --corridor-presort`):
         stored 92, **hits 1** — reconfiguration thrash rarely revisits
         an exact board state (navmesh hits 26/591). Sound and free
         when it fires, but marginal on candE. Remaining upside: finer-
         grained per-entry region invalidation would allow partial reuse
         under changed geometry — significant complexity, not done.
+- [x] D3-fix. **Memo staleness bug (latent pre-D3, exposed by
+        retention)**: memoized verdicts embed primitive indices (cane
+        gears, obstacle refs inside exceptions and probe-obstacle
+        lists) that are proven against the *ambient board state at
+        record time*. Merges, bow updates and rip-ups can remove those
+        primitives while the memo lives — a `step_memo` hit then
+        replayed a `Wrap` cane around a vacant bend slot and panicked
+        in `Geometry::joints` (deterministic 3s crash in
+        `test_astable_multivibrator` with retention on; bisected to
+        the D3 commit, but the within-attempt hole predates it —
+        retention only widened the replay window).
+        Fix: every memo-hit validates that all primitive indices the
+        verdict refers to still name live primitives
+        (`Geometry::has_primitive`); a dead reference means the verdict
+        was recorded under a different ambient state, so the entry is
+        evicted and re-evaluated. `NavcordSearchState::retain_live_refs`
+        additionally prunes already-dead entries at store time.
+        Residual: an entry whose refs all stay live can still replay a
+        verdict computed under different surroundings — worst case is
+        a wasted attempt, since `materialize` re-checks every cane
+        before committing it to the board.
+        Verified: `test_astable_multivibrator` passes with retention
+        enabled (122s); 46 lib + 28 unilayer + all multilayer tests.
 
 candE profile (50s window, `--multilayer`): step_to 24s of ~50s;
 inside it `infringe` 4.75M calls/14.2s with **70M candidates @ ~4.3s**,
@@ -318,9 +342,14 @@ precheck inside the candidate loop was tried and reverted — it added
         candE `--jobs 4` result: seeded workers reached 24 vs j0's
         preferred-layer 38 — less harmful than pure random but preferred
         layers still win on this board; seed 0 remains the candE recipe.
-        Within-SCC reordering/precedence from corridor conflicts is the
-        still-open piece (reactive blocker precedence already exists in
-        `PlanarReconfigurer`).
+        The planar within-SCC piece landed as a conflict-count tiebreak
+        under `--corridor-presort`: ratlines whose demand corridors pass
+        within one band width of rivals' (same-net pairs excluded — they
+        merge) are front-loaded among equally-obstructed ratlines.
+        Measured neutral on candE (corridor scores rarely tie; 38/107
+        unchanged both ways) — a scheduling signal available when ties
+        occur. Reactive blocker precedence remains in
+        `PlanarReconfigurer`.
 - [ ] G3. Wire relaxed-probe failure info into `--suggest-shifts` (already
         partially done) and into reconfiguration heuristics.
 
@@ -426,3 +455,26 @@ Follow-up unit coverage (post-fix):
   `skip_first` dropping the identity, and clone-forks-iteration (the
   A* expansion clones search nodes wholesale); plus a direct
   `next_permutation` lexicographic/exhaustion test.
+
+## Remaining stale-index hygiene — congestion keys
+
+`PlanarReconfigurer::congestion` used to count every reported
+obstacle, including loose band primitives. `obstacle_penalties()`
+filtered to fixed primitives, so loose counts were dead weight — but
+a *fixed* primitive added after a rip-up (via, fanout dot, escape
+stub) can recycle a freed loose slot, resurrecting the stale count as
+a misattributed penalty. Loose obstacles are now never inserted; the
+filter at penalty derivation is gone. (Loose obstacles still feed
+`band_of` → blocker precedence, resolved live at record time.)
+
+## CLI selection fix — `--multilayer` selects all layers
+
+`PinSelection::new_select_layer(board, 0)` was the CLI default for
+every command, so `--multilayer` boards only ever selected pins with
+a layer-0 pad — pins living solely on other layers were unroutable.
+`PinSelection::new_select_all` now backs the `--multilayer` default
+(both the single-invoker and `--jobs` paths); planar keeps layer 0.
+On candE this is a no-op (107 ratlines either way — every pin-named
+endpoint already resolves to a layer-0 dot); on astable it selects
+26 pins vs 6. Ratlines whose endpoints lack pin names remain
+reachable only via `--nets`.

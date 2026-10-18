@@ -273,6 +273,15 @@ fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
             nets.len()
         );
         selection
+    } else if args.multilayer {
+        // Multilayer routing can reach pads on any layer, so select
+        // all pins, not just the principal layer's.
+        let selection = PinSelection::new_select_all(&board);
+        eprintln!(
+            "[topola] selected {} pins across all layers",
+            selection.selectors().count()
+        );
+        selection
     } else {
         PinSelection::new_select_layer(&board, 0)
     }
@@ -393,6 +402,8 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                 } else if !exclude_nets.is_empty() {
                     let net_set: BTreeSet<String> = exclude_nets.iter().cloned().collect();
                     PinSelection::new_select_all_except_nets(&board, &net_set)
+                } else if multilayer {
+                    PinSelection::new_select_all(&board)
                 } else {
                     PinSelection::new_select_layer(&board, 0)
                 };

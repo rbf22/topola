@@ -127,27 +127,37 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
             .and_then(|by_path| by_path.get(&memo_key))
             .cloned()
         {
-            crate::metrics::incr(&crate::metrics::METRICS.probes_memoized);
-            self.probe_ghosts = entry.ghosts;
-            self.probe_obstacles = entry.obstacles;
+            // A verdict recorded under a different ambient board state
+            // can embed dead primitive references; evict it and fall
+            // through to a fresh evaluation below.
+            if !entry.refs_live(self.layout) {
+                self.navcord
+                    .probe_memo
+                    .get_mut(&self.navcord.path_id())
+                    .map(|by_path| by_path.remove(&memo_key));
+            } else {
+                crate::metrics::incr(&crate::metrics::METRICS.probes_memoized);
+                self.probe_ghosts = entry.ghosts;
+                self.probe_obstacles = entry.obstacles;
 
-            return match entry.verdict {
-                ProbeVerdict::Drawn { length, replay } => {
-                    // Replay the successful probe's virtual step so that
-                    // `.step_back(..)` undoes it, exactly as it would
-                    // undo a freshly evaluated probe.
-                    match replay {
-                        GhostReplay::Wrap(cane) => {
-                            self.navcord.canes.push(PathCane::Virtual(cane))
+                return match entry.verdict {
+                    ProbeVerdict::Drawn { length, replay } => {
+                        // Replay the successful probe's virtual step so that
+                        // `.step_back(..)` undoes it, exactly as it would
+                        // undo a freshly evaluated probe.
+                        match replay {
+                            GhostReplay::Wrap(cane) => {
+                                self.navcord.canes.push(PathCane::Virtual(cane))
+                            }
+                            GhostReplay::Finish => self.navcord.virtual_finish = true,
                         }
-                        GhostReplay::Finish => self.navcord.virtual_finish = true,
+                        self.navcord.push_path(probed_navnode);
+                        ControlFlow::Break(Some(length))
                     }
-                    self.navcord.push_path(probed_navnode);
-                    ControlFlow::Break(Some(length))
-                }
-                ProbeVerdict::Backtrackable => ControlFlow::Continue(()),
-                ProbeVerdict::Terminal => ControlFlow::Break(None),
-            };
+                    ProbeVerdict::Backtrackable => ControlFlow::Continue(()),
+                    ProbeVerdict::Terminal => ControlFlow::Break(None),
+                };
+            }
         }
 
         let ret = self.place_probe_to_navnode_intern(
@@ -218,9 +228,7 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
         // after, and all steps are evaluated virtually without drawing;
         // the virtual state `.step_to(..)` pushes is undone by the
         // following `.step_back(..)`.
-        let result = self
-            .navcord
-            .step_to(self.layout, navmesh, probed_navnode);
+        let result = self.navcord.step_to(self.layout, navmesh, probed_navnode);
 
         ControlFlow::Break(match result {
             Ok(probe_length) => Some(
@@ -264,12 +272,11 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
 
                     let drawing = self.layout.drawing();
                     let compounds = |binavnode: BinavnodeNodeIndex| -> Box<
-                        dyn Iterator<Item = (CompoundEntryLabel, GenericIndex<CompoundWeight>)> + '_,
+                        dyn Iterator<Item = (CompoundEntryLabel, GenericIndex<CompoundWeight>)>
+                            + '_,
                     > {
                         match binavnode {
-                            BinavnodeNodeIndex::FixedDot(dot) => {
-                                Box::new(drawing.compounds(dot))
-                            }
+                            BinavnodeNodeIndex::FixedDot(dot) => Box::new(drawing.compounds(dot)),
                             BinavnodeNodeIndex::FixedBend(_bend) => {
                                 todo!()
                             }

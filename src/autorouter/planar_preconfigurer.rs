@@ -6,8 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use derive_getters::{Dissolve, Getters};
 use enum_dispatch::enum_dispatch;
-use geo::algorithm::line_measures::{Distance, Euclidean};
+use geo::{
+    algorithm::line_measures::{Distance, Euclidean},
+    Line,
+};
 use petgraph::algo::tarjan_scc;
+use rstar::{
+    primitives::{GeomWithData, Rectangle},
+    RTree, RTreeObject,
+};
 use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
@@ -69,6 +76,12 @@ pub struct SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
     /// constrained ratlines route first, claiming contested channels
     /// before other bands wall them in. Empty otherwise.
     corridor_scores: BTreeMap<RatlineUid, f64>,
+    /// Per-ratline demand-corridor conflict counts: how many other
+    /// ratlines' corridors pass within one band width. Among equally
+    /// obstructed ratlines the more-conflicted one claims the channel
+    /// first. Computed together with `corridor_scores` — empty
+    /// otherwise.
+    conflict_scores: BTreeMap<RatlineUid, f64>,
     /// Seed for a deterministic within-SCC ratline shuffle; `0` keeps
     /// the deterministic ordering. Parallel exploration runs give each
     /// attempt a different seed so they traverse different ordering
@@ -109,30 +122,28 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
         });
 
         let escape_scores = if options.presort_by == PresortBy::RatlineEscapeDensity {
-            Self::compute_escape_scores(
-                autorouter,
-                &input,
-                20.0 * options.router.routed_band_width,
-            )
+            Self::compute_escape_scores(autorouter, &input, 20.0 * options.router.routed_band_width)
         } else {
             BTreeMap::new()
         };
 
-        let corridor_scores = if options.presort_by == PresortBy::RatlineCorridorCongestion {
-            Self::compute_corridor_scores(
-                autorouter,
-                &input,
-                options.principal_layer,
-                options.router.routed_band_width,
-            )
-        } else {
-            BTreeMap::new()
-        };
+        let (corridor_scores, conflict_scores) =
+            if options.presort_by == PresortBy::RatlineCorridorCongestion {
+                Self::compute_corridor_scores(
+                    autorouter,
+                    &input,
+                    options.principal_layer,
+                    options.router.routed_band_width,
+                )
+            } else {
+                (BTreeMap::new(), BTreeMap::new())
+            };
 
         Self {
             sccs,
             escape_scores,
             corridor_scores,
+            conflict_scores,
             shuffle_seed: options.shuffle_seed,
         }
     }
@@ -144,35 +155,89 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
 
     /// Counts, for each ratline, the primitives that would infringe the
     /// straight origin→destination corridor at routing clearances: a
-    /// direct measure of how blocked the ratline's shortest path is.
-    /// Same-net primitives and loose dots are already excluded by the
-    /// infringement pipeline, so a ratline's own endpoints don't count.
+    /// direct measure of how blocked the ratline's shortest path is —
+    /// plus how many other ratlines' demand corridors come within one
+    /// band width of it, a conflict signal for scheduling contested
+    /// channels first. Same-net primitives and loose dots are already
+    /// excluded by the infringement pipeline, so a ratline's own
+    /// endpoints don't count; same-net corridor pairs are excluded
+    /// from conflicts because their bands merge rather than compete.
     fn compute_corridor_scores(
         autorouter: &Autorouter<impl AccessMesadata>,
         input: &PlanarAutoroutePreconfigurerInput,
         layer: usize,
         width: f64,
-    ) -> BTreeMap<RatlineUid, f64> {
+    ) -> (BTreeMap<RatlineUid, f64>, BTreeMap<RatlineUid, f64>) {
         let drawing = autorouter.board().layout().drawing();
-        input
+        let corridors: Vec<_> = input
             .ratlines
             .iter()
             .map(|ratline| {
                 let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+                let from = origin.primitive_ref(drawing).shape().center();
+                let to = destination.primitive_ref(drawing).shape().center();
+                (
+                    *ratline,
+                    Line::new(from, to),
+                    origin.primitive_ref(drawing).maybe_net(),
+                )
+            })
+            .collect();
+
+        let scores = corridors
+            .iter()
+            .map(|(ratline, line, maybe_net)| {
                 let corridor = PrimitiveShape::Seg(SegShape {
-                    from: origin.primitive_ref(drawing).shape().center(),
-                    to: destination.primitive_ref(drawing).shape().center(),
+                    from: line.start_point(),
+                    to: line.end_point(),
                     width,
                 });
-                let maybe_net = origin.primitive_ref(drawing).maybe_net();
                 (
                     *ratline,
                     drawing
-                        .infringements_of_shape(corridor, layer, maybe_net, &|_, _| true)
+                        .infringements_of_shape(corridor, layer, *maybe_net, &|_, _| true)
                         .count() as f64,
                 )
             })
-            .collect()
+            .collect();
+
+        // Envelope-pruned corridor pairs conflict when the lines come
+        // within one band width: two bands cannot both fit there.
+        let margin = width;
+        let envelope_of = |line: &Line<f64>| {
+            let envelope = rstar::AABB::from_points([&line.start_point(), &line.end_point()]);
+            let (l, u) = (envelope.lower(), envelope.upper());
+            Rectangle::from_corners(
+                geo::Point::new(l.x() - margin, l.y() - margin),
+                geo::Point::new(u.x() + margin, u.y() + margin),
+            )
+        };
+        let envelopes: Vec<Rectangle<geo::Point<f64>>> = corridors
+            .iter()
+            .map(|(_, line, _)| envelope_of(line))
+            .collect();
+        let tree = RTree::bulk_load(
+            envelopes
+                .iter()
+                .enumerate()
+                .map(|(i, envelope)| GeomWithData::new(*envelope, i))
+                .collect(),
+        );
+
+        let mut conflicts = BTreeMap::new();
+        for (i, (ratline, line, maybe_net)) in corridors.iter().enumerate() {
+            let mut count = 0.0;
+            for hit in tree.locate_in_envelope_intersecting(&envelopes[i].envelope()) {
+                let j = hit.data;
+                let same_net = maybe_net.is_some() && *maybe_net == corridors[j].2;
+                if j != i && !same_net && Euclidean::distance(&*line, &corridors[j].1) < margin {
+                    count += 1.0;
+                }
+            }
+            conflicts.insert(*ratline, count);
+        }
+
+        (scores, conflicts)
     }
 
     /// Counts, for each ratline, the number of ratline endpoints
@@ -257,14 +322,23 @@ impl PreconfigurePlanarAutoroute for SccIntersectionsAndLengthRatlinePlanarAutor
             // Constraint-first ordering: the ratline whose corridor is
             // most blocked (or, for escape ordering, whose most-crowded
             // endpoint is densest) routes first, while its corridors
-            // are still open. Corridor congestion dominates; escape
-            // density breaks ties.
+            // are still open. Corridor congestion dominates; among
+            // equally blocked ratlines the one whose corridor conflicts
+            // with more rivals claims the contested channel first;
+            // escape density breaks remaining ties.
             scc_ratlines.sort_by(|a, b| {
                 self.corridor_scores
                     .get(b)
                     .copied()
                     .unwrap_or(0.0)
                     .total_cmp(&self.corridor_scores.get(a).copied().unwrap_or(0.0))
+                    .then(
+                        self.conflict_scores
+                            .get(b)
+                            .copied()
+                            .unwrap_or(0.0)
+                            .total_cmp(&self.conflict_scores.get(a).copied().unwrap_or(0.0)),
+                    )
                     .then(
                         self.escape_scores
                             .get(b)

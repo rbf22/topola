@@ -292,7 +292,8 @@ impl SccPermutationsPlanarAutorouteReconfigurer {
     ) -> Self {
         // TODO: Instead of instantiating presorter again here, get it from
         // an argument.
-        let (sccs, _escape_scores, _corridor_scores, _shuffle_seed) = presorter.dissolve();
+        let (sccs, _escape_scores, _corridor_scores, _conflict_scores, _shuffle_seed) =
+            presorter.dissolve();
 
         Self {
             configuration_search: Astar::new(SccSearchNode::new(sccs)),
@@ -549,7 +550,18 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
 
         for obstacle in obstacles {
-            *self.congestion.entry(obstacle).or_insert(0) += 1;
+            // Only fixed primitives are counted: loose indices are
+            // recycled as bands are undone and redrawn (and can even be
+            // reused by later fixed additions), so a loose key could
+            // outlive the geometry it named and misattribute the count.
+            if matches!(
+                obstacle,
+                PrimitiveIndex::FixedDot(_)
+                    | PrimitiveIndex::FixedSeg(_)
+                    | PrimitiveIndex::FixedBend(_)
+            ) {
+                *self.congestion.entry(obstacle).or_insert(0) += 1;
+            }
 
             let Some(blocker) = band_of.get(&obstacle).copied() else {
                 continue;
@@ -678,21 +690,13 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         ratlines
     }
 
-    /// Congestion costs translated to path penalties. Only fixed
-    /// primitives are penalized: loose indices are recycled as bands
-    /// are undone and redrawn, so penalizing them could hit unrelated
-    /// geometry.
+    /// Congestion costs translated to path penalties. `congestion`
+    /// only ever holds fixed primitives — loose indices are recycled
+    /// as bands are undone and redrawn, so penalizing them could hit
+    /// unrelated geometry.
     fn obstacle_penalties(&self) -> BTreeMap<PrimitiveIndex, f64> {
         self.congestion
             .iter()
-            .filter(|(primitive, _)| {
-                matches!(
-                    primitive,
-                    PrimitiveIndex::FixedDot(_)
-                        | PrimitiveIndex::FixedSeg(_)
-                        | PrimitiveIndex::FixedBend(_)
-                )
-            })
             .map(|(primitive, count)| (*primitive, *count as f64 * self.options.congestion_penalty))
             .collect()
     }

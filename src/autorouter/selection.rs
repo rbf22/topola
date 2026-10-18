@@ -153,6 +153,22 @@ impl PinSelection {
         this
     }
 
+    /// Selects every pin on every layer — the right default for
+    /// multilayer routing, where pads need not live on the principal
+    /// layer.
+    pub fn new_select_all(board: &Board<impl AccessMesadata>) -> Self {
+        let mut this = Self::default();
+
+        for node in board.layout().drawing().primitive_nodes() {
+            if let Some(selector) = PinSelector::try_from_node(board, GenericNode::Primitive(node))
+            {
+                this.pins.insert(selector);
+            }
+        }
+
+        this
+    }
+
     /// Selects all pins whose net is named in `netnames`.
     pub fn new_select_nets(
         board: &Board<impl AccessMesadata>,
@@ -424,5 +440,35 @@ impl<'a> core::ops::BitXorAssign<&'a Selection> for Selection {
     fn bitxor_assign(&mut self, rhs: &'a Selection) {
         self.pin_selection.pins = &self.pin_selection.pins ^ &rhs.pin_selection.pins;
         self.band_selection.0 = &self.band_selection.0 ^ &rhs.band_selection.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader};
+
+    use super::*;
+    use crate::{board::edit::BoardEdit, specctra::design::SpecctraDesign};
+
+    #[test]
+    fn select_all_covers_every_layer() {
+        let file =
+            File::open("tests/multilayer/astable_multivibrator/astable_multivibrator.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(file)).unwrap();
+        let board = design.make_board(&mut BoardEdit::new());
+
+        let layer0 = PinSelection::new_select_layer(&board, 0);
+        let all = PinSelection::new_select_all(&board);
+
+        eprintln!(
+            "layer0: {} selectors, all: {} selectors",
+            layer0.selectors().count(),
+            all.selectors().count()
+        );
+        assert!(all.selectors().count() >= layer0.selectors().count());
+        // Every layer-0 selector is also in the all-layers selection.
+        for sel in layer0.selectors() {
+            assert!(all.pins.contains(sel));
+        }
     }
 }

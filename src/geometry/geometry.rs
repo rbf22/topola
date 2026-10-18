@@ -145,6 +145,19 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
         self.graph.node_count()
     }
 
+    /// Whether `index` still holds a primitive — false when the slot is
+    /// vacant or was recycled by a compound node. Memoized verdicts
+    /// embed primitive indices recorded under the ambient board state
+    /// at the time; merges, rip-ups and bow updates can remove or
+    /// replace them, so a dead index means the verdict must be
+    /// re-evaluated rather than replayed.
+    pub fn has_primitive(&self, index: usize) -> bool {
+        matches!(
+            self.graph.node_weight(index.into()),
+            Some(GenericNode::Primitive(_))
+        )
+    }
+
     pub fn primitive_weight(&self, index: usize) -> PW
     where
         PW: Copy,

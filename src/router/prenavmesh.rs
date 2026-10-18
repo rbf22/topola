@@ -857,11 +857,19 @@ impl PrenavmeshBases {
         origin: FixedDotIndex,
         destination: FixedDotIndex,
         options: RouterOptions,
-        state: NavcordSearchState,
+        mut state: NavcordSearchState,
     ) {
+        if std::env::var_os("TOPOLA_NO_SEARCH_STATE").is_some() {
+            return;
+        }
         if state.entry_count() > SEARCH_STATE_MEMO_CAP {
             return;
         }
+        // Entries whose primitive references already died during the
+        // attempt were proven under a different ambient board state
+        // than the snapshot this state is stored under; they could
+        // never be validly replayed, so prune them now.
+        state.retain_live_refs(layout);
         let (key, snapshot) = Self::navmesh_key_and_snapshot(layout, origin, destination, options);
         if let Some(pos) = self
             .search_states
