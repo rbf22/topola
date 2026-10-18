@@ -69,9 +69,11 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
-                    "reconfiguration: surgical_ripups {}, multilayer_surgical_reconfigures {}",
+                    "reconfiguration: surgical_ripups {}, multilayer_surgical_reconfigures {}, search_states stored {} hits {}",
                     self.surgical_ripups.load(Ordering::Relaxed),
                     self.multilayer_surgical_reconfigures.load(Ordering::Relaxed),
+                    self.search_state_stores.load(Ordering::Relaxed),
+                    self.search_state_hits.load(Ordering::Relaxed),
                 )?;
                 writeln!(
                     f,
@@ -160,6 +162,8 @@ metrics_struct!(
     // Reconfiguration
     surgical_ripups,
     multilayer_surgical_reconfigures,
+    search_state_stores,
+    search_state_hits,
     // Geometry draw/undraw — the suspected hot path
     step_to_ok,
     step_to_err,

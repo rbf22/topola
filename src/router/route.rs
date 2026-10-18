@@ -13,7 +13,7 @@ use crate::{
     geometry::primitive::PrimitiveShape,
     layout::LayoutEdit,
     router::{
-        navcord::Navcord,
+        navcord::{Navcord, NavcordSearchState},
         navcorder::Navcorder,
         navmesh::{Navmesh, NavmeshError},
         thetastar::{ThetastarError, ThetastarStepper},
@@ -76,6 +76,15 @@ impl RouteStepper {
     /// obstacles steers retries toward alternate corridors.
     pub fn set_obstacle_penalties(&mut self, penalties: BTreeMap<PrimitiveIndex, f64>) {
         self.obstacle_penalties = penalties;
+    }
+
+    /// Installs a search state retained from a dissolved route attempt
+    /// on the same ratline, letting this attempt hit the previous
+    /// probe/step memo tables instead of re-evaluating them. Only
+    /// sound when the board is provably identical — the caller proves
+    /// this via the whole-navmesh cache's exact snapshot match.
+    pub fn restore_search_state(&mut self, state: NavcordSearchState) {
+        self.navcord.restore_search_state(state);
     }
 }
 

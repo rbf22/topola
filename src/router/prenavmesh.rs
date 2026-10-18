@@ -27,7 +27,7 @@ use crate::{
     triangulation::{GetTrianvertexNodeIndex, Triangulation},
 };
 
-use super::{navmesh::NavmeshError, RouterOptions};
+use super::{navcord::NavcordSearchState, navmesh::NavmeshError, RouterOptions};
 
 /// Prenavmesh nodes are the vertices of constrained Delaunay triangulation
 /// before it is converted to the navmesh, which is done by multiplying each
@@ -148,7 +148,11 @@ impl PrenavmeshConstraint {
             )
         };
         let (a, b) = (endpoint(&self.0), endpoint(&self.1));
-        if a <= b { (a, b) } else { (b, a) }
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
     }
 }
 
@@ -230,8 +234,7 @@ impl Prenavmesh {
         layer: usize,
     ) -> Result<PrenavmeshTriangulation, spade::InsertionError> {
         crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_base_builds);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.prenavmesh_base_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.prenavmesh_base_nanos);
 
         let mut vertices = vec![];
 
@@ -418,10 +421,8 @@ impl Prenavmesh {
     ) -> Result<(), InsertionError> {
         self.triangulation
             .add_vertex(PrenavmeshWeight::new_from_fixed_dot(layout, origin))?;
-        self.triangulation.add_vertex(PrenavmeshWeight::new_from_fixed_dot(
-            layout,
-            destination,
-        ))?;
+        self.triangulation
+            .add_vertex(PrenavmeshWeight::new_from_fixed_dot(layout, destination))?;
         Ok(())
     }
 
@@ -580,7 +581,12 @@ impl Prenavmesh {
 enum LooseSig {
     Dot(crate::drawing::graph::PrimitiveWeight),
     Seg(crate::drawing::graph::PrimitiveWeight, usize, usize),
-    Bend(crate::drawing::graph::PrimitiveWeight, usize, usize, Option<usize>),
+    Bend(
+        crate::drawing::graph::PrimitiveWeight,
+        usize,
+        usize,
+        Option<usize>,
+    ),
 }
 
 type LooseSnapshot = BTreeMap<PrimitiveIndex, LooseSig>;
@@ -653,25 +659,27 @@ struct PrenavmeshBase {
 /// A fully built navmesh kept for reuse while the board state it was
 /// built against can still be proven identical.
 struct CachedNavmesh {
-    /// `(net, layer, origin, destination, fixed fingerprint, options)`.
-    /// The options are folded in because they affect navnode
-    /// generation (`squeeze_through_under_bends` adds navnodes).
-    key: (
-        Option<usize>,
-        usize,
-        FixedDotIndex,
-        FixedDotIndex,
-        u64,
-        u64,
-        bool,
-        bool,
-    ),
+    key: NavmeshKey,
     /// Every loose primitive's identity at build time. Reuse requires
     /// exact equality — index, weight and linkage alike — which undo
     /// restores bit-for-bit, so backtraces hit legitimately.
     snapshot: LooseSnapshot,
     navmesh: super::navmesh::Navmesh,
 }
+
+/// `(net, layer, origin, destination, fixed fingerprint, options)`.
+/// The options are folded in because they affect navnode generation
+/// (`squeeze_through_under_bends` adds navnodes).
+type NavmeshKey = (
+    Option<usize>,
+    usize,
+    FixedDotIndex,
+    FixedDotIndex,
+    u64,
+    u64,
+    bool,
+    bool,
+);
 
 /// Cache of prenavmesh bases keyed by `(net, layer)`. The vertex
 /// triangulation only depends on the board's fixed primitives and is
@@ -684,6 +692,13 @@ pub struct PrenavmeshBases {
     /// Reusable whole navmeshes, MRU last. Bounded because each navmesh
     /// carries a whole search graph.
     navmeshes: Vec<CachedNavmesh>,
+    /// Navcord search states (probe/step memos and the path interner
+    /// they key into) retained from dissolved route attempts, MRU
+    /// last. A stored state is only handed out when both the navmesh
+    /// key and the loose-primitive snapshot match exactly — the same
+    /// proof the whole-navmesh cache relies on — so memos recorded
+    /// under one board state can never leak into another.
+    search_states: Vec<(NavmeshKey, LooseSnapshot, NavcordSearchState)>,
 }
 
 /// Bounds the number of constrained bases kept per `(net, layer)`.
@@ -693,12 +708,47 @@ const CONSTRAINED_CACHE_CAP: usize = 16;
 /// search graph proportional to the board.
 const NAVMESH_CACHE_CAP: usize = 32;
 
+/// Bounds the number of retained navcord search states; each carries
+/// full memo tables.
+const SEARCH_STATE_CAP: usize = 8;
+
+/// Skips storing search states whose memo tables have grown large —
+/// the table copies dominate memory and a near-full table hits little
+/// new work anyway.
+const SEARCH_STATE_MEMO_CAP: usize = 300_000;
+
 impl PrenavmeshBases {
     /// Drops every cached base. Only needed after edits that can change
     /// fixed-primitive geometry or nets — never happens while routing.
     pub fn clear(&mut self) {
         self.map.clear();
         self.navmeshes.clear();
+        self.search_states.clear();
+    }
+
+    /// The cache key plus the layer's loose-primitive snapshot that a
+    /// navmesh (or a retained search state) is keyed and validated by.
+    fn navmesh_key_and_snapshot(
+        layout: &Layout<impl AccessRules>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+        options: RouterOptions,
+    ) -> (NavmeshKey, LooseSnapshot) {
+        let origin_primitive = origin.primitive_ref(layout.drawing());
+        let (maybe_net, layer) = (origin_primitive.maybe_net(), origin_primitive.layer());
+        (
+            (
+                maybe_net,
+                layer,
+                origin,
+                destination,
+                Prenavmesh::fixed_fingerprint(layout, layer),
+                options.routed_band_width.to_bits(),
+                options.wrap_around_bands,
+                options.squeeze_through_under_bends,
+            ),
+            loose_snapshot(layout, layer),
+        )
     }
 
     /// Builds a navmesh for the `origin`–`destination` ratline, reusing
@@ -712,19 +762,40 @@ impl PrenavmeshBases {
         destination: FixedDotIndex,
         options: RouterOptions,
     ) -> Result<super::navmesh::Navmesh, NavmeshError> {
+        self.navmesh_in(layout, origin, destination, options, false)
+            .map(|(navmesh, _)| navmesh)
+    }
+
+    /// Like [`Self::navmesh`], but additionally returns the retained
+    /// search state of a dissolved route attempt on the same ratline
+    /// under the same board state. The hand-out requires the exact
+    /// `(key, snapshot)` match the whole-navmesh cache uses, so the
+    /// memo verdicts it carries are provably still true.
+    ///
+    /// Only the real routing path may call this: probe verdicts are
+    /// clearance-dependent, so memos recorded under relaxed rules
+    /// (channel probing) would be wrong here.
+    pub fn navmesh_and_search_state(
+        &mut self,
+        layout: &Layout<impl AccessRules>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+        options: RouterOptions,
+    ) -> Result<(super::navmesh::Navmesh, Option<NavcordSearchState>), NavmeshError> {
+        self.navmesh_in(layout, origin, destination, options, true)
+    }
+
+    fn navmesh_in(
+        &mut self,
+        layout: &Layout<impl AccessRules>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+        options: RouterOptions,
+        take_state: bool,
+    ) -> Result<(super::navmesh::Navmesh, Option<NavcordSearchState>), NavmeshError> {
         let origin_primitive = origin.primitive_ref(layout.drawing());
         let (maybe_net, layer) = (origin_primitive.maybe_net(), origin_primitive.layer());
-        let snapshot = loose_snapshot(layout, layer);
-        let key = (
-            maybe_net,
-            layer,
-            origin,
-            destination,
-            Prenavmesh::fixed_fingerprint(layout, layer),
-            options.routed_band_width.to_bits(),
-            options.wrap_around_bands,
-            options.squeeze_through_under_bends,
-        );
+        let (key, snapshot) = Self::navmesh_key_and_snapshot(layout, origin, destination, options);
 
         if let Some(pos) = self
             .navmeshes
@@ -735,12 +806,27 @@ impl PrenavmeshBases {
             let cached = self.navmeshes.remove(pos);
             let navmesh = cached.navmesh.clone();
             self.navmeshes.push(cached);
-            return Ok(navmesh);
+
+            // Memo keys are `NavnodeIndex`es into this navmesh, so a
+            // retained search state is only handed out with the exact
+            // navmesh object it was recorded against — a cache hit
+            // here is what proves that.
+            let search_state = take_state
+                .then(|| {
+                    self.search_states
+                        .iter()
+                        .position(|(k, s, _)| *k == key && *s == snapshot)
+                        .map(|pos| self.search_states.remove(pos).2)
+                })
+                .flatten();
+            if search_state.is_some() {
+                crate::metrics::incr(&crate::metrics::METRICS.search_state_hits);
+            }
+            return Ok((navmesh, search_state));
         }
 
         let loose_constraints = Prenavmesh::loose_constraints(layout, maybe_net, layer);
-        let prenavmesh =
-            self.prenavmesh_with(layout, origin, destination, loose_constraints)?;
+        let prenavmesh = self.prenavmesh_with(layout, origin, destination, loose_constraints)?;
         let navmesh = super::navmesh::Navmesh::new_from_prenavmesh(
             layout,
             prenavmesh,
@@ -757,7 +843,38 @@ impl PrenavmeshBases {
             snapshot,
             navmesh: navmesh.clone(),
         });
-        Ok(navmesh)
+        Ok((navmesh, None))
+    }
+
+    /// Retains a dissolved route attempt's search state for the
+    /// `origin`–`destination` ratline, keyed by the ratline's navmesh
+    /// key and the *current* loose snapshot — which is what a later
+    /// [`Self::navmesh_and_search_state`] call must match again.
+    /// Oversized states are dropped to bound memory.
+    pub fn store_search_state(
+        &mut self,
+        layout: &Layout<impl AccessRules>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+        options: RouterOptions,
+        state: NavcordSearchState,
+    ) {
+        if state.entry_count() > SEARCH_STATE_MEMO_CAP {
+            return;
+        }
+        let (key, snapshot) = Self::navmesh_key_and_snapshot(layout, origin, destination, options);
+        if let Some(pos) = self
+            .search_states
+            .iter()
+            .position(|(k, s, _)| *k == key && *s == snapshot)
+        {
+            self.search_states.remove(pos);
+        }
+        if self.search_states.len() >= SEARCH_STATE_CAP {
+            self.search_states.remove(0);
+        }
+        self.search_states.push((key, snapshot, state));
+        crate::metrics::incr(&crate::metrics::METRICS.search_state_stores);
     }
 
     /// Builds a prenavmesh for the `origin`–`destination` ratline,
@@ -800,8 +917,7 @@ impl PrenavmeshBases {
         }
         let base = self.map.get_mut(&key).unwrap();
 
-        let loose_keys: BTreeSet<ConstraintKey> =
-            loose_constraints.keys().copied().collect();
+        let loose_keys: BTreeSet<ConstraintKey> = loose_constraints.keys().copied().collect();
 
         // An entry for exactly this loose state — typically restored by
         // a backtrace — can be reused outright.
@@ -810,9 +926,7 @@ impl PrenavmeshBases {
             .iter()
             .position(|(keys, _)| *keys == loose_keys)
         {
-            crate::metrics::incr(
-                &crate::metrics::METRICS.prenavmesh_constrained_base_hits,
-            );
+            crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_constrained_base_hits);
             let entry = base.constrained.remove(pos);
             let mut prenavmesh = entry.1.clone();
             base.constrained.push(entry);
@@ -831,9 +945,7 @@ impl PrenavmeshBases {
             .constrained
             .iter()
             .enumerate()
-            .filter(|(_, (keys, _))| {
-                keys.iter().all(|key| loose_constraints.contains_key(key))
-            })
+            .filter(|(_, (keys, _))| keys.iter().all(|key| loose_constraints.contains_key(key)))
             .max_by_key(|(_, (keys, _))| keys.len())
             .map(|(pos, (keys, _))| (pos, keys.clone()))
         {
@@ -847,9 +959,7 @@ impl PrenavmeshBases {
                     ok = false;
                     break;
                 }
-                crate::metrics::incr(
-                    &crate::metrics::METRICS.prenavmesh_delta_constraint_adds,
-                );
+                crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_delta_constraint_adds);
             }
             if ok {
                 constrained = Some(candidate);
@@ -859,9 +969,7 @@ impl PrenavmeshBases {
         let constrained = match constrained {
             Some(constrained) => constrained,
             None => {
-                crate::metrics::incr(
-                    &crate::metrics::METRICS.prenavmesh_constrained_base_builds,
-                );
+                crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_constrained_base_builds);
                 let _timer = crate::metrics::Timer::start(
                     &crate::metrics::METRICS.prenavmesh_constrained_base_nanos,
                 );
@@ -882,11 +990,7 @@ impl PrenavmeshBases {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeSet,
-        fs::File,
-        io::BufReader,
-    };
+    use std::{collections::BTreeSet, fs::File, io::BufReader};
 
     use geo::point;
     use petgraph::visit::IntoNodeIdentifiers;
@@ -907,8 +1011,7 @@ mod tests {
     };
 
     fn autorouter_0603() -> Autorouter<SpecctraMesadata> {
-        let design_file =
-            File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+        let design_file = File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
         let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
         Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
     }
@@ -931,8 +1034,7 @@ mod tests {
     /// one built from scratch: same vertex set, same constraint set.
     #[test]
     fn vertex_base_matches_fresh_prenavmesh() {
-        let design_file =
-            File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+        let design_file = File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
         let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
         let autorouter = Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap();
         let layout = autorouter.board().layout();
@@ -964,8 +1066,7 @@ mod tests {
             origin_primitive.layer(),
         )
         .unwrap();
-        let from_base =
-            Prenavmesh::from_vertex_base(layout, origin, destination, base).unwrap();
+        let from_base = Prenavmesh::from_vertex_base(layout, origin, destination, base).unwrap();
 
         let nodes = |prenavmesh: &Prenavmesh| {
             prenavmesh
@@ -1164,13 +1265,115 @@ mod tests {
                 }),
             )
             .unwrap();
-        bases
-            .navmesh(layout, origin, destination, options)
-            .unwrap();
+        bases.navmesh(layout, origin, destination, options).unwrap();
 
         layout.apply(&seg_edit.reverse());
         let third = bases.navmesh(layout, origin, destination, options).unwrap();
         assert_eq!(third.graph().node_count(), nodes);
         assert_eq!(third.graph().edge_count(), edges);
+    }
+
+    /// A dissolved route's search state is handed out only together
+    /// with the exact navmesh it was recorded against: identical board
+    /// state → hand-out; mutated loose geometry → none; restoring the
+    /// geometry → hand-out again.
+    #[test]
+    fn search_state_reused_only_under_identical_board_state() {
+        use std::ops::ControlFlow;
+
+        use crate::{router::RouteStepper, router::Router, stepper::Step};
+
+        let mut autorouter = autorouter_0603();
+        let ratline = first_ratline(&autorouter);
+        let (origin, destination) = ratline.ref_(&autorouter).endpoint_dots();
+        let options = RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: false,
+            routed_band_width: 100.0,
+        };
+
+        let layout = autorouter.board_mut().layout_mut();
+        let mut bases = PrenavmeshBases::default();
+
+        // First attempt: navmesh miss, no state.
+        let (navmesh, state) = bases
+            .navmesh_and_search_state(layout, origin, destination, options)
+            .unwrap();
+        assert!(state.is_none());
+
+        // Route it so the navcord accumulates probe/step memos, then
+        // dissolve and undo any applied geometry.
+        let mut router = Router::new(layout, options);
+        let mut route =
+            RouteStepper::new_from_navmesh(&mut router, LayoutEdit::new(), navmesh, 100.0);
+        for _ in 0..10_000 {
+            match route.step(&mut router).unwrap() {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(_) => break,
+            }
+        }
+        let (_thetastar, mut navcord, ..) = route.dissolve();
+        let state = navcord.take_search_state();
+        assert!(state.entry_count() > 0);
+        layout.apply(&navcord.recorder.reverse());
+
+        // Retry under identical board state: navmesh cache hits and
+        // the stored state comes along.
+        bases.store_search_state(layout, origin, destination, options, state);
+        let (_navmesh, state) = bases
+            .navmesh_and_search_state(layout, origin, destination, options)
+            .unwrap();
+        let state = state.expect("identical board state must hand out the search state");
+        assert!(state.entry_count() > 0);
+
+        // Handed-out states are consumed; re-store to simulate the
+        // retry having dissolved again.
+        bases.store_search_state(layout, origin, destination, options, state);
+
+        // Mutated loose geometry → no hand-out.
+        let dot = |x: f64| {
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: x, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(90),
+            })
+        };
+        let mut dots_edit = LayoutEdit::new();
+        let a = layout.add_fixed_dot_infringably(&mut dots_edit, dot(0.0));
+        let b = layout.add_fixed_dot_infringably(&mut dots_edit, dot(500.0));
+        let mut seg_edit = LayoutEdit::new();
+        layout
+            .add_lone_loose_seg(
+                &mut seg_edit,
+                a,
+                b,
+                LoneLooseSegWeight(GeneralSegWeight {
+                    width: 100.0,
+                    layer: 0,
+                    maybe_net: Some(90),
+                }),
+            )
+            .unwrap();
+        let (_navmesh, state) = bases
+            .navmesh_and_search_state(layout, origin, destination, options)
+            .unwrap();
+        assert!(state.is_none());
+
+        // Undo restores the exact fixed and loose state → hand-out
+        // returns.
+        layout.apply(&seg_edit.reverse());
+        layout.apply(&dots_edit.reverse());
+        let (_navmesh, state) = bases
+            .navmesh_and_search_state(layout, origin, destination, options)
+            .unwrap();
+        assert!(
+            state
+                .expect("restored board state must hand out the state")
+                .entry_count()
+                > 0
+        );
     }
 }

@@ -189,8 +189,7 @@ pub struct Navcord {
     /// Memoized probe verdicts keyed by the navcord path state
     /// (interned prefix id, see `.path_ids`), initial parent navnode,
     /// and probed navnode.
-    pub probe_memo:
-        HashMap<u64, HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>>,
+    pub probe_memo: HashMap<u64, HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>>,
     /// Memoized `.step_to(..)` verdicts keyed by the navcord state —
     /// the interned path prefix id plus the number of leading
     /// materialized canes — and the target navnode.
@@ -211,6 +210,31 @@ pub struct Navcord {
     /// path slice per memo entry.
     path_interner: HashMap<(u64, NavnodeIndex), u64>,
     next_path_id: u64,
+}
+
+/// The navcord state that outlives a single route attempt: the probe
+/// and step memo tables plus the path interner their keys come from.
+/// Verdicts are pure functions of the navcord path state and the
+/// board, so they may be reused by a later attempt on the same
+/// ratline when the board is provably identical — the whole-navmesh
+/// cache's exact loose-primitive snapshot provides that proof.
+#[derive(Debug)]
+pub struct NavcordSearchState {
+    probe_memo: HashMap<u64, HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>>,
+    step_memo: HashMap<
+        u64,
+        HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>,
+    >,
+    path_interner: HashMap<(u64, NavnodeIndex), u64>,
+    next_path_id: u64,
+}
+
+impl NavcordSearchState {
+    /// Total memo entries across both tables — used to bound how much
+    /// retained state is worth storing.
+    pub fn entry_count(&self) -> usize {
+        self.probe_memo.len() + self.step_memo.len()
+    }
 }
 
 impl Navcord {
@@ -268,6 +292,30 @@ impl Navcord {
         self.path.pop();
     }
 
+    /// Moves out the memo tables and the path interner they key into.
+    /// Safe on a navcord being dissolved: the transient path/cane
+    /// state is not part of the search state — a fresh navcord replays
+    /// its own prefixes and hits the same interned ids.
+    pub fn take_search_state(&mut self) -> NavcordSearchState {
+        NavcordSearchState {
+            probe_memo: std::mem::take(&mut self.probe_memo),
+            step_memo: std::mem::take(&mut self.step_memo),
+            path_interner: std::mem::take(&mut self.path_interner),
+            next_path_id: self.next_path_id,
+        }
+    }
+
+    /// Installs a retained search state. Only sound when the board
+    /// state is provably identical to the one the memos were recorded
+    /// under — the caller proves this via the whole-navmesh cache's
+    /// exact loose-primitive snapshot match.
+    pub fn restore_search_state(&mut self, state: NavcordSearchState) {
+        self.probe_memo = state.probe_memo;
+        self.step_memo = state.step_memo;
+        self.path_interner = state.path_interner;
+        self.next_path_id = state.next_path_id;
+    }
+
     /// The virtual canes currently on the path.
     fn virtual_canes(&self) -> impl Iterator<Item = &VirtualCane> + '_ {
         self.canes.iter().filter_map(|cane| match cane {
@@ -305,16 +353,12 @@ impl Navcord {
                     GearIndex::FixedDot(dot) => {
                         drawing.dot_circle(dot.into(), self.width, face_conditions.as_ref())
                     }
-                    GearIndex::FixedBend(bend) => drawing.bend_circle(
-                        bend.into(),
-                        self.width,
-                        face_conditions.as_ref(),
-                    ),
-                    GearIndex::LooseBend(bend) => drawing.bend_circle(
-                        bend.into(),
-                        self.width,
-                        face_conditions.as_ref(),
-                    ),
+                    GearIndex::FixedBend(bend) => {
+                        drawing.bend_circle(bend.into(), self.width, face_conditions.as_ref())
+                    }
+                    GearIndex::LooseBend(bend) => {
+                        drawing.bend_circle(bend.into(), self.width, face_conditions.as_ref())
+                    }
                 },
                 Some(match cane.sense {
                     RotationSense::Counterclockwise => RotationSense::Clockwise,
@@ -364,9 +408,7 @@ impl Navcord {
                     match &mut shape {
                         PrimitiveShape::Seg(seg_shape) => {
                             let seg: SegIndex = limb.try_into().unwrap();
-                            if drawing.geometry().seg_joints(seg).0
-                                == DotIndex::Loose(head.face)
-                            {
+                            if drawing.geometry().seg_joints(seg).0 == DotIndex::Loose(head.face) {
                                 seg_shape.from = face_pos;
                             } else {
                                 seg_shape.to = face_pos;
@@ -374,8 +416,7 @@ impl Navcord {
                         }
                         PrimitiveShape::Bend(bend_shape) => {
                             let bend: BendIndex = limb.try_into().unwrap();
-                            if drawing.geometry().bend_joints(bend).0
-                                == DotIndex::Loose(head.face)
+                            if drawing.geometry().bend_joints(bend).0 == DotIndex::Loose(head.face)
                             {
                                 bend_shape.from = face_pos;
                             } else {
@@ -473,13 +514,9 @@ impl Navcord {
             .ok_or(NavcorderException::CannotWrap)?;
 
         match around_node_weight.binavnode {
-            BinavnodeNodeIndex::FixedDot(dot) => layout.cane_around_dot_trusted(
-                &mut self.recorder,
-                head,
-                dot,
-                sense,
-                self.width,
-            ),
+            BinavnodeNodeIndex::FixedDot(dot) => {
+                layout.cane_around_dot_trusted(&mut self.recorder, head, dot, sense, self.width)
+            }
             BinavnodeNodeIndex::FixedBend(fixed_bend) => layout.cane_around_bend_trusted(
                 &mut self.recorder,
                 head,
@@ -543,9 +580,7 @@ impl Navcord {
             return match entry.clone() {
                 Ok((replay, length)) => {
                     match replay {
-                        GhostReplay::Wrap(cane) => {
-                            self.canes.push(PathCane::Virtual(cane))
-                        }
+                        GhostReplay::Wrap(cane) => self.canes.push(PathCane::Virtual(cane)),
                         GhostReplay::Finish => self.virtual_finish = true,
                     }
                     self.push_path(to);
@@ -610,8 +645,7 @@ impl Navcord {
             // commit honest: a mismatch between the ghost evaluation
             // and the real draw fails the route instead of drawing
             // invalid geometry.
-            let (head, _squeezed) =
-                self.wrap(layout, navmesh, self.head, self.path[i + 1])?;
+            let (head, _squeezed) = self.wrap(layout, navmesh, self.head, self.path[i + 1])?;
             self.head = head.into();
             self.canes[i] = PathCane::Real(head);
             crate::metrics::incr(&crate::metrics::METRICS.step_to_trusted);
@@ -640,8 +674,7 @@ impl Navcord {
         let around_node_weight = navmesh.node_weight(to).unwrap();
 
         if to == navmesh.destination_navnode() {
-            let BinavnodeNodeIndex::FixedDot(into) = around_node_weight.binavnode
-            else {
+            let BinavnodeNodeIndex::FixedDot(into) = around_node_weight.binavnode else {
                 unreachable!();
             };
             return self.ghost_finish(drawing, into);
@@ -682,12 +715,9 @@ impl Navcord {
             ),
         };
 
-        let tangent = match math::bitangent(from_circle, from_sense, to_circle, Some(sense))
-        {
+        let tangent = match math::bitangent(from_circle, from_sense, to_circle, Some(sense)) {
             Ok(tangent) => tangent,
-            Err(err) => {
-                return GhostVerdict::Failed(NavcorderException::CannotDraw(err.into()))
-            }
+            Err(err) => return GhostVerdict::Failed(NavcorderException::CannotDraw(err.into())),
         };
 
         let tangent_start = tangent.start_point();
@@ -722,18 +752,13 @@ impl Navcord {
         // `.add_cane(..)`, and limbs of the wraparound itself as in
         // `.add_seg(..)`'s check inside it.
         let exempt_limbs = drawing.overlapee_limbs(gear.into());
-        let around_limbs = PrimitiveIndex::from(gear)
-            .primitive_ref(drawing)
-            .limbs();
+        let around_limbs = PrimitiveIndex::from(gear).primitive_ref(drawing).limbs();
 
-        if let Some(infringement) = drawing.find_infringement_of_shape(
-            seg_shape,
-            layer,
-            maybe_net,
-            &|_, infringee| {
+        if let Some(infringement) =
+            drawing.find_infringement_of_shape(seg_shape, layer, maybe_net, &|_, infringee| {
                 !exempt_limbs.contains(&infringee) && !around_limbs.contains(&infringee)
-            },
-        ) {
+            })
+        {
             return fail(infringement.into());
         }
 
@@ -742,12 +767,9 @@ impl Navcord {
             _ => matches!(self.head.face(), DotIndex::Fixed(..)),
         };
 
-        if let Some(collision) = drawing.detect_collision_of_shape(
-            seg_shape,
-            layer,
-            maybe_net,
-            require_different_net,
-        ) {
+        if let Some(collision) =
+            drawing.detect_collision_of_shape(seg_shape, layer, maybe_net, require_different_net)
+        {
             return fail(collision.into());
         }
 
@@ -880,9 +902,7 @@ impl Navcord {
             None,
         ) {
             Ok(bitangent) => bitangent,
-            Err(err) => {
-                return GhostVerdict::Failed(NavcorderException::CannotDraw(err.into()))
-            }
+            Err(err) => return GhostVerdict::Failed(NavcorderException::CannotDraw(err.into())),
         };
 
         let tangent_start = bitangent.start_point();
@@ -923,19 +943,15 @@ impl Navcord {
             return fail(infringement.into());
         }
 
-        if let Some(collision) = drawing.detect_collision_of_shape(
-            seg_shape,
-            self.band_layer,
-            self.band_net,
-            true,
-        ) {
+        if let Some(collision) =
+            drawing.detect_collision_of_shape(seg_shape, self.band_layer, self.band_net, true)
+        {
             return fail(collision.into());
         }
 
         GhostVerdict::Drawn {
             replay: GhostReplay::Finish,
-            length: prev_bend_length
-                + Euclidean::distance(&bitangent.end_point(), &tangent_start),
+            length: prev_bend_length + Euclidean::distance(&bitangent.end_point(), &tangent_start),
         }
     }
 
@@ -1063,8 +1079,13 @@ mod tests {
     /// lets tests exercise specific failure paths deterministically,
     /// unlike real fixture boards where earlier infringement checks
     /// may mask them.
-    fn navcord_on_synthetic(
-    ) -> (Layout<TestRules>, Navmesh, Navcord, FixedDotIndex, FixedDotIndex) {
+    fn navcord_on_synthetic() -> (
+        Layout<TestRules>,
+        Navmesh,
+        Navcord,
+        FixedDotIndex,
+        FixedDotIndex,
+    ) {
         let mut layout = Layout::new(Drawing::<_, _, TestRules>::new(
             TestRules,
             1,
@@ -1201,9 +1222,7 @@ mod tests {
         navmesh: &Navmesh,
     ) -> NavnodeIndex {
         for to in navmesh.graph().node_indices().map(NavnodeIndex) {
-            if to != navmesh.destination_navnode()
-                && navcord.step_to(layout, navmesh, to).is_ok()
-            {
+            if to != navmesh.destination_navnode() && navcord.step_to(layout, navmesh, to).is_ok() {
                 return to;
             }
         }
@@ -1253,10 +1272,7 @@ mod tests {
         assert_eq!(layout.drawing().node_count(), node_count);
         assert_eq!(navcord.path.len(), 2);
         assert_eq!(navcord.canes.len(), 1);
-        assert!(matches!(
-            navcord.canes.last(),
-            Some(PathCane::Virtual(..))
-        ));
+        assert!(matches!(navcord.canes.last(), Some(PathCane::Virtual(..))));
     }
 
     /// Materializing a virtual cane must draw exactly the geometry the
@@ -1377,10 +1393,7 @@ mod tests {
 
         if result.is_ok() {
             assert!(navcord.virtual_finish);
-            assert!(matches!(
-                navcord.last_replay(),
-                Some(GhostReplay::Finish)
-            ));
+            assert!(matches!(navcord.last_replay(), Some(GhostReplay::Finish)));
             navcord.step_back(layout).unwrap();
             assert!(!navcord.virtual_finish);
             assert_eq!(navcord.path.len(), 1);
@@ -1413,12 +1426,7 @@ mod tests {
                 if navcord.step_to(&mut layout, &navmesh, second).is_err() {
                     continue;
                 }
-                verdicts.extend(rewrap_verdicts(
-                    &mut navcord,
-                    &mut layout,
-                    &navmesh,
-                    gear1,
-                ));
+                verdicts.extend(rewrap_verdicts(&mut navcord, &mut layout, &navmesh, gear1));
                 navcord.step_back(&mut layout).unwrap();
             }
             navcord.step_back(&mut layout).unwrap();

@@ -222,9 +222,26 @@ done). What remained was per-probe bookkeeping cost:
         hashing/cloning per probe; plus a bbox early-out over virtual
         canes in `ghost_step_to`'s self-intersection scan. candE 50s
         window: within noise (~2%), but strictly less work per probe.
-- [ ] D3. Keep incremental search state across re-searches (retain frontier
-        and scores; re-insert only affected frontier entries — D*-lite
-        style) so each failed candidate doesn't restart from scratch.
+- [x] D3. Retain search state across re-searches — implemented as
+        **navcord memo retention** rather than frontier/score reuse:
+        probe/step verdicts are pure functions of (path, materialized
+        prefix, board state), so a dissolved route's `NavcordSearchState`
+        (both memo tables + the path interner they key into) is stored
+        in `PrenavmeshBases` keyed by the navmesh key + exact loose
+        snapshot. On a whole-navmesh cache hit the exact same navmesh
+        object the memo `NavnodeIndex`es refer to comes back, and only
+        then is the state handed out — making reuse provably sound.
+        Success-path stores are skipped (their snapshot includes the
+        new band, unreachable by retries); oversized states (>300k
+        entries) are dropped to bound memory; store holds ≤8 entries.
+        Channel-probing deliberately stays off this path since its
+        relaxed-rule verdicts would poison real routing.
+        Measured on candE (55s, `--multilayer --corridor-presort`):
+        stored 92, **hits 1** — reconfiguration thrash rarely revisits
+        an exact board state (navmesh hits 26/591). Sound and free
+        when it fires, but marginal on candE. Remaining upside: finer-
+        grained per-entry region invalidation would allow partial reuse
+        under changed geometry — significant complexity, not done.
 
 candE profile (50s window, `--multilayer`): step_to 24s of ~50s;
 inside it `infringe` 4.75M calls/14.2s with **70M candidates @ ~4.3s**,

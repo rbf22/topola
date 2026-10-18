@@ -19,8 +19,11 @@ use crate::{
     graph::MakeRef,
     layout::LayoutEdit,
     router::{
-        navcord::Navcord, navmesh::Navmesh, prenavmesh::PrenavmeshBases,
-        thetastar::ThetastarStepper, RouteStepper, Router,
+        navcord::{Navcord, NavcordSearchState},
+        navmesh::Navmesh,
+        prenavmesh::PrenavmeshBases,
+        thetastar::ThetastarStepper,
+        RouteStepper, Router,
     },
     stepper::{Abort, EstimateProgress, LinearScale, Reconfigure, Step},
 };
@@ -150,7 +153,7 @@ impl PlanarAutorouteExecutionStepper {
             return Err(AutorouterError::NothingToUndoForReconfiguration);
         }
 
-        self.dissolve_route_stepper_and_push_edits();
+        let extracted = self.dissolve_route_stepper_and_push_edits();
 
         let board_edit = BoardEdit::new_from_edits(
             BoardDataEdit::merge_iter(self.board_data_edits.split_off(index)),
@@ -158,6 +161,12 @@ impl PlanarAutorouteExecutionStepper {
         );
 
         autorouter.board.apply_edit(&board_edit.reverse());
+
+        // Store the search state only after the reversion so its
+        // snapshot keys by the board a retry will actually see.
+        if let Some((origin, destination, state)) = extracted {
+            self.store_search_state(autorouter, origin, destination, state);
+        }
 
         self.curr_ratline_index = index;
         Ok(self.start_routing_ratline(autorouter)?)
@@ -167,15 +176,42 @@ impl PlanarAutorouteExecutionStepper {
     /// prenavmesh vertex triangulation when one exists. The triangulation
     /// is the dominant cost of navmesh construction, and its vertex set
     /// only depends on the ratline's net and layer, not on routed bands.
+    /// On a whole-navmesh cache hit the retained search state of a
+    /// previous attempt on the same ratline rides along.
     fn make_navmesh(
         &mut self,
         layout: &crate::layout::Layout<impl AccessMesadata>,
         origin: FixedDotIndex,
         destination: FixedDotIndex,
-    ) -> Result<Navmesh, AutorouterError> {
-        Ok(self
-            .prenavmesh_bases
-            .navmesh(layout, origin, destination, self.options.router)?)
+    ) -> Result<(Navmesh, Option<NavcordSearchState>), AutorouterError> {
+        Ok(self.prenavmesh_bases.navmesh_and_search_state(
+            layout,
+            origin,
+            destination,
+            self.options.router,
+        )?)
+    }
+
+    /// Retains a dissolved route attempt's search state (probe and
+    /// step memos plus the path interner they key into) for the next
+    /// attempt on the same ratline under provably identical board
+    /// geometry. Callers hand it to the prenavmesh-bases store *after*
+    /// any pending board reversion so the stored snapshot matches what
+    /// a retry sees.
+    fn store_search_state(
+        &mut self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+        state: NavcordSearchState,
+    ) {
+        self.prenavmesh_bases.store_search_state(
+            autorouter.board.layout(),
+            origin,
+            destination,
+            self.options.router,
+            state,
+        );
     }
 
     fn start_routing_ratline(
@@ -185,7 +221,8 @@ impl PlanarAutorouteExecutionStepper {
         let (origin, destination) = self
             .configuration
             .ratline_terminating_dots(autorouter, self.curr_ratline_index);
-        let navmesh = self.make_navmesh(autorouter.board.layout(), origin, destination)?;
+        let (navmesh, search_state) =
+            self.make_navmesh(autorouter.board.layout(), origin, destination)?;
 
         let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
         let mut route = RouteStepper::new_from_navmesh(
@@ -194,6 +231,9 @@ impl PlanarAutorouteExecutionStepper {
             navmesh,
             self.options.router.routed_band_width,
         );
+        if let Some(state) = search_state {
+            route.restore_search_state(state);
+        }
         route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
         self.route = Some(route);
 
@@ -206,15 +246,26 @@ impl PlanarAutorouteExecutionStepper {
     /// route's own edit. Pushed unconditionally so the vecs stay
     /// index-aligned for `backtrace_to_index`, even for skipped
     /// ratlines that produce no board data edit.
-    fn dissolve_route_stepper_and_push_edits(&mut self) {
-        if let Some(taken_route) = self.route.take() {
-            let (_thetastar, navcord, ..) = taken_route.dissolve();
+    ///
+    /// Returns the dissolved route's retained search state with its
+    /// ratline's terminating dots, so the caller can store it against
+    /// the right board snapshot — after any board reversion that
+    /// immediately follows the dissolve.
+    fn dissolve_route_stepper_and_push_edits(
+        &mut self,
+    ) -> Option<(FixedDotIndex, FixedDotIndex, NavcordSearchState)> {
+        let extracted = self.route.take().map(|taken_route| {
+            let (thetastar, mut navcord, ..) = taken_route.dissolve();
+            let state = navcord.take_search_state();
             self.pending_edit.layout_edit.merge(navcord.recorder);
-        }
+            let navmesh = thetastar.graph();
+            (navmesh.origin(), navmesh.destination(), state)
+        });
 
         let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
         self.layout_edits.push(pending.layout_edit);
         self.board_data_edits.push(pending.board_data_edit);
+        extracted
     }
 
     /// Finishes routing early: the in-flight ratline's partial band is
@@ -225,16 +276,23 @@ impl PlanarAutorouteExecutionStepper {
             return;
         }
 
-        if let Some(taken_route) = self.route.take() {
+        let extracted = self.route.take().map(|taken_route| {
             // Undo the in-flight ratline's partially drawn band, along
             // with any uncommitted pending work such as surgical
             // rip-ups.
-            let (_thetastar, navcord, ..) = taken_route.dissolve();
+            let (thetastar, mut navcord, ..) = taken_route.dissolve();
+            let state = navcord.take_search_state();
             self.pending_edit.layout_edit.merge(navcord.recorder);
-        }
+            let navmesh = thetastar.graph();
+            (navmesh.origin(), navmesh.destination(), state)
+        });
 
         let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
         autorouter.board.apply_edit(&pending.reverse());
+
+        if let Some((origin, destination, state)) = extracted {
+            self.store_search_state(autorouter, origin, destination, state);
+        }
 
         self.curr_ratline_index = self.configuration.ratlines.len();
     }
@@ -263,10 +321,21 @@ impl PlanarAutorouteExecutionStepper {
         );
         crate::metrics::incr(&crate::metrics::METRICS.surgical_ripups);
 
-        if let Some(taken_route) = self.route.take() {
-            let (_thetastar, navcord, ..) = taken_route.dissolve();
+        let extracted = self.route.take().map(|taken_route| {
+            let (thetastar, mut navcord, ..) = taken_route.dissolve();
+            let state = navcord.take_search_state();
             let edit = BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
             autorouter.board.apply_edit(&edit.reverse());
+            let navmesh = thetastar.graph();
+            (navmesh.origin(), navmesh.destination(), state)
+        });
+
+        // The stored snapshot reflects the board right after the
+        // in-flight route's own reversion but before the rip-up
+        // removals below — a retry only reuses it if that exact state
+        // recurs.
+        if let Some((origin, destination, state)) = extracted {
+            self.store_search_state(autorouter, origin, destination, state);
         }
 
         // Drop the ripped-up ratlines' edit slots, preserving the
@@ -428,6 +497,12 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
         // TODO: Use a proper state machine here for better readability?
 
         if self.curr_ratline_index >= self.configuration().ratlines.len() {
+            // Ratlines here completed (or were skipped with their band
+            // already in place): the extracted search state is keyed
+            // by a board still holding the ratline's own band, a state
+            // no retry can see — requeues only happen after rip-ups.
+            // Dropping it keeps the store's MRU budget for
+            // failed/in-flight attempts.
             self.dissolve_route_stepper_and_push_edits();
 
             if self.options.improve_pad_entry {
@@ -516,6 +591,9 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
             .get(self.curr_ratline_index)
             .is_some()
         {
+            // Same as the completion path above: the dissolved route's
+            // ratline has its band in place, so the search state can
+            // never be handed out.
             self.dissolve_route_stepper_and_push_edits();
             self.start_routing_ratline(autorouter);
         }
