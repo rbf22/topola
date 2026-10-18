@@ -37,6 +37,17 @@ pub struct BandUidError {
     pub maybe_end: Option<BandTermsegIndex>,
 }
 
+/// The conditions a hypothetical (not inserted) primitive on `layer` is
+/// checked against in `.infringements_of_shape(..)` — shared with
+/// batched candidate scans so they evaluate the same rule lookups.
+fn hypothetical_conditions(layer: usize, maybe_net: Option<usize>) -> Option<Conditions<'static>> {
+    maybe_net.map(|net| Conditions {
+        net,
+        maybe_region: Some("A".into()),
+        maybe_layer: Some(layer),
+    })
+}
+
 /// Routines implementing various queries on drawing. A query is a routine that
 /// returns indices of one or more primitives.
 impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
@@ -404,22 +415,9 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 .unwrap_or(0.0),
         );
 
-        let intersector_conditions = maybe_net.map(|net| Conditions {
-            net,
-            maybe_region: Some("A".into()),
-            maybe_layer: Some(layer),
-        });
+        let intersector_conditions = hypothetical_conditions(layer, maybe_net);
 
-        self.recording_geometry_with_rtree()
-            .rtree()
-            .locate_in_envelope_intersecting(&limiting_shape.envelope_3d(0.0, layer))
-            .filter_map(|wrapper| {
-                if let GenericNode::Primitive(primitive_node) = wrapper.data {
-                    Some(primitive_node)
-                } else {
-                    None
-                }
-            })
+        self.primitives_in_envelope(&limiting_shape.envelope_3d(0.0, layer))
             // The following filters reject candidates cheaply before they
             // are evaluated geometrically. Their order matches the
             // corresponding filters in `.infringements_except(..)`.
@@ -432,39 +430,67 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             })
             .filter(|infringee| predicate(self, *infringee))
             .filter_map(move |infringee| {
-                crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
-                let _timer = crate::metrics::Timer::start(
-                    &crate::metrics::METRICS.infringement_candidate_nanos,
-                );
-                let infringee_primitive = infringee.primitive_ref(self);
-                let infringee_conditions = infringee_primitive.conditions();
-
-                let epsilon = 1.0;
-                let inflated_infringer_shape =
-                    shape.inflate(match (&intersector_conditions, infringee_conditions) {
-                        (None, _) | (_, None) => return None,
-                        (Some(lhs), Some(rhs)) => {
-                            let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
-                                return None;
-                            };
-
-                            // Note the epsilon comparison.
-                            // XXX: Epsilon is probably too large. But what
-                            // should it be exactly then?
-                            (clearance - epsilon).clamp(0.0, f64::INFINITY)
-                        }
-                    });
-
-                let infringee_shape = infringee_primitive.shape();
-
-                inflated_infringer_shape
-                    .intersects(&infringee_shape)
-                    .then_some(Infringement(
-                        inflated_infringer_shape,
-                        infringee_shape,
-                        infringee,
-                    ))
+                self.infringement_of_shape_candidate(shape, &intersector_conditions, infringee)
             })
+    }
+
+    /// All primitives inside `envelope` — the shared fetch behind the
+    /// shape-infringement queries.
+    fn primitives_in_envelope(
+        &self,
+        envelope: &rstar::AABB<[f64; 3]>,
+    ) -> impl Iterator<Item = PrimitiveIndex> + '_ {
+        self.recording_geometry_with_rtree()
+            .rtree()
+            .locate_in_envelope_intersecting(envelope)
+            .filter_map(|wrapper| {
+                if let GenericNode::Primitive(primitive_node) = wrapper.data {
+                    Some(primitive_node)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// The per-candidate geometric half of `.infringements_of_shape(..)`:
+    /// conditions → pairwise clearance → inflate → intersects.
+    fn infringement_of_shape_candidate(
+        &self,
+        shape: PrimitiveShape,
+        intersector_conditions: &Option<Conditions<'_>>,
+        infringee: PrimitiveIndex,
+    ) -> Option<Infringement> {
+        crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_candidate_nanos);
+        let infringee_primitive = infringee.primitive_ref(self);
+        let infringee_conditions = infringee_primitive.conditions();
+
+        let epsilon = 1.0;
+        let inflated_infringer_shape =
+            shape.inflate(match (intersector_conditions, infringee_conditions) {
+                (None, _) | (_, None) => return None,
+                (Some(lhs), Some(rhs)) => {
+                    let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
+                        return None;
+                    };
+
+                    // Note the epsilon comparison.
+                    // XXX: Epsilon is probably too large. But what
+                    // should it be exactly then?
+                    (clearance - epsilon).clamp(0.0, f64::INFINITY)
+                }
+            });
+
+        let infringee_shape = infringee_primitive.shape();
+
+        inflated_infringer_shape
+            .intersects(&infringee_shape)
+            .then_some(Infringement(
+                inflated_infringer_shape,
+                infringee_shape,
+                infringee,
+            ))
     }
 
     /// Shape-based variant of `.detect_collision_except(..)` for a

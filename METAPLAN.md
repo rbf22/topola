@@ -223,9 +223,19 @@ algorithm. What landed instead:
   `prenavnode_to_navnodes` map described above.
 
 Remaining structural headroom is in `infringe` itself (13.2s of
-`step_to`'s 22.1s): cheaper polygon/clearance predicates or a tighter
-R-tree envelope than `largest_clearance`, not materialization
-decoupling.
+`step_to`'s 22.1s): the shape predicates are already analytic (SAT
+rect-rect, circle distances, `distance_to_point`), so the cost is
+R-tree traversal — `SelectionIterator::next` 23.5% self. ~~Batched
+candidate fetch~~ — **tried and reverted**: fetching one merged
+envelope for a wrap's seg-infringement + collision + bend-infringement
+queries drops ~4 traversals to ~1, but forfeits the lazy iterator's
+early-exit — ~44% of `step_to`s fail and previously abandoned
+unexplored subtrees on the first hit. On candE per-step cost went
+2.6µs → 4.3µs (full batch) / 3.4µs (seg lazy + collision/bend batched)
+and throughput dropped from 174K to 111K/134K pops in the 40s window.
+A tighter envelope than `largest_clearance` inflation is the only
+surviving idea here, and the earlier bbox-prune experiment showed the
+envelope is already nearly tight.
 
 ## Phase B — Prenavmesh reuse
 
