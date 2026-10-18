@@ -15,8 +15,16 @@ use crate::{
         planar_autoroute::PlanarAutorouteConfiguration, ratline::RatlineUid, scc::Scc, Autorouter,
         PlanarAutorouteOptions, PresortBy,
     },
-    drawing::{dot::FixedDotIndex, primitive::GetWeight},
-    geometry::GetSetPos,
+    drawing::{
+        dot::FixedDotIndex,
+        graph::{GetMaybeNet, MakePrimitiveRef},
+        primitive::{GetWeight, MakePrimitiveShape},
+    },
+    geometry::{
+        primitive::{PrimitiveShape, SegShape},
+        shape::AccessShape,
+        GetSetPos,
+    },
     graph::MakeRef,
 };
 
@@ -54,6 +62,13 @@ pub struct SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
     /// touching the densest regions route first, before corridors
     /// clog. Empty when a different presort is selected.
     escape_scores: BTreeMap<RatlineUid, f64>,
+    /// Per-ratline corridor obstruction counts (primitives infringing
+    /// the straight origin→destination seg at routing clearances),
+    /// ordering ratlines within each SCC when
+    /// [`PresortBy::RatlineCorridorCongestion`] is selected: the most
+    /// constrained ratlines route first, claiming contested channels
+    /// before other bands wall them in. Empty otherwise.
+    corridor_scores: BTreeMap<RatlineUid, f64>,
     /// Seed for a deterministic within-SCC ratline shuffle; `0` keeps
     /// the deterministic ordering. Parallel exploration runs give each
     /// attempt a different seed so they traverse different ordering
@@ -103,9 +118,21 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
             BTreeMap::new()
         };
 
+        let corridor_scores = if options.presort_by == PresortBy::RatlineCorridorCongestion {
+            Self::compute_corridor_scores(
+                autorouter,
+                &input,
+                options.principal_layer,
+                options.router.routed_band_width,
+            )
+        } else {
+            BTreeMap::new()
+        };
+
         Self {
             sccs,
             escape_scores,
+            corridor_scores,
             shuffle_seed: options.shuffle_seed,
         }
     }
@@ -113,6 +140,39 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
     fn scc_score(params: &PresortParams, scc: &Scc) -> f64 {
         params.intersector_count_weight * *scc.intersector_count() as f64
             + params.length_weight * scc.length()
+    }
+
+    /// Counts, for each ratline, the primitives that would infringe the
+    /// straight origin→destination corridor at routing clearances: a
+    /// direct measure of how blocked the ratline's shortest path is.
+    /// Same-net primitives and loose dots are already excluded by the
+    /// infringement pipeline, so a ratline's own endpoints don't count.
+    fn compute_corridor_scores(
+        autorouter: &Autorouter<impl AccessMesadata>,
+        input: &PlanarAutoroutePreconfigurerInput,
+        layer: usize,
+        width: f64,
+    ) -> BTreeMap<RatlineUid, f64> {
+        let drawing = autorouter.board().layout().drawing();
+        input
+            .ratlines
+            .iter()
+            .map(|ratline| {
+                let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+                let corridor = PrimitiveShape::Seg(SegShape {
+                    from: origin.primitive_ref(drawing).shape().center(),
+                    to: destination.primitive_ref(drawing).shape().center(),
+                    width,
+                });
+                let maybe_net = origin.primitive_ref(drawing).maybe_net();
+                (
+                    *ratline,
+                    drawing
+                        .infringements_of_shape(corridor, layer, maybe_net, &|_, _| true)
+                        .count() as f64,
+                )
+            })
+            .collect()
     }
 
     /// Counts, for each ratline, the number of ratline endpoints
@@ -194,15 +254,24 @@ impl PreconfigurePlanarAutoroute for SccIntersectionsAndLengthRatlinePlanarAutor
                 .copied()
                 .collect();
 
-            // Escape-first ordering: the ratline whose most-crowded
-            // endpoint is densest routes first, while its corridors
-            // are still open.
+            // Constraint-first ordering: the ratline whose corridor is
+            // most blocked (or, for escape ordering, whose most-crowded
+            // endpoint is densest) routes first, while its corridors
+            // are still open. Corridor congestion dominates; escape
+            // density breaks ties.
             scc_ratlines.sort_by(|a, b| {
-                self.escape_scores
+                self.corridor_scores
                     .get(b)
                     .copied()
                     .unwrap_or(0.0)
-                    .total_cmp(&self.escape_scores.get(a).copied().unwrap_or(0.0))
+                    .total_cmp(&self.corridor_scores.get(a).copied().unwrap_or(0.0))
+                    .then(
+                        self.escape_scores
+                            .get(b)
+                            .copied()
+                            .unwrap_or(0.0)
+                            .total_cmp(&self.escape_scores.get(a).copied().unwrap_or(0.0)),
+                    )
             });
 
             presorted_ratlines.extend(scc_ratlines);

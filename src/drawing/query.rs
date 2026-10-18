@@ -389,6 +389,19 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         let _timer =
             crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
 
+        self.infringements_of_shape(shape, layer, maybe_net, predicate)
+            .next()
+    }
+
+    /// Iterator form of `.find_infringement_of_shape(..)`, yielding
+    /// every infringing primitive instead of stopping at the first.
+    pub(crate) fn infringements_of_shape<'a>(
+        &'a self,
+        shape: PrimitiveShape,
+        layer: usize,
+        maybe_net: Option<usize>,
+        predicate: &'a impl Fn(&Self, PrimitiveIndex) -> bool,
+    ) -> impl Iterator<Item = Infringement> + 'a {
         let limiting_shape = shape.inflate(
             maybe_net
                 .map(|net| self.rules().largest_clearance(Some(net)))
@@ -415,14 +428,14 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             // are evaluated geometrically. Their order matches the
             // corresponding filters in `.infringements_except(..)`.
             .filter(|&infringee| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
-            .filter(|&infringee| {
+            .filter(move |&infringee| {
                 match (maybe_net, infringee.primitive_ref(self).maybe_net()) {
                     (Some(net1), Some(net2)) => net1 != net2,
                     _ => false,
                 }
             })
             .filter(|infringee| predicate(self, *infringee))
-            .find_map(|infringee| {
+            .filter_map(move |infringee| {
                 crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
                 let _timer = crate::metrics::Timer::start(
                     &crate::metrics::METRICS.infringement_candidate_nanos,

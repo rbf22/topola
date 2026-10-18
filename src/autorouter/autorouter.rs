@@ -46,6 +46,11 @@ pub enum PresortBy {
     /// first: ratlines escaping dense pin regions route while their
     /// corridors are still open.
     RatlineEscapeDensity,
+    /// Order each SCC's ratlines by corridor obstruction, most-blocked
+    /// first: the straight origin→destination seg is queried against the
+    /// R-tree at routing clearances and the number of primitives
+    /// infringing it scores how constrained the ratline's corridor is.
+    RatlineCorridorCongestion,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

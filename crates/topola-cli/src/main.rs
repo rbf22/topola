@@ -280,7 +280,9 @@ fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
 fn make_planar_options(args: &Cli) -> PlanarAutorouteOptions {
     PlanarAutorouteOptions {
         principal_layer: 0,
-        presort_by: if args.escape_presort {
+        presort_by: if args.corridor_presort {
+            PresortBy::RatlineCorridorCongestion
+        } else if args.escape_presort {
             PresortBy::RatlineEscapeDensity
         } else {
             PresortBy::RatlineIntersectionCountAndLength

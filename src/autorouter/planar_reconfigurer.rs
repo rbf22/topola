@@ -292,7 +292,7 @@ impl SccPermutationsPlanarAutorouteReconfigurer {
     ) -> Self {
         // TODO: Instead of instantiating presorter again here, get it from
         // an argument.
-        let (sccs, _escape_scores, _shuffle_seed) = presorter.dissolve();
+        let (sccs, _escape_scores, _corridor_scores, _shuffle_seed) = presorter.dissolve();
 
         Self {
             configuration_search: Astar::new(SccSearchNode::new(sccs)),

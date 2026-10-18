@@ -265,9 +265,19 @@ precheck inside the candidate loop was tried and reverted — it added
 
 ## Phase G — Smarter ordering from probe data
 
-- [ ] G1. Feed `probe_channels` results (blockers, corridors, terminal
-        blockers) into `PresortBy`: route most-constrained ratlines first,
-        or reorder around hard blockers.
+- [x] G1. `PresortBy::RatlineCorridorCongestion` (`--corridor-presort`):
+        presort each SCC's ratlines by corridor obstruction — the count
+        of primitives infringing the straight origin→destination seg at
+        routing clearances, via the new `infringements_of_shape`
+        iterator (`find_infringement_of_shape` now delegates to it).
+        Same-net prims and the ratline's own endpoints are excluded by
+        the infringement pipeline. Cheaper than running
+        `probe_channels`: one R-tree query per ratline at presort time.
+        candE `--multilayer --corridor-presort` (50s window): peak
+        **38/107 vs 26/107 baseline**, sustained band ~20–37 vs ~12–26;
+        still oscillates, doesn't converge. Note: seeded `layer_seed`
+        perturbation *hurt* on candE (workers j1–j3 routed 0–22 vs j0's
+        38) — preferred layers are near-optimal there.
 - [ ] G2. Use probe corridor overlap to detect ratlines that will conflict
         and schedule them so the second takes the alternate channel.
 - [ ] G3. Wire relaxed-probe failure info into `--suggest-shifts` (already

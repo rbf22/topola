@@ -79,6 +79,11 @@ pub struct Cli {
     pub escape_presort: bool,
     #[arg(
         long,
+        help = "Order ratlines by corridor obstruction, most-blocked first (counts primitives infringing each ratline's direct corridor)"
+    )]
+    pub corridor_presort: bool,
+    #[arg(
+        long,
         help = "Lay escape stubs from surrounded pads through the widest local gap before routing (BGA escape)"
     )]
     pub escape_stubs: bool,
