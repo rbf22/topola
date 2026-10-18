@@ -11,6 +11,7 @@ use std::{
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
 use itertools::{Itertools, Permutations};
+use petgraph::visit::Walker;
 use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
@@ -24,7 +25,8 @@ use crate::{
         Autorouter, PlanarAutorouteOptions, ReconfigureBy,
     },
     drawing::{
-        graph::PrimitiveIndex,
+        gear::WalkOutwards,
+        graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
         loose::{GetPrevNextLoose, LooseIndex},
     },
     graph::MakeRef,
@@ -330,16 +332,6 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         stepper: &PlanarAutorouteExecutionStepper,
     ) {
         let curr_ratline_index = *stepper.curr_ratline_index();
-        let obstacles: Vec<PrimitiveIndex> = stepper.obstacles().to_vec();
-
-        if self
-            .last_recorded
-            .as_ref()
-            .is_some_and(|last| *last == (curr_ratline_index, obstacles.clone()))
-        {
-            return;
-        }
-        self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
 
         let Some(failed) = stepper
             .configuration()
@@ -354,6 +346,42 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         let ratsnest = autorouter
             .ratsnests()
             .on_principal_layer(self.options.principal_layer);
+
+        // Obstacles reported by the failed probes, plus clinch
+        // detection: a foreign-net band wrapping an endpoint pad's gear
+        // can clinch the ratline without any probe reporting the
+        // clinching bend — a probe can die on `NoBitangents` or far
+        // from the pad — so the endpoints' outward wrap chains are
+        // checked directly.
+        let mut obstacles: BTreeSet<PrimitiveIndex> =
+            stepper.obstacles().iter().copied().collect();
+
+        let (origin, destination) = failed.ref_(autorouter).endpoint_dots();
+
+        for dot in [origin, destination] {
+            let dot_ref = drawing.primitive_ref(dot);
+            let pad_net = dot_ref.maybe_net();
+            let mut outwards = dot_ref.outwards();
+
+            while let Some(bend) = outwards.walk_next(drawing) {
+                // A same-net wrap does not block the ratline.
+                if bend.primitive_ref(drawing).maybe_net() == pad_net {
+                    continue;
+                }
+                obstacles.insert(PrimitiveIndex::LooseBend(bend));
+            }
+        }
+
+        let obstacles: Vec<PrimitiveIndex> = obstacles.into_iter().collect();
+
+        if self
+            .last_recorded
+            .as_ref()
+            .is_some_and(|last| *last == (curr_ratline_index, obstacles.clone()))
+        {
+            return;
+        }
+        self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
 
         // Loose primitive -> ratline it was routed for. Bands are
         // resolved through the board's band registry, which stays
