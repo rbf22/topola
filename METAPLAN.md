@@ -638,3 +638,50 @@ did not reproduce on rerun — the known residual stale-verdict class
 (documented under "Stale primitive index panic") likely retains edge
 cases; the per-attempt `terminating_dot_map` snapshot above closes one
 new instance of it.
+
+## Branch handoff — commit map for upstreaming
+
+43 commits sit ahead of `upstream/develop` on
+`specctra-compat-and-cli-progress`. The branch mixes several logically
+independent work streams; for upstream review they split most cleanly
+as:
+
+1. **Specctra/DSN compatibility + CLI plumbing** — `5c7165a`, `5292cc0`,
+   `4607ef2`, `0a840c6`, `02155c1`, `e7c13c0`, `66ee52f`. Multi-via
+   `use_via` lists, named-net selection, `--max-seconds`,
+   `--max-reconfigurations`, `--suggest-shifts`. Self-contained;
+   CLI-only except `0a840c6` (selection semantics).
+2. **Micro-optimizations** — `fa5bf9d`, `ca6cb4a`, `0c4c533`,
+   `e349b76`, `5d7c44a`, `11ac627`, `e449435`, `ea29d45`, `7724e8e`,
+   `87cbaa3`, `5b8a0da`. Build/profile tuning, clearance caching,
+   R-tree sizing, allocation cuts, test-profile speedup.
+3. **GUI removal** — `7442858`. Drops egui in favour of the CLI;
+   upstream-relevant only if the CLI-only direction is accepted.
+4. **Negotiated congestion + multilayer scaffolding** — `daef858`,
+   `95a4c5f`, `efa40a6`, `6674ab9`, `0d8a26e`, `5fcd64c`, `53bf5bc`,
+   `6e1ad6e`. Obstacle penalties, clinch detection, component shifting,
+   escape/corridor presorts, surgical rip-up, multilayer layer seeding
+   and rotation.
+5. **Navcord/navmesh performance + staleness correctness** — `b6de79e`,
+   `f7b62c2`, `2663ff6`, `41263bf`, `f4c2df3`, `23e6535`, `14f4099`,
+   `0c02cf6`, `5e99ae6`, `86ab47c`, `d441a94`, `7b310e9`, `217d087`,
+   `dc7c7e3`, `8672c4e`. Cache infrastructure, retained search state,
+   memo liveness guards, preprobe seeding, Arc-shared navmeshes,
+   overlapee caching, and the selection/fail-fast fixes.
+6. **Formatting normalization** — `a5ddace`. Tree-wide `cargo fmt`;
+   will conflict mechanically with upstream — apply last or drop if
+   upstream stays unformatted.
+
+Caveats for upstreaming:
+
+- `METAPLAN.md` is a working document — keep it in the fork or strip
+  before upstream review.
+- `TOPOLA_NO_SEARCH_STATE=1` remains as an A/B lever for the retained
+  search-state machinery (documented under "Stale primitive index
+  panic").
+- Several commits bundle features with their tests; splitting further
+  than the groups above requires rebasing interleaved dependencies and
+  was judged not worth the risk to a green tree.
+- Verification at HEAD: 49 lib tests, 28 unilayer and 3 multilayer
+  integration tests all pass; `test_astable_multivibrator` is
+  historically flaky (~3 min runtime) and passed on rerun.
