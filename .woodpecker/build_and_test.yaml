@@ -43,30 +43,4 @@ steps:
       # Only run tests for stable channel to avoid straining Codeberg's CI.
       evaluate: 'CHANNEL == "stable"'
 
-  # Step instead of a separate flow to reduce Codeberg's CI usage.
-  build_egui:
-    image: rust
-    environment:
-      RUST_BACKTRACE: 1
-      CARGO_TERM_COLOR: always
-    commands:
-      - rustup default "$CHANNEL"
-      - cargo build -j4 --profile "$PROFILE" -p topola-egui --no-default-features --features "$FEATURES,xdg-portal"
-    when:
-      event: [pull_request, push, tag]
 
-  # Step instead of a separate flow to reduce Codeberg's CI usage.
-  build_wasm:
-    image: rust
-    environment:
-      RUST_BACKTRACE: 1
-      CARG_TERM_COLOR: always
-    commands:
-      - apt-get -y install curl
-      - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-      - cargo binstall --no-confirm trunk
-      - rustup default "$CHANNEL"
-      - rustup target add wasm32-unknown-unknown
-      - trunk build
-    when:
-      event: [pull_request, push, tag]

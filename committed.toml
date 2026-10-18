@@ -14,7 +14,6 @@ allowed_scopes = [
   "specctra-core",
   "specctra_derive",
   "topola-cli",
-  "topola-egui",
 
   # Originally generated using
   # `find src -type f | awk '!/lib.rs|mod.rs/ { print "\"" substr($1, 1 + 4, length($1) - 4 - 3) "\","; }' | sort`.

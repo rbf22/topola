@@ -88,95 +88,6 @@ Then choose *File > Import > Specctra Session...* from the menu bar.
 In the newly opened file dialog, choose the file named
 *tht_diode_bridge_rectifier.ses*. This will load the autorouted traces.
 
-### Egui graphical user interface application
-
-Topola has a graphical user interface (GUI) application written using the
-[`egui`](https://github.com/emilk/egui/) library and its paired
-[`eframe`](https://github.com/emilk/egui/tree/master/crates/eframe) framework.
-For displaying dialog boxes, Topola's GUI application uses the
-[Rusty File Dialogs](https://docs.rs/rfd/latest/rfd/) library.
-
-**_NOTE:_** Due to technical constraints, these libraries have multiple runtime dependencies
-that are not managed by the Rust's package manager, Cargo, and as such, it is
-impossible to determine whether these dependencies have been satisfied during
-compilation, but only once the application has been launched. Unfortunately,
-because of that, Topola may crash on startup or have file selection dialog not
-appear on some systems due to unsatisfied runtime dependencies. If you encounter
-any problems, read the
-[*Troubleshooting unmanaged runtime dependencies*](#troubleshooting-unmanaged-runtime-dependencies)
-subsection.
-
-#### Native installation from source
-
-(Topola can be also built and run without installation. If you do not want to
-install new software on your system, skip now to the
-[*Native debug build*](#native-debug-build) subsection.)
-
-The following command will build and install the Topola's GUI application:
-
-    cargo install --locked --path crates/topola-egui
-
-You can then launch the application from your terminal by running
-
-    topola-egui
-
-#### Native debug build
-
-If you do not want to install new software on your system, or are interested in
-debugging or developing Topola, you can build a debug executable of the Topola's
-GUI application inside your working directory by running
-
-    cargo build -p topola-egui
-
-Once built, you can launch the application from the debug executable with the
-following command:
-
-    cargo run -p topola-egui
-
-#### Running Topola in Web browser
-
-Topola's GUI application can be built to run in a Web browser using
-[Trunk](https://trunkrs.dev/). If you have
-[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 
-on your system, you can install Trunk from binary with
-
-    cargo binstall trunk
-
-Alternatively, you can build Trunk from source by running
-
-    cargo install trunk
-
-To build and open the Topola's GUI application in your browser, run
-
-    trunk serve
-
-#### Troubleshooting unmanaged runtime dependencies
-
-##### Crash on startup
-
-If the Topola's GUI application crashes on startup (no window is shown),
-necessary libraries for graphics and windowing (such as X11 and Wayland) may
-be missing. Note that running `ldd` on the `topola-egui` executable does not
-show these, as they are loaded dynamically (via some `dlopen`-like mechanism)
-on startup.
-
-##### No file selection dialog appears
-
-If no file selection dialog appears when trying to open a file, then this is
-most likely because you do not have
-[Zenity](https://gitlab.gnome.org/GNOME/zenity) installed on your system. In
-this case, an error similar to the following should be emitted in your terminal:
-
-```
-[2025-01-01T01:16:17Z ERROR rfd::backend::xdg_desktop_portal] pick_file error No such file or directory (os error 2)
-```
-
-Zenity is needed because it is used by the default `xdg-portal` backend of
-Rusty File Dialogs. As an alternative, you can try its other backend, `gtk3`, by
-building `topola-egui` with the following command:
-
-    cargo build -p topola-egui --release --no-default-features --features disable_contracts --features gtk3
-
 ### Automated tests
 
 Topola has automated tests to make sure its basic functionalities work.
@@ -226,7 +137,7 @@ with contracts, simply run
     cargo test --no-default-features
 
 Of course, you can enable contracts for any build target. For example, the
-following command will build the Topola's GUI application with debug profile and
-contracts enabled:
+following command will build the Topola's command-line application with debug
+profile and contracts enabled:
 
-    cargo build -p topola-egui --no-default-features
+    cargo build -p topola-cli --no-default-features
