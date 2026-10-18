@@ -577,7 +577,7 @@ impl Prenavmesh {
 /// still valid — unlike a geometry-only fingerprint, which a rerouted
 /// band over the same gears could collide with while its bend indices
 /// differ.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum LooseSig {
     Dot(crate::drawing::graph::PrimitiveWeight),
     Seg(crate::drawing::graph::PrimitiveWeight, usize, usize),
@@ -589,15 +589,33 @@ enum LooseSig {
     ),
 }
 
-type LooseSnapshot = BTreeMap<PrimitiveIndex, LooseSig>;
+/// Every loose primitive's signature plus an order-independent hash
+/// folded in during construction. The hash only serves to prune
+/// equality checks cheaply — equality itself stays exact on the map.
+#[derive(Clone, Debug)]
+struct LooseSnapshot {
+    map: BTreeMap<PrimitiveIndex, LooseSig>,
+    hash: u64,
+}
+
+impl PartialEq for LooseSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.map == other.map
+    }
+}
+
+type LooseSnapshotMap = BTreeMap<PrimitiveIndex, LooseSig>;
 
 /// Snapshots every loose primitive on `layer`: bands of any net can be
 /// wrapped by the navmesh's navnodes, so the snapshot cannot be
 /// restricted to one net.
 fn loose_snapshot(layout: &Layout<impl AccessRules>, layer: usize) -> LooseSnapshot {
+    use std::hash::{Hash, Hasher};
+
     let drawing = layout.drawing();
     let geometry = drawing.geometry();
-    layout
+    let mut hash = 0u64;
+    let map: LooseSnapshotMap = layout
         .drawing()
         .layer_primitive_nodes(layer)
         .filter_map(|node| {
@@ -633,9 +651,21 @@ fn loose_snapshot(layout: &Layout<impl AccessRules>, layer: usize) -> LooseSnaps
                 }
                 _ => return None,
             };
+            // Weight bits are intentionally not folded in — the hash is
+            // only a fast reject for the exact map comparison, never
+            // the authority on equality.
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (node.index(), std::mem::discriminant(&sig)).hash(&mut hasher);
+            match &sig {
+                LooseSig::Dot(_) => {}
+                LooseSig::Seg(_, from, to) => (from, to).hash(&mut hasher),
+                LooseSig::Bend(_, from, to, inner) => (from, to, inner).hash(&mut hasher),
+            }
+            hash ^= hasher.finish();
             Some((node, sig))
         })
-        .collect()
+        .collect();
+    LooseSnapshot { map, hash }
 }
 
 /// A cached prenavmesh base for one `(net, layer)` pair.
@@ -1219,6 +1249,63 @@ mod tests {
 
         layout.apply(&seg_edit.reverse());
         assert_eq!(loose_snapshot(layout, 0), snapshot);
+    }
+
+    /// The snapshot hash is only a fast reject for equality: a hash
+    /// mismatch must compare unequal without consulting the map, but a
+    /// matching hash must still defer to exact map equality so a
+    /// collision can never produce a false hit.
+    #[test]
+    fn loose_snapshot_hash_never_overrides_exact_equality() {
+        use crate::drawing::{dot::LooseDotWeight, graph::PrimitiveWeight};
+
+        let dot = |x: f64| {
+            LooseSig::Dot(PrimitiveWeight::LooseDot(LooseDotWeight(
+                GeneralDotWeight {
+                    circle: Circle {
+                        pos: point!(x: x, y: -8000.0),
+                        r: 100.0,
+                    },
+                    layer: 0,
+                    maybe_net: Some(90),
+                },
+            )))
+        };
+        let key = PrimitiveIndex::LooseDot(GenericIndex::new(0));
+
+        let mut map_a = LooseSnapshotMap::new();
+        map_a.insert(key, dot(0.0));
+        let mut map_b = LooseSnapshotMap::new();
+        map_b.insert(key, dot(500.0));
+
+        let a = LooseSnapshot {
+            map: map_a.clone(),
+            hash: 7,
+        };
+        assert_eq!(
+            a,
+            LooseSnapshot {
+                map: map_a,
+                hash: 7
+            }
+        );
+        // Same hash, different map: a collision falls through to the
+        // exact comparison and must still report unequal.
+        assert_ne!(
+            a,
+            LooseSnapshot {
+                map: map_b,
+                hash: 7
+            }
+        );
+        // Same map, different hash: the fast reject fires.
+        assert_ne!(
+            a,
+            LooseSnapshot {
+                map: a.map.clone(),
+                hash: 9,
+            }
+        );
     }
 
     /// After loose geometry is added and then undone, a navmesh

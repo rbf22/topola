@@ -260,6 +260,20 @@ where
 
                 crate::metrics::incr(&crate::metrics::METRICS.frontier_pops);
 
+                // If the node has already been visited with an equal or lower
+                // estimated score than now, then we do not need to re-visit it.
+                // Checking before `.visit_navnode(..)` skips the path
+                // reconstruction and navcord rework stale pops would pay.
+                // The destination is never stale: finishing returns from
+                // inside `.visit_navnode(..)` before `estimated_costs` is
+                // ever set for it.
+                if node_slot(&self.estimated_costs, navnode)
+                    .is_some_and(|score| score <= estimate_score)
+                {
+                    crate::metrics::incr(&crate::metrics::METRICS.stale_frontier_pops);
+                    return Ok(ControlFlow::Continue(self.state));
+                }
+
                 if let Ok(maybe_result) =
                     strategy.visit_navnode(&self.graph, navnode, &self.path_tracker)
                 {
@@ -270,14 +284,6 @@ where
                         return Ok(ControlFlow::Break((cost, path, result)));
                     }
 
-                    // If the node has already been visited with an equal or lower
-                    // estimated score than now, then we do not need to re-visit it.
-                    if node_slot(&self.estimated_costs, navnode)
-                        .is_some_and(|score| score <= estimate_score)
-                    {
-                        crate::metrics::incr(&crate::metrics::METRICS.stale_frontier_pops);
-                        return Ok(ControlFlow::Continue(self.state));
-                    }
                     set_node_slot(&mut self.estimated_costs, navnode, estimate_score);
 
                     self.edge_ids.clear();

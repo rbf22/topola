@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
@@ -178,7 +178,15 @@ impl Navmesh {
         let mut origin_navnode = None;
         let mut destination_navnode = None;
 
-        let mut prenavnode_to_navnodes = BTreeMap::new();
+        // Prenavnodes index into the same dense usize space as
+        // `overlapping_prenavnodes_unions`, so a flat Vec replaces the
+        // BTreeMap queried once per prenavedge in the hottest part of
+        // navmesh construction. `None` means the prenavnode never
+        // entered this navmesh's triangulation; `Some(vec![])` means it
+        // did but produced no navnodes — the same distinction the
+        // BTreeMap made between a missing key and an empty value.
+        let mut prenavnode_to_navnodes: Vec<Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>> =
+            vec![None; layout.drawing().geometry().dot_index_bound()];
         let mut overlapping_prenavnodes_unions =
         // FIXME: This bound is incorrect. You can't actually unionize dots with bends.
             UnionFind::new(layout.drawing().geometry().dot_index_bound());
@@ -191,7 +199,7 @@ impl Navmesh {
                 });
 
                 origin_navnode = Some(navnode);
-                prenavnode_to_navnodes.insert(prenavnode, vec![(navnode, navnode)]);
+                prenavnode_to_navnodes[prenavnode.index()] = Some(vec![(navnode, navnode)]);
             } else if prenavnode == destination.into() {
                 let navnode = graph.add_node(NavnodeWeight {
                     binavnode: prenavnode.into(),
@@ -199,9 +207,9 @@ impl Navmesh {
                 });
 
                 destination_navnode = Some(navnode);
-                prenavnode_to_navnodes.insert(prenavnode, vec![(navnode, navnode)]);
+                prenavnode_to_navnodes[prenavnode.index()] = Some(vec![(navnode, navnode)]);
             } else {
-                prenavnode_to_navnodes.insert(prenavnode, vec![]);
+                prenavnode_to_navnodes[prenavnode.index()] = Some(vec![]);
                 Self::unionize_with_overlapees(
                     layout,
                     &mut overlapping_prenavnodes_unions,
@@ -300,7 +308,7 @@ impl Navmesh {
 
             // A representative outside this navmesh's triangulation
             // has no navnodes to copy edges from.
-            let Some(repr_navnodes) = prenavnode_to_navnodes.get(&repr) else {
+            let Some(repr_navnodes) = &prenavnode_to_navnodes[repr.index()] else {
                 continue;
             };
 
@@ -311,7 +319,10 @@ impl Navmesh {
                     .collect();
 
                 for target in repr_navedge1_targets {
-                    for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[&prenavnode].iter()
+                    for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[prenavnode.index()]
+                        .as_ref()
+                        .unwrap()
+                        .iter()
                     {
                         graph.update_edge(*from_navnode1, target, ());
                         graph.update_edge(*from_navnode2, target, ());
@@ -324,7 +335,10 @@ impl Navmesh {
                     .collect();
 
                 for target in repr_navedge2_targets {
-                    for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[&prenavnode].iter()
+                    for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[prenavnode.index()]
+                        .as_ref()
+                        .unwrap()
+                        .iter()
                     {
                         graph.update_edge(*from_navnode1, target, ());
                         graph.update_edge(*from_navnode2, target, ());
@@ -390,10 +404,7 @@ impl Navmesh {
 
     fn add_prenavnode_as_binavnode(
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
-        prenavnode_to_navnodes: &mut BTreeMap<
-            PrenavnodeNodeIndex,
-            Vec<(NodeIndex<usize>, NodeIndex<usize>)>,
-        >,
+        prenavnode_to_navnodes: &mut [Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
         prenavnode: PrenavnodeNodeIndex,
         binavnode: BinavnodeNodeIndex,
     ) {
@@ -407,8 +418,8 @@ impl Navmesh {
             maybe_sense: Some(RotationSense::Clockwise),
         });
 
-        prenavnode_to_navnodes
-            .get_mut(&prenavnode)
+        prenavnode_to_navnodes[prenavnode.index()]
+            .as_mut()
             .unwrap()
             .push((navnode1, navnode2));
     }
@@ -416,10 +427,7 @@ impl Navmesh {
     fn add_prenavedge_to_repr_as_quadrinavedges(
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
-        prenavnode_to_navnodes: &BTreeMap<
-            PrenavnodeNodeIndex,
-            Vec<(NodeIndex<usize>, NodeIndex<usize>)>,
-        >,
+        prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
         overlapping_prenavnodes_unions: &UnionFind<usize>,
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
@@ -436,7 +444,7 @@ impl Navmesh {
             // same-location pads on other layers — and then it has no
             // navnodes to wire edges to. Fall back to the prenavnode
             // itself, which is always a key.
-            if prenavnode_to_navnodes.contains_key(&repr) {
+            if prenavnode_to_navnodes[repr.index()].is_some() {
                 repr
             } else {
                 prenavnode
@@ -457,10 +465,7 @@ impl Navmesh {
     fn add_prenavedge_as_quadrinavedges(
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
-        prenavnode_to_navnodes: &BTreeMap<
-            PrenavnodeNodeIndex,
-            Vec<(NodeIndex<usize>, NodeIndex<usize>)>,
-        >,
+        prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
     ) {
@@ -469,8 +474,8 @@ impl Navmesh {
         // nodes — has no navnodes for an edge to attach to; such an
         // edge cannot be navigated, so skip it.
         let (Some(from_navnodes), Some(to_navnodes)) = (
-            prenavnode_to_navnodes.get(&from_prenavnode),
-            prenavnode_to_navnodes.get(&to_prenavnode),
+            prenavnode_to_navnodes[from_prenavnode.index()].as_ref(),
+            prenavnode_to_navnodes[to_prenavnode.index()].as_ref(),
         ) else {
             return;
         };

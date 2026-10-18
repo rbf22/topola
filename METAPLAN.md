@@ -170,16 +170,62 @@ Unit coverage for the virtual navcord: 8 tests in `router::navcord::tests`
       candidates (0.1%); candidates surviving the largest-clearance
       envelope genuinely sit within pairwise clearance, so the cost is
       real geometry work plus rstar traversal, not over-selection.
-      The remaining lever is fewer *queries*: `visit_navnode`
-      (4.6M on candE) forces a navcord `rework_path` per A* expansion,
-      each redrawn step re-running infringement checks — decoupling
-      g-score expansion from geometry materialization would collapse
-      whole classes of these queries; (b) navmesh reuse across
-      attempts — vertex/constrained bases already share, but
-      quadrinavedge rebuild (5.7%) could be keyed looser if navnodes
-      prove independent of mutable loose geometry; (c) memoize
-      `fixed_fingerprint`/`loose_snapshot` per `Drawing::generation`
-      when consecutive `navmesh_in` calls see an unmutated board.
+      (b) ~~navmesh reuse across attempts with a looser key~~ —
+      **analyzed and rejected**: `ConstraintKey` deliberately excludes
+      loose bends/dots, but `wrap_around_bands`/`squeeze` create
+      navnodes whose gears reference loose bends by board index, so the
+      exact `LooseSnapshot` is semantically necessary. What landed
+      instead: the snapshot is now hash-assisted (see below) and the
+      per-build `prenavnode_to_navnodes` `BTreeMap` was replaced with a
+      dense `Vec<Option<Vec<..>>>` indexed by prenavnode graph index —
+      `Option` preserves the old `contains_key` distinction between
+      "not in this triangulation" and "in it with no navnodes".
+      (c) ~~memoize `fixed_fingerprint`/`loose_snapshot` per
+      `Drawing::generation`~~ — **analyzed and rejected**: the
+      generation counter bumps on every band mutation, so it never
+      survives between the calls that pay the scan (that is exactly why
+      snapshots exist). What landed instead: `LooseSnapshot` carries an
+      order-independent `u64` hash folded during construction that
+      fast-rejects equality before the `BTreeMap` compare — the map
+      compare remains authoritative on hash match, so collisions can
+      only cost a wasted compare, never a false hit.
+      `loose_snapshot_hash_never_overrides_exact_equality` pins both
+      directions of that contract.
+
+## A*-expansion / navcord-materialization coupling — analyzed
+
+The hypothesized big win — decoupling g-score expansion from geometry
+materialization so `visit_navnode` stops paying a `rework_path` per
+visit (5.6M calls on candE) — turns out to be **already achieved** in
+the ways that matter:
+
+- The navcord only ever holds *virtual* canes during search; nothing
+  materializes until the destination is popped and committed.
+- `rework_path` is incremental: it diffs the current path against the
+  target prefix, undoes only the divergent suffix, and redraws only
+  the new tail — 5.6M calls, 820ms total on candE (~2% of runtime).
+- Redrawn steps are further memoized: `step_memo` replays 5.2M of
+  8.6M `step_to` calls on candE without re-running geometry.
+
+The real cost attributed to "every A* expansion" is not rework
+overhead but the `infringe` queries inside *genuine* probes — theta*'s
+line-of-sight checks are semantically required and each verdict
+depends on the exact head state (path prefix + materialized prefix),
+so probe verdicts cannot be keyed any looser without changing the
+algorithm. What landed instead:
+
+- `ThetastarStepper` now checks `estimated_costs` *before*
+  `visit_navnode`, so stale frontier pops (22.3K of 174K pops on
+  candE, ~13%) skip path reconstruction and navcord rework entirely.
+  Safe because the destination is never stale — finishing returns from
+  inside `visit_navnode` before `estimated_costs` is set for it.
+- `LooseSnapshot` hash fast-reject and the vector-backed
+  `prenavnode_to_navnodes` map described above.
+
+Remaining structural headroom is in `infringe` itself (13.2s of
+`step_to`'s 22.1s): cheaper polygon/clearance predicates or a tighter
+R-tree envelope than `largest_clearance`, not materialization
+decoupling.
 
 ## Phase B — Prenavmesh reuse
 
@@ -240,7 +286,8 @@ exact-snapshot validation in B4 (see progress log).
       `Drawing::add_cane_infringably`/`move_dot_infringably` with no
       queries at all. 14s → 3.6s on 4x4 (91% of draws trusted).
       (`visit_navnode` itself still runs ~25x/pop but each rework is now
-      cheap; skipping no-op reworks remains a small TODO.)
+      cheap; stale-pops now skip `visit_navnode` entirely — see the
+      "A*-expansion coupling" section.)
 - [x] C5. Query filter reordering (`query.rs`): reject loose-dot and
       same-net infringees before geometric evaluation; early-out when
       infringer is a loose dot. Candidates 14.8M→8.8M, query time 2.3→1.4s.
