@@ -41,7 +41,7 @@ use crate::{
 };
 
 /// The outcome of probing one unrouted ratline under relaxed rules.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ChannelProbe {
     /// The ratline's net.
     pub net: Option<usize>,
@@ -71,23 +71,7 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         let saved_rules = self.board.layout().drawing().rules().clone();
         relax_rules(self.board.layout_mut().rules_mut());
 
-        let unrouted: Vec<RatlineUid> = {
-            let ratsnest = self.ratsnests.on_principal_layer(0);
-            ratsnest
-                .graph()
-                .edge_indices()
-                .filter(|&index| {
-                    ratsnest
-                        .graph()
-                        .edge_weight(index)
-                        .is_some_and(|weight| weight.band_termseg.is_none())
-                })
-                .map(|index| RatlineUid {
-                    principal_layer: 0,
-                    index,
-                })
-                .collect()
-        };
+        let unrouted = self.unrouted_ratlines();
 
         let mut probes = Vec::with_capacity(unrouted.len());
         // The board is reverted between probes, so one set of prenavmesh
@@ -95,43 +79,123 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         let mut prenavmesh_bases = PrenavmeshBases::default();
 
         for uid in unrouted {
-            let (origin, destination) = uid.ref_(self).endpoint_dots();
-            let (net, same_layer) = {
-                let drawing = self.board.layout().drawing();
-                (
-                    origin.primitive_ref(drawing).maybe_net(),
-                    origin.primitive_ref(drawing).layer()
-                        == destination.primitive_ref(drawing).layer(),
-                )
-            };
-            if !same_layer {
-                // A cross-layer ratline needs a via, which the planar
-                // probe cannot express.
-                probes.push(ChannelProbe {
-                    net,
-                    endpoints: (origin, destination),
-                    path: vec![],
-                    terminal_blocker: None,
-                });
-                continue;
-            }
-
-            let (path, terminal_blocker) = self.probe_ratline(
-                origin,
-                destination,
-                router_options,
-                &mut prenavmesh_bases,
-            );
-            probes.push(ChannelProbe {
-                net,
-                endpoints: (origin, destination),
-                path,
-                terminal_blocker,
-            });
+            probes.push(self.probe_one(uid, router_options, &mut prenavmesh_bases));
         }
 
         *self.board.layout_mut().rules_mut() = saved_rules;
         probes
+    }
+
+    /// Probes one ratline under the currently installed rules.
+    /// Cross-layer ratlines (needing a via the planar probe cannot
+    /// express) yield an empty-path probe.
+    fn probe_one(
+        &mut self,
+        uid: RatlineUid,
+        router_options: RouterOptions,
+        prenavmesh_bases: &mut PrenavmeshBases,
+    ) -> ChannelProbe {
+        let (origin, destination) = uid.ref_(self).endpoint_dots();
+        let (net, same_layer) = {
+            let drawing = self.board.layout().drawing();
+            (
+                origin.primitive_ref(drawing).maybe_net(),
+                origin.primitive_ref(drawing).layer() == destination.primitive_ref(drawing).layer(),
+            )
+        };
+        if !same_layer {
+            return ChannelProbe {
+                net,
+                endpoints: (origin, destination),
+                path: vec![],
+                terminal_blocker: None,
+            };
+        }
+
+        let (path, terminal_blocker) =
+            self.probe_ratline(origin, destination, router_options, prenavmesh_bases);
+        ChannelProbe {
+            net,
+            endpoints: (origin, destination),
+            path,
+            terminal_blocker,
+        }
+    }
+
+    /// The unrouted ratlines of the principal-layer ratsnest, in edge
+    /// order — the work list shared by the sequential and parallel
+    /// probe drivers.
+    fn unrouted_ratlines(&self) -> Vec<RatlineUid> {
+        let ratsnest = self.ratsnests.on_principal_layer(0);
+        ratsnest
+            .graph()
+            .edge_indices()
+            .filter(|&index| {
+                ratsnest
+                    .graph()
+                    .edge_weight(index)
+                    .is_some_and(|weight| weight.band_termseg.is_none())
+            })
+            .map(|index| RatlineUid {
+                principal_layer: 0,
+                index,
+            })
+            .collect()
+    }
+
+    /// Parallel variant of [`Self::probe_channels`]: each worker
+    /// clones this autorouter, applies `relax_rules` to its own board,
+    /// and probes a disjoint chunk of the unrouted ratlines. `self` is
+    /// never mutated — the clone carries the rule relaxation and each
+    /// worker reverts every probe band before the next, so chunks can
+    /// not interfere. Results are returned in ratline order.
+    ///
+    /// With `jobs <= 1` this still pays for one clone; callers wanting
+    /// no clone should use [`Self::probe_channels`] instead.
+    pub fn probe_channels_par(
+        &self,
+        router_options: RouterOptions,
+        relax_rules: &(impl Fn(&mut M) + Sync),
+        jobs: usize,
+    ) -> Vec<ChannelProbe>
+    where
+        M: Send + Sync,
+    {
+        let unrouted = self.unrouted_ratlines();
+        let chunk_size = unrouted.len().div_ceil(jobs.max(1)).max(1);
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = unrouted
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(|| {
+                        let mut worker = self.clone();
+                        relax_rules(worker.board.layout_mut().rules_mut());
+                        let mut prenavmesh_bases = PrenavmeshBases::default();
+                        chunk
+                            .iter()
+                            .map(|&uid| {
+                                worker.probe_one(uid, router_options, &mut prenavmesh_bases)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle.join().unwrap_or_else(|payload| {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+                        eprintln!("probe worker panicked: {msg:?}");
+                        std::panic::resume_unwind(payload)
+                    })
+                })
+                .collect()
+        })
     }
 
     /// Routes one ratline's endpoints with the current (relaxed) rules.
@@ -143,13 +207,13 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         destination: crate::drawing::dot::FixedDotIndex,
         router_options: RouterOptions,
         prenavmesh_bases: &mut PrenavmeshBases,
-    ) -> (Vec<(Point, usize)>, Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>) {
-        let Ok(navmesh) = prenavmesh_bases.navmesh(
-            self.board.layout(),
-            origin,
-            destination,
-            router_options,
-        ) else {
+    ) -> (
+        Vec<(Point, usize)>,
+        Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>,
+    ) {
+        let Ok(navmesh) =
+            prenavmesh_bases.navmesh(self.board.layout(), origin, destination, router_options)
+        else {
             return (vec![], None);
         };
 
@@ -232,5 +296,45 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         }
 
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader};
+
+    use super::*;
+    use crate::{
+        board::edit::BoardEdit,
+        specctra::{design::SpecctraDesign, mesadata::SpecctraMesadata},
+    };
+
+    /// The parallel probe must return exactly what the sequential one
+    /// does — same order, same contents — while leaving the board
+    /// untouched.
+    #[test]
+    fn parallel_probe_matches_sequential() {
+        let design = || {
+            let file = File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+            SpecctraDesign::load(BufReader::new(file)).unwrap()
+        };
+        let mut sequential_autorouter =
+            Autorouter::new(design().make_board(&mut BoardEdit::new())).unwrap();
+        let parallel_autorouter =
+            Autorouter::new(design().make_board(&mut BoardEdit::new())).unwrap();
+
+        let options = RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: false,
+            routed_band_width: 100.0,
+        };
+        let sequential =
+            sequential_autorouter.probe_channels(options, |rules| rules.override_clearances(0.0));
+        let parallel = parallel_autorouter.probe_channels_par(
+            options,
+            &|rules: &mut SpecctraMesadata| rules.override_clearances(0.0),
+            3,
+        );
+        assert_eq!(sequential, parallel);
     }
 }

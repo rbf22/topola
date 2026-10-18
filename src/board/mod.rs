@@ -82,7 +82,7 @@ impl<'a> ResolvedSelector<'a> {
 ///
 /// The struct manages the relationships between board's layout,
 /// and its compounds, as well as provides methods to manipulate them.
-#[derive(Debug, Getters)]
+#[derive(Clone, Debug, Getters)]
 pub struct Board<M> {
     layout: Layout<M>,
     #[getter(skip)]

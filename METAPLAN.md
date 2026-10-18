@@ -268,9 +268,21 @@ precheck inside the candidate loop was tried and reverted — it added
 
 ## Phase F — Parallelism (exploration, not per-route)
 
-- [ ] F1. `probe_channels` is embarrassingly parallel: each probe reverts
-        the board — run probes on `Board` clones across threads (rayon).
-        Measure clone cost vs. probe cost first.
+- [x] F1. `probe_channels_par`: probes partitioned across `jobs` workers,
+        each on its own `Autorouter` clone with relaxed rules applied
+        locally; results merged back in ratline order. `Board`/`Autorouter`
+        gained `Clone` for this; worker join panics are surfaced, not
+        swallowed. `--suggest-shifts` honors `--jobs` for probing.
+        candE (2449 probes): **119s → 29s wall (~4.1×)** on `--jobs 4`
+        (~101s CPU). Bit-identical output across reruns of either driver.
+        Caveat: probing is *history-sensitive* — reverted bands leave
+        allocation-state (slot-vacancy) residue that perturbs later
+        searches, so after ~400+ prior probes a marginal relaxed route
+        can flip outcome (1/2449 channel diverged: a GND ratline that
+        routes only after enough prior probes). Both answers are valid
+        samples; sequential output is equally order-sensitive. Also
+        surfaced and fixed a pre-existing navmesh panic on
+        constraint-edge endpoints absent from the triangulation.
 - [x] F2. Parallel permutation search: `topola --jobs N` spawns N
         threads; each loads the .dsn, builds its own board/invoker, and
         routes with a different `shuffle_seed` (deterministic within-SCC
@@ -295,8 +307,20 @@ precheck inside the candidate loop was tried and reverted — it added
         still oscillates, doesn't converge. Note: seeded `layer_seed`
         perturbation *hurt* on candE (workers j1–j3 routed 0–22 vs j0's
         38) — preferred layers are near-optimal there.
-- [ ] G2. Use probe corridor overlap to detect ratlines that will conflict
-        and schedule them so the second takes the alternate channel.
+- [x] G2. Conflict-aware multilayer layer seeding
+        (`MultilayerPreconfigurer::new_seeded`): ratlines whose straight
+        origin→destination corridors overlap (r-tree-pruned, geo `Line`
+        distance < one band width) are spread across layers — the second
+        takes a layer not claimed by an already-assigned rival, scanned in
+        seed-rotated order so parallel workers still diverge. `layer_seed
+        == 0` keeps preferred layers exactly. Replaces the blind
+        `splitmix64` shuffle. Deterministic, bounded, unit-tested.
+        candE `--jobs 4` result: seeded workers reached 24 vs j0's
+        preferred-layer 38 — less harmful than pure random but preferred
+        layers still win on this board; seed 0 remains the candE recipe.
+        Within-SCC reordering/precedence from corridor conflicts is the
+        still-open piece (reactive blocker precedence already exists in
+        `PlanarReconfigurer`).
 - [ ] G3. Wire relaxed-probe failure info into `--suggest-shifts` (already
         partially done) and into reconfiguration heuristics.
 

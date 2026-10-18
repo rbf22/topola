@@ -145,7 +145,7 @@ pub enum AutorouterError {
     NothingToUndoForReconfiguration,
 }
 
-#[derive(Getters)]
+#[derive(Clone, Getters)]
 pub struct Autorouter<M> {
     pub(super) board: Board<M>,
     pub(super) ratsnests: Ratsnests,

@@ -100,6 +100,7 @@ impl IndexMut<RatvertexNodeIndex> for RatvertexToHandleMap {
     }
 }
 
+#[derive(Clone)]
 pub struct Ratsnest {
     graph: StableUnGraph<RatvertexWeight, RatlineWeight, usize>,
 }

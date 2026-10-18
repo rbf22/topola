@@ -54,8 +54,14 @@ impl MultilayerAutorouteReconfigurator {
         input: MultilayerAutoroutePreconfigurerInput,
         options: MultilayerAutorouteOptions,
     ) -> Result<Self, AutorouterError> {
-        let preconfigurer =
-            MultilayerPreconfigurer::new_seeded(autorouter, input.clone(), options.layer_seed);
+        // One band width: demand corridors closer than that cannot
+        // both fit on one layer without a detour.
+        let preconfigurer = MultilayerPreconfigurer::new_seeded(
+            autorouter,
+            input.clone(),
+            options.layer_seed,
+            options.planar.router.routed_band_width,
+        );
 
         let preconfiguration = MultilayerAutorouteConfiguration {
             plan: preconfigurer.plan().clone(),

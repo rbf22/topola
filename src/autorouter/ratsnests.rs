@@ -7,6 +7,7 @@ use specctra_core::mesadata::AccessMesadata;
 
 use crate::{autorouter::ratsnest::Ratsnest, board::Board};
 
+#[derive(Clone)]
 pub struct Ratsnests(Box<[Ratsnest]>);
 
 impl Ratsnests {

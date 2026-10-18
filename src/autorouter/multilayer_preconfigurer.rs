@@ -5,6 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use derive_getters::Getters;
+use geo::{Distance, Euclidean, Line};
+use rstar::{
+    primitives::{GeomWithData, Rectangle},
+    RTree, RTreeObject, AABB,
+};
 use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
@@ -12,8 +17,9 @@ use crate::{
     drawing::{
         dot::FixedDotIndex,
         graph::{MakePrimitiveRef, PrimitiveIndex},
+        primitive::MakePrimitiveShape,
     },
-    geometry::{GenericNode, GetLayer},
+    geometry::{shape::AccessShape, GenericNode, GetLayer},
     graph::MakeRef,
 };
 
@@ -40,37 +46,140 @@ impl MultilayerPreconfigurer {
         autorouter: &Autorouter<impl AccessMesadata>,
         input: MultilayerAutoroutePreconfigurerInput,
     ) -> Self {
-        Self::new_seeded(autorouter, input, 0)
+        // The corridor margin is only read by the nonzero-seed branch.
+        Self::new_seeded(autorouter, input, 0, 0.0)
     }
 
     /// `layer_seed == 0` keeps every ratline's preferred layer. A
-    /// nonzero seed assigns each ratline a deterministic
-    /// pseudo-random layer, so parallel routing workers explore
-    /// different initial layer assignments. Assignments that fail
-    /// fanout placement fall back to the preferred layer.
+    /// nonzero seed assigns layers conflict-directedly: ratlines whose
+    /// straight-line demand corridors approach within
+    /// `corridor_margin` compete for the same channel, so conflicting
+    /// ratlines are spread over distinct layers where a free layer
+    /// exists — the seed only rotates each ratline's scan order, so
+    /// parallel workers resolve conflicts differently while
+    /// conflict-free ratlines keep their preferred layer (blind
+    /// random assignment showed that preferred layers are often
+    /// near-optimal). Assignments that fail fanout placement fall back
+    /// to the preferred layer.
     pub fn new_seeded(
         autorouter: &Autorouter<impl AccessMesadata>,
         input: MultilayerAutoroutePreconfigurerInput,
         layer_seed: u64,
+        corridor_margin: f64,
     ) -> Self {
         let layer_count = autorouter.board().layout().drawing().layer_count();
-        Self::new_from_layer_map(
-            autorouter,
-            &input.ratlines,
+        let layer_map = if layer_seed == 0 {
             input
                 .ratlines
                 .iter()
+                .map(|ratline| (*ratline, ratline.ref_(autorouter).preferred_layer()))
+                .collect()
+        } else {
+            Self::conflict_directed_layer_map(
+                autorouter,
+                &input.ratlines,
+                layer_seed,
+                layer_count,
+                corridor_margin,
+            )
+        };
+        Self::new_from_layer_map(autorouter, &input.ratlines, layer_map)
+    }
+
+    /// The straight-line corridor a ratline demands between its
+    /// endpoint dots.
+    fn corridor(autorouter: &Autorouter<impl AccessMesadata>, ratline: RatlineUid) -> Line<f64> {
+        let drawing = autorouter.board().layout().drawing();
+        let pos = |dot: FixedDotIndex| dot.primitive_ref(drawing).shape().center();
+        let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+        Line::new(pos(origin), pos(destination))
+    }
+
+    /// Conflict-directed layer assignment: two ratlines whose demand
+    /// corridors come within `corridor_margin` cannot both follow
+    /// their demand paths on one layer, so the second gets an
+    /// alternate channel. Most-conflicted ratlines assign first; each
+    /// keeps its preferred layer when unclaimed by a conflicting
+    /// already-assigned corridor, else takes the first free layer in a
+    /// seed-rotated scan. Falls back to the preferred layer when every
+    /// layer is claimed.
+    fn conflict_directed_layer_map(
+        autorouter: &Autorouter<impl AccessMesadata>,
+        ratlines: &BTreeSet<RatlineUid>,
+        layer_seed: u64,
+        layer_count: usize,
+        corridor_margin: f64,
+    ) -> BTreeMap<RatlineUid, usize> {
+        let corridors: Vec<(RatlineUid, Line<f64>)> = ratlines
+            .iter()
+            .map(|ratline| (*ratline, Self::corridor(autorouter, *ratline)))
+            .collect();
+
+        // Envelope-pruned candidate pairs; corridors conflict when
+        // their segments actually come within the margin.
+        let envelope_of = |line: &Line<f64>| {
+            let envelope = AABB::from_points([&line.start_point(), &line.end_point()]);
+            let (l, u) = (envelope.lower(), envelope.upper());
+            Rectangle::from_corners(
+                geo::Point::new(l.x() - corridor_margin, l.y() - corridor_margin),
+                geo::Point::new(u.x() + corridor_margin, u.y() + corridor_margin),
+            )
+        };
+        let envelopes: Vec<Rectangle<geo::Point<f64>>> = corridors
+            .iter()
+            .map(|(_, line)| envelope_of(line))
+            .collect();
+        let tree = RTree::bulk_load(
+            envelopes
+                .iter()
                 .enumerate()
-                .map(|(i, ratline)| {
-                    let layer = if layer_seed == 0 {
-                        ratline.ref_(autorouter).preferred_layer()
-                    } else {
-                        splitmix64(layer_seed ^ i as u64) as usize % layer_count
-                    };
-                    (*ratline, layer)
-                })
+                .map(|(i, envelope)| GeomWithData::new(*envelope, i))
                 .collect(),
-        )
+        );
+
+        let mut conflicts: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); corridors.len()];
+        for (i, (_, line)) in corridors.iter().enumerate() {
+            for hit in tree.locate_in_envelope_intersecting(&envelopes[i].envelope()) {
+                let j = hit.data;
+                if j != i && Euclidean::distance(&*line, &corridors[j].1) < corridor_margin {
+                    conflicts[i].insert(j);
+                    conflicts[j].insert(i);
+                }
+            }
+        }
+
+        // Most-conflicted ratlines assign first — they have the least
+        // freedom left later.
+        let mut order: Vec<usize> = (0..corridors.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(conflicts[i].len()), i));
+
+        let mut layers = vec![usize::MAX; corridors.len()];
+        let mut map = BTreeMap::new();
+        for &i in &order {
+            let (ratline, _) = corridors[i];
+            let preferred = ratline.ref_(autorouter).preferred_layer();
+            let chosen = if conflicts[i].is_empty() {
+                preferred
+            } else {
+                let claimed: BTreeSet<usize> = conflicts[i]
+                    .iter()
+                    .filter(|&&j| layers[j] != usize::MAX)
+                    .map(|&j| layers[j])
+                    .collect();
+                if !claimed.contains(&preferred) {
+                    preferred
+                } else {
+                    let start = splitmix64(layer_seed ^ i as u64) as usize % layer_count;
+                    (0..layer_count)
+                        .map(|k| (start + k) % layer_count)
+                        .find(|layer| !claimed.contains(layer))
+                        .unwrap_or(preferred)
+                }
+            };
+            layers[i] = chosen;
+            map.insert(ratline, chosen);
+        }
+        map
     }
 
     pub fn new_from_layer_map(
@@ -157,10 +266,8 @@ mod tests {
     };
 
     fn astable() -> Autorouter<SpecctraMesadata> {
-        let design_file = File::open(
-            "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn",
-        )
-        .unwrap();
+        let design_file =
+            File::open("tests/multilayer/astable_multivibrator/astable_multivibrator.dsn").unwrap();
         let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
         Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
     }
@@ -190,8 +297,8 @@ mod tests {
         let layer_count = autorouter.board().layout().drawing().layer_count();
         let input = input(&autorouter);
 
-        let first = MultilayerPreconfigurer::new_seeded(&autorouter, input.clone(), 7);
-        let second = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7);
+        let first = MultilayerPreconfigurer::new_seeded(&autorouter, input.clone(), 7, 100.0);
+        let second = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7, 100.0);
         assert_eq!(first.plan().layer_map, second.plan().layer_map);
         assert!(first
             .plan()
@@ -206,8 +313,41 @@ mod tests {
         let input = input(&autorouter);
 
         let preferred = MultilayerPreconfigurer::new(&autorouter, input.clone());
-        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 0);
+        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 0, 100.0);
         assert_eq!(preferred.plan().layer_map, seeded.plan().layer_map);
+    }
+
+    /// Conflict-directed assignment only departs from the preferred
+    /// layer where corridors contend, and seeds may resolve conflicts
+    /// differently.
+    #[test]
+    fn conflict_seeded_assignment_spreads_conflicts() {
+        let autorouter = astable();
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+        let input = input(&autorouter);
+        let preferred = MultilayerPreconfigurer::new(&autorouter, input.clone());
+        let preferred = &preferred.plan().layer_map;
+
+        // A large margin makes every nearby corridor conflict; a zero
+        // margin (pointwise overlap only) should leave almost every
+        // ratline preferred.
+        let tight = MultilayerPreconfigurer::new_seeded(&autorouter, input.clone(), 7, 1.0);
+        let wide = MultilayerPreconfigurer::new_seeded(&autorouter, input.clone(), 7, 300.0);
+        for layer in tight.plan().layer_map.values() {
+            assert!(*layer < layer_count);
+        }
+        for layer in wide.plan().layer_map.values() {
+            assert!(*layer < layer_count);
+        }
+        // Wider margins can only add conflicts, so the wide map may
+        // diverge more from preferred than the tight one — assert it
+        // is at least as divergent.
+        let diverge = |map: &BTreeMap<RatlineUid, usize>| {
+            map.iter()
+                .filter(|(ratline, layer)| preferred.get(*ratline) != Some(layer))
+                .count()
+        };
+        assert!(diverge(&wide.plan().layer_map) >= diverge(&tight.plan().layer_map));
     }
 
     #[test]
@@ -216,7 +356,7 @@ mod tests {
         let input = input(&autorouter);
 
         let preferred = MultilayerPreconfigurer::new(&autorouter, input.clone());
-        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7);
+        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7, 300.0);
         assert_ne!(preferred.plan().layer_map, seeded.plan().layer_map);
     }
 }

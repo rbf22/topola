@@ -226,6 +226,7 @@ fn main() -> Result<(), std::io::Error> {
                 squeeze_through_under_bends: false,
                 routed_band_width: 100.0,
             },
+            args.jobs.unwrap_or(1) as usize,
             file,
         )?;
         eprintln!(

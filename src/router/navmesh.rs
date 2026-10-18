@@ -294,7 +294,13 @@ impl Navmesh {
                 continue;
             }
 
-            for (repr_navnode1, repr_navnode2) in prenavnode_to_navnodes[&repr].iter() {
+            // A representative outside this navmesh's triangulation
+            // has no navnodes to copy edges from.
+            let Some(repr_navnodes) = prenavnode_to_navnodes.get(&repr) else {
+                continue;
+            };
+
+            for (repr_navnode1, repr_navnode2) in repr_navnodes.iter() {
                 let repr_navedge1_targets: Vec<_> = graph
                     .edges(*repr_navnode1)
                     .map(|edge| edge.target())
@@ -335,9 +341,7 @@ impl Navmesh {
         Ok(Self {
             graph,
             origin,
-            origin_navnode: NavnodeIndex(
-                origin_navnode.ok_or(NavmeshError::UnreachableOrigin)?,
-            ),
+            origin_navnode: NavnodeIndex(origin_navnode.ok_or(NavmeshError::UnreachableOrigin)?),
             destination,
             destination_navnode: NavnodeIndex(
                 destination_navnode.ok_or(NavmeshError::UnreachableDestination)?,
@@ -418,12 +422,24 @@ impl Navmesh {
     ) {
         // We assume prenavmesh nodes are fixed dots. This is an ugly shortcut,
         // since fixed bends also can be prenavnodes, but it works for now.
-        let from_prenavnode_repr = PrenavnodeNodeIndex::FixedDot(GenericIndex::new(
-            overlapping_prenavnodes_unions.find(from_prenavnode.index().into()),
-        ));
-        let to_prenavnode_repr = PrenavnodeNodeIndex::FixedDot(GenericIndex::new(
-            overlapping_prenavnodes_unions.find(to_prenavnode.index().into()),
-        ));
+        let resolve_repr = |prenavnode: PrenavnodeNodeIndex| {
+            let repr = PrenavnodeNodeIndex::FixedDot(GenericIndex::new(
+                overlapping_prenavnodes_unions.find(prenavnode.index().into()),
+            ));
+            // The union representative can be a dot that never entered
+            // this navmesh's triangulation — `unionize_with_overlapees`
+            // unions over the whole dot index space, including
+            // same-location pads on other layers — and then it has no
+            // navnodes to wire edges to. Fall back to the prenavnode
+            // itself, which is always a key.
+            if prenavnode_to_navnodes.contains_key(&repr) {
+                repr
+            } else {
+                prenavnode
+            }
+        };
+        let from_prenavnode_repr = resolve_repr(from_prenavnode);
+        let to_prenavnode_repr = resolve_repr(to_prenavnode);
 
         Self::add_prenavedge_as_quadrinavedges(
             layout,
@@ -444,19 +460,25 @@ impl Navmesh {
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
     ) {
+        // An endpoint that never entered this navmesh's triangulation
+        // — constraint-edge endpoints need not be triangulation
+        // nodes — has no navnodes for an edge to attach to; such an
+        // edge cannot be navigated, so skip it.
+        let (Some(from_navnodes), Some(to_navnodes)) = (
+            prenavnode_to_navnodes.get(&from_prenavnode),
+            prenavnode_to_navnodes.get(&to_prenavnode),
+        ) else {
+            return;
+        };
+
         let mut maybe_lowest_join: Option<(usize, usize)> = None;
 
-        for (from_index, (from_navnode1, from_navnode2)) in prenavnode_to_navnodes[&from_prenavnode]
-            .iter()
-            .rev()
-            .enumerate()
-        {
+        for (from_index, (from_navnode1, from_navnode2)) in from_navnodes.iter().rev().enumerate() {
             let from_binavnode = graph.node_weight(*from_navnode1).unwrap().binavnode;
 
             // If binavnodes are found to be joined, only add a single binavedge
             // between them.
-            if let Some((to_index, (to_navnode1, to_navnode2))) = prenavnode_to_navnodes
-                [&to_prenavnode]
+            if let Some((to_index, (to_navnode1, to_navnode2))) = to_navnodes
                 .iter()
                 .rev()
                 .enumerate()
@@ -474,11 +496,7 @@ impl Navmesh {
                 continue;
             }
 
-            for (to_index, (to_navnode1, to_navnode2)) in prenavnode_to_navnodes[&to_prenavnode]
-                .iter()
-                .rev()
-                .enumerate()
-            {
+            for (to_index, (to_navnode1, to_navnode2)) in to_navnodes.iter().rev().enumerate() {
                 let to_binavnode = graph.node_weight(*to_navnode1).unwrap().binavnode;
 
                 // One binavnode covers another with bend tangent rays, so don't

@@ -83,11 +83,22 @@ fn project(origin: Point, n: (f64, f64), x: f64, y: f64) -> f64 {
 fn extent_along(origin: Point, dir: (f64, f64), shape: &PrimitiveShape) -> (f64, f64) {
     let lo = shape.bbox_without_margin().lower();
     let hi = shape.bbox_without_margin().upper();
-    [(lo[0], lo[1]), (hi[0], lo[1]), (hi[0], hi[1]), (lo[0], hi[1])]
-        .into_iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo_s, hi_s), (x, y)| {
-            (lo_s.min(project(origin, dir, x, y)), hi_s.max(project(origin, dir, x, y)))
-        })
+    [
+        (lo[0], lo[1]),
+        (hi[0], lo[1]),
+        (hi[0], hi[1]),
+        (lo[0], hi[1]),
+    ]
+    .into_iter()
+    .fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo_s, hi_s), (x, y)| {
+            (
+                lo_s.min(project(origin, dir, x, y)),
+                hi_s.max(project(origin, dir, x, y)),
+            )
+        },
+    )
 }
 
 /// The smallest displacement along unit vector `n` that moves `shape`'s
@@ -121,12 +132,19 @@ fn clearing_shift(
 pub fn write_suggestions<W: Write>(
     autorouter: &mut Autorouter<SpecctraMesadata>,
     router_options: RouterOptions,
+    jobs: usize,
     mut writer: W,
 ) -> Result<(), std::io::Error> {
     let band_half_width = router_options.routed_band_width / 2.0;
-    let probes = autorouter.probe_channels(router_options, |rules| {
-        rules.override_clearances(0.0)
-    });
+    let probes = if jobs > 1 {
+        autorouter.probe_channels_par(
+            router_options,
+            &|rules: &mut SpecctraMesadata| rules.override_clearances(0.0),
+            jobs,
+        )
+    } else {
+        autorouter.probe_channels(router_options, |rules| rules.override_clearances(0.0))
+    };
 
     // Rules are restored by now; use them for per-net-pair clearances.
     let rules = autorouter.board().layout().drawing().rules().clone();
@@ -201,14 +219,10 @@ pub fn write_suggestions<W: Write>(
                     continue; // Degenerate or a layer transition (via).
                 }
                 let n = (-delta.y() / len, delta.x() / len);
-                let corridor_width =
-                    band_half_width * 2.0 + 2.0 * rules.largest_clearance(None);
+                let corridor_width = band_half_width * 2.0 + 2.0 * rules.largest_clearance(None);
 
                 for obstacle in drawing.cut(Line::new(a, b), corridor_width, layer_a) {
-                    let blocker_net = obstacle
-                        .primitive_ref(drawing)
-                        .maybe_net()
-                        .unwrap_or(0);
+                    let blocker_net = obstacle.primitive_ref(drawing).maybe_net().unwrap_or(0);
                     let layer = Some(layer_a);
                     let clearance = rules
                         .clearance(
@@ -227,9 +241,7 @@ pub fn write_suggestions<W: Write>(
                     let half_width = band_half_width + clearance;
                     let blocker_primitive = obstacle.primitive_ref(drawing);
                     let shape = blocker_primitive.shape();
-                    if let Some(shift) =
-                        clearing_shift(a, n, half_width, shape.center(), &shape)
-                    {
+                    if let Some(shift) = clearing_shift(a, n, half_width, shape.center(), &shape) {
                         push(obstacle, shift);
                     }
                 }
@@ -245,8 +257,7 @@ pub fn write_suggestions<W: Write>(
             net: probe.net.and_then(netname).map(str::to_owned),
             from: node_name(probe.endpoints.0)
                 .unwrap_or_else(|| format!("{:?}", probe.endpoints.0)),
-            to: node_name(probe.endpoints.1)
-                .unwrap_or_else(|| format!("{:?}", probe.endpoints.1)),
+            to: node_name(probe.endpoints.1).unwrap_or_else(|| format!("{:?}", probe.endpoints.1)),
             path: probe
                 .path
                 .iter()
@@ -265,7 +276,14 @@ pub fn write_suggestions<W: Write>(
             shifts: shifts
                 .into_iter()
                 .map(|(owner, (dx, dy, blocker_count))| {
-                    (owner, Shift { dx, dy, blocker_count })
+                    (
+                        owner,
+                        Shift {
+                            dx,
+                            dy,
+                            blocker_count,
+                        },
+                    )
                 })
                 .collect(),
         },
