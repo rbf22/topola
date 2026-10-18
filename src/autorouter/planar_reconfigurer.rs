@@ -325,12 +325,13 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
     /// obstacle's congestion count and, for obstacles that are
     /// primitives of a band routed for another ratline, learns a
     /// precedence constraint ordering the failed ratline's SCC before
-    /// the blocking ratline's SCC.
+    /// the blocking ratline's SCC. Returns the blocking ratlines in
+    /// their original routing order.
     fn record_blockers(
         &mut self,
         autorouter: &Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
-    ) {
+    ) -> Vec<RatlineUid> {
         let curr_ratline_index = *stepper.curr_ratline_index();
 
         let Some(failed) = stepper
@@ -339,7 +340,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             .get(curr_ratline_index)
             .copied()
         else {
-            return;
+            return vec![];
         };
 
         let drawing = autorouter.board().layout().drawing();
@@ -374,21 +375,13 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
 
         let obstacles: Vec<PrimitiveIndex> = obstacles.into_iter().collect();
 
-        if self
-            .last_recorded
-            .as_ref()
-            .is_some_and(|last| *last == (curr_ratline_index, obstacles.clone()))
-        {
-            return;
-        }
-        self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
-
         // Loose primitive -> ratline it was routed for. Bands are
         // resolved through the board's band registry, which stays
         // consistent under undo, rather than through the ratlines'
         // `band_termseg` weights: those go stale when a band is ripped
         // up during reconfiguration, after which they resolve to
         // unrelated or malformed loose chains.
+        let terminating_dot_map = &stepper.configuration().terminating_dot_map;
         let mut band_of: BTreeMap<PrimitiveIndex, RatlineUid> = BTreeMap::new();
         for edge in ratsnest.graph().edge_indices() {
             let ratline = RatlineUid {
@@ -396,6 +389,16 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                 index: edge,
             };
             let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+            // Bands are registered under their routed endpoints, which
+            // may have been remapped to escape stub dots.
+            let (origin, destination) = (
+                *terminating_dot_map
+                    .get(&(ratline, origin))
+                    .unwrap_or(&origin),
+                *terminating_dot_map
+                    .get(&(ratline, destination))
+                    .unwrap_or(&destination),
+            );
 
             let Some(band) = autorouter.board.band_between_nodes(origin, destination) else {
                 continue;
@@ -412,6 +415,28 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                 maybe_loose = drawing.loose(loose).next_loose(prev_prev);
             }
         }
+
+        // The blocking ratlines in their original routing order.
+        let blocker_set: BTreeSet<RatlineUid> = obstacles
+            .iter()
+            .filter_map(|obstacle| band_of.get(obstacle).copied())
+            .collect();
+        let blockers: Vec<RatlineUid> = stepper
+            .configuration()
+            .ratlines
+            .iter()
+            .filter(|ratline| blocker_set.contains(ratline))
+            .copied()
+            .collect();
+
+        if self
+            .last_recorded
+            .as_ref()
+            .is_some_and(|last| *last == (curr_ratline_index, obstacles.clone()))
+        {
+            return blockers;
+        }
+        self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
 
         for obstacle in obstacles {
             *self.congestion.entry(obstacle).or_insert(0) += 1;
@@ -440,6 +465,8 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                 self.precedence.push(constraint);
             }
         }
+
+        blockers
     }
 
     fn scc_of(
@@ -571,7 +598,35 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
         autorouter: &Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Option<PlanarAutorouteConfiguration> {
-        self.record_blockers(autorouter, stepper);
+        let blockers = self.record_blockers(autorouter, stepper);
+
+        // Surgical rip-up: move the blocking ratlines to right after
+        // the failed one. Applying this configuration removes only the
+        // blocker bands instead of backtracing away every band routed
+        // since the first ordering difference.
+        if self.options.surgical_ripup && !blockers.is_empty() {
+            let failed = stepper.configuration().ratlines[*stepper.curr_ratline_index()];
+            let blocker_set: BTreeSet<RatlineUid> = blockers.iter().copied().collect();
+
+            let mut order: Vec<RatlineUid> = stepper
+                .configuration()
+                .ratlines
+                .iter()
+                .filter(|ratline| !blocker_set.contains(ratline))
+                .copied()
+                .collect();
+            let insert_at = order.iter().position(|ratline| *ratline == failed).unwrap() + 1;
+            order.splice(insert_at..insert_at, blockers.iter().copied());
+
+            if self.emitted.insert(order.clone()) {
+                return Some(PlanarAutorouteConfiguration {
+                    ratlines: order,
+                    obstacle_penalties: self.obstacle_penalties(),
+                    rip_up: blockers,
+                    ..self.preconfiguration.clone()
+                });
+            }
+        }
 
         // Directed attempt: ordering satisfying all learned precedence
         // constraints, perturbed minimally from the current ordering.

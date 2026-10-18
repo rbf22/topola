@@ -97,6 +97,21 @@ pub struct PlanarAutorouteOptions {
     /// [`PlanarAutorouteOptions::improve_pad_entry`] is set.
     #[serde(default = "default_pad_entry_min_angle")]
     pub pad_entry_min_angle: f64,
+    /// Lays escape stubs before routing: endpoint pads surrounded by
+    /// other ratline endpoints get a fixed seg through the widest local
+    /// gap to a fresh stub dot in open space, and their ratlines are
+    /// remapped to terminate at the stub. Stubs are laid
+    /// most-crowded-first so interior pads claim escape corridors
+    /// before outer pads can wall them in.
+    #[serde(default)]
+    pub escape_stubs: bool,
+    /// When a ratline fails on bands routed earlier, rip up only the
+    /// blocking bands and requeue their ratlines right after the failed
+    /// one, instead of backtracing to the first ordering difference and
+    /// losing every band routed in between. Used only when
+    /// [`ReconfigureBy::NegotiatedCongestion`] is selected.
+    #[serde(default)]
+    pub surgical_ripup: bool,
 }
 
 #[derive(Error, Debug, Clone)]

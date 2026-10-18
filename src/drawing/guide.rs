@@ -192,14 +192,18 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         node.primitive_ref(self).conditions()
     }
 
-    fn clearance(&self, lhs: Option<&Conditions<'_>>, rhs: Option<&Conditions<'_>>) -> f64 {
+    pub(crate) fn clearance(
+        &self,
+        lhs: Option<&Conditions<'_>>,
+        rhs: Option<&Conditions<'_>>,
+    ) -> f64 {
         match (lhs, rhs) {
             (None, _) | (_, None) => 0.0,
             (Some(lhs), Some(rhs)) => self.rules().clearance(lhs, rhs).unwrap_or(0.0),
         }
     }
 
-    fn head_circle(&self, head: &Head, width: f64) -> Circle {
+    pub(crate) fn head_circle(&self, head: &Head, width: f64) -> Circle {
         match *head {
             Head::Bare(head) => Circle {
                 pos: head.face().primitive_ref(self).shape().center(), // TODO.

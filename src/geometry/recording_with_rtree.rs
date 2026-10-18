@@ -48,6 +48,10 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
     pub fn node_count(&self) -> usize {
         self.geometry_with_rtree.node_count()
     }
+
+    pub fn generation(&self) -> u64 {
+        *self.geometry_with_rtree.generation()
+    }
 }
 
 impl<

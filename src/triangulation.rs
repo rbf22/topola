@@ -43,6 +43,46 @@ impl<
         }
     }
 
+    /// Builds the triangulation in one pass from `vertices` instead of
+    /// inserting them one by one. Much faster for large vertex counts,
+    /// since a sequential `.add_vertex(..)` pays a location query per
+    /// vertex.
+    ///
+    /// Bulk loading deduplicates same-position vertices just like
+    /// sequential insertion does: node indices whose vertices were
+    /// deduplicated are resolved to the shared vertex afterwards.
+    pub fn bulk_load(
+        trianvertex_to_handle: M,
+        vertices: Vec<VW>,
+    ) -> Result<Self, InsertionError>
+    where
+        VW: Clone,
+    {
+        let cdt = ConstrainedDelaunayTriangulation::bulk_load_cdt(vertices.clone(), vec![])?;
+        let mut this = Self {
+            cdt,
+            trianvertex_to_handle,
+            index_marker: PhantomData,
+        };
+
+        for handle in spade::Triangulation::fixed_vertices(&this.cdt) {
+            let index = spade::Triangulation::s(&this.cdt)
+                .vertex_data(handle)
+                .node_index();
+            this.trianvertex_to_handle[index] = Some(handle);
+        }
+
+        for weight in vertices {
+            let slot = &mut this.trianvertex_to_handle[weight.node_index()];
+            if slot.is_none() {
+                *slot = spade::Triangulation::locate_vertex(&this.cdt, weight.position())
+                    .map(|handle| handle.fix());
+            }
+        }
+
+        Ok(this)
+    }
+
     pub fn add_vertex(&mut self, weight: VW) -> Result<(), InsertionError> {
         let index = weight.node_index();
         self.trianvertex_to_handle[index] =

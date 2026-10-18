@@ -6,7 +6,13 @@ use contracts_try::{debug_ensures, debug_requires};
 use thiserror::Error;
 
 use crate::{
-    drawing::{band::BandTermsegIndex, dot::FixedDotIndex, rules::AccessRules},
+    drawing::{
+        band::BandTermsegIndex,
+        dot::FixedDotIndex,
+        graph::GetMaybeNet,
+        rules::AccessRules,
+    },
+    geometry::GetLayer,
     layout::{Layout, LayoutEdit},
 };
 
@@ -65,7 +71,15 @@ impl<R: AccessRules> Navcorder for Layout<R> {
         source_navnode: NavnodeIndex,
         width: f64,
     ) -> Navcord {
-        Navcord::new(recorder, source, source_navnode, width)
+        let source_primitive = self.drawing().primitive_ref(source);
+        Navcord::new(
+            recorder,
+            source,
+            source_navnode,
+            width,
+            source_primitive.maybe_net(),
+            source_primitive.layer(),
+        )
     }
 
     fn finish(

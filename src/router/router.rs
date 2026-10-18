@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
     draw::DrawException,
-    navcord::{GhostVerdict, Navcord, ProbeMemoEntry, ProbeVerdict},
+    navcord::{GhostReplay, Navcord, PathCane, ProbeMemoEntry, ProbeVerdict},
     navcorder::{Navcorder, NavcorderException},
     navmesh::{Navmesh, NavmeshError, NavnodeIndex},
     route::RouteStepper,
@@ -80,6 +80,13 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
                 .rework_path(navmesh, self.navcord, &new_path[..new_path.len() - 1])
                 .map_err(|_| ())?;
 
+            // The path was explored purely virtually; now that it is
+            // being committed, draw its canes into the board for real
+            // and then finish the band.
+            self.navcord
+                .materialize(self.layout, navmesh)
+                .map_err(|_| ())?;
+
             // Set navcord members for consistency. The code would probably work
             // without this, since A* will terminate now anyway.
             self.navcord.maybe_final_termseg = Some(
@@ -116,15 +123,19 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
             self.probe_ghosts = entry.ghosts.clone();
             self.probe_obstacles = entry.obstacles.clone();
 
-            return match entry.verdict {
-                ProbeVerdict::Drawn(length) => {
-                    // Replay the successful probe without drawing: the
-                    // navnode is pushed so that `.step_back(..)` undoes
-                    // this virtual step, exactly as it would undo a real
-                    // probe.
+            return match &entry.verdict {
+                ProbeVerdict::Drawn { length, replay } => {
+                    // Replay the successful probe's virtual step so that
+                    // `.step_back(..)` undoes it, exactly as it would
+                    // undo a freshly evaluated probe.
+                    match replay.clone() {
+                        GhostReplay::Wrap(cane) => {
+                            self.navcord.canes.push(PathCane::Virtual(cane))
+                        }
+                        GhostReplay::Finish => self.navcord.virtual_finish = true,
+                    }
                     self.navcord.path.push(probed_navnode);
-                    self.navcord.virtual_probe = true;
-                    ControlFlow::Break(Some(length))
+                    ControlFlow::Break(Some(*length))
                 }
                 ProbeVerdict::Backtrackable => ControlFlow::Continue(()),
                 ProbeVerdict::Terminal => ControlFlow::Break(None),
@@ -139,7 +150,10 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         let verdict = match ret {
             ControlFlow::Break(Some(length)) => {
                 crate::metrics::incr(&crate::metrics::METRICS.probes_los_ok);
-                ProbeVerdict::Drawn(length)
+                ProbeVerdict::Drawn {
+                    length,
+                    replay: self.navcord.last_replay().unwrap(),
+                }
             }
             ControlFlow::Break(None) => {
                 crate::metrics::incr(&crate::metrics::METRICS.probes_failed);
@@ -188,31 +202,13 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
         maybe_initial_parent_navnode: Option<NavnodeIndex>,
         probed_navnode: NavnodeIndex,
     ) -> ControlFlow<Option<f64>> {
-        // Probes are speculative steps that are always undone right after,
-        // so they are evaluated without drawing whenever possible. A
-        // `Drawn` ghost verdict is recorded in `.drawn_memo` so that a
-        // later real `.step_to(..)` for the same draw replays it without
-        // repeating checks.
-        let result = match self
+        // Probes are speculative steps that are always undone right
+        // after, and all steps are evaluated virtually without drawing;
+        // the virtual state `.step_to(..)` pushes is undone by the
+        // following `.step_back(..)`.
+        let result = self
             .navcord
-            .ghost_step_to(self.layout, navmesh, probed_navnode)
-        {
-            GhostVerdict::Drawn(length) => {
-                crate::metrics::incr(&crate::metrics::METRICS.ghost_probes);
-                self.navcord
-                    .drawn_memo
-                    .entry(self.navcord.path.clone().into_boxed_slice())
-                    .or_default()
-                    .insert(probed_navnode, length);
-                self.navcord.path.push(probed_navnode);
-                self.navcord.virtual_probe = true;
-                Ok(length)
-            }
-            GhostVerdict::Failed(err) => Err(err),
-            GhostVerdict::Unsupported => {
-                self.navcord.step_to(self.layout, navmesh, probed_navnode)
-            }
-        };
+            .step_to(self.layout, navmesh, probed_navnode);
 
         ControlFlow::Break(match result {
             Ok(probe_length) => Some(

@@ -91,6 +91,22 @@ fn autoroute_4x4_1206_led_matrix_breakout(variant: &str) {
 }
 
 #[apply(test_master)]
+fn autoroute_4x4_1206_led_matrix_breakout_surgical(variant: &str) {
+    let autorouter = common::load_design(
+        "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",
+    );
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+    common::replay_and_assert_and_report(
+        &mut invoker,
+        "tests/unilayer/4x4_1206_led_matrix_breakout/autoroute_all_surgical.cmd",
+        variant,
+    );
+
+    let (mut autorouter, ..) = invoker.dissolve();
+    common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
+#[apply(test_master)]
 fn autoroute_4x4_1206_led_matrix_breakout_in_predefined_order(variant: &str) {
     let autorouter = common::load_design(
         "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",

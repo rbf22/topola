@@ -36,7 +36,7 @@ use crate::{
     geometry::{edit::Edit, primitive::PrimitiveShape, shape::AccessShape, GetLayer},
     graph::MakeRef,
     layout::LayoutEdit,
-    router::{Router, RouterOptions},
+    router::{prenavmesh::PrenavmeshBases, RouteStepper, Router, RouterOptions},
     stepper::Step,
 };
 
@@ -90,6 +90,9 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         };
 
         let mut probes = Vec::with_capacity(unrouted.len());
+        // The board is reverted between probes, so one set of prenavmesh
+        // bases serves every ratline.
+        let mut prenavmesh_bases = PrenavmeshBases::default();
 
         for uid in unrouted {
             let (origin, destination) = uid.ref_(self).endpoint_dots();
@@ -113,8 +116,12 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
                 continue;
             }
 
-            let (path, terminal_blocker) =
-                self.probe_ratline(origin, destination, router_options);
+            let (path, terminal_blocker) = self.probe_ratline(
+                origin,
+                destination,
+                router_options,
+                &mut prenavmesh_bases,
+            );
             probes.push(ChannelProbe {
                 net,
                 endpoints: (origin, destination),
@@ -135,16 +142,24 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         origin: crate::drawing::dot::FixedDotIndex,
         destination: crate::drawing::dot::FixedDotIndex,
         router_options: RouterOptions,
+        prenavmesh_bases: &mut PrenavmeshBases,
     ) -> (Vec<(Point, usize)>, Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>) {
-        let mut router = Router::new(self.board.layout_mut(), router_options);
-        let Ok(mut route) = router.route(
-            LayoutEdit::new(),
+        let Ok(navmesh) = prenavmesh_bases.navmesh(
+            self.board.layout(),
             origin,
             destination,
-            router_options.routed_band_width,
+            router_options,
         ) else {
             return (vec![], None);
         };
+
+        let mut router = Router::new(self.board.layout_mut(), router_options);
+        let mut route = RouteStepper::new_from_navmesh(
+            &mut router,
+            LayoutEdit::new(),
+            navmesh,
+            router_options.routed_band_width,
+        );
 
         let mut termseg = None;
         loop {

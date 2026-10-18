@@ -14,12 +14,20 @@ use crate::{
         edit::{BoardDataEdit, BoardEdit},
         AccessMesadata,
     },
-    drawing::{band::BandTermsegIndex, dot::FixedDotIndex, graph::PrimitiveIndex},
+    drawing::{
+        band::BandTermsegIndex,
+        dot::FixedDotIndex,
+        graph::PrimitiveIndex,
+    },
     geometry::{edit::Edit, primitive::PrimitiveShape},
     graph::MakeRef,
     layout::LayoutEdit,
     router::{
-        navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper, RouteStepper, Router,
+        navcord::Navcord,
+        navmesh::Navmesh,
+        prenavmesh::PrenavmeshBases,
+        thetastar::ThetastarStepper,
+        RouteStepper, Router,
     },
     stepper::{Abort, EstimateProgress, LinearScale, Reconfigure, Step},
 };
@@ -37,6 +45,11 @@ pub struct PlanarAutorouteConfiguration {
     /// recorded blockers (negotiated congestion). Inflating these
     /// obstacles' costs makes retries prefer alternate corridors.
     pub obstacle_penalties: BTreeMap<PrimitiveIndex, f64>,
+    /// Ratlines whose bands are to be ripped up surgically when this
+    /// configuration is applied, then requeued right after the failed
+    /// ratline. Empty on orderings that only permute ratlines, which
+    /// take the usual backtrace path instead.
+    pub rip_up: Vec<RatlineUid>,
 }
 
 impl PlanarAutorouteConfiguration {
@@ -97,6 +110,18 @@ pub struct PlanarAutorouteExecutionStepper {
     board_data_edits: Vec<BoardDataEdit>,
     /// The options for the autorouting process, defining how routing should be carried out.
     options: PlanarAutorouteOptions,
+    /// Edits applied outside any ratline's route — board data updates
+    /// for a just-routed band and surgically ripped-up blocker bands.
+    /// Merged into the next pushed edit slot so `layout_edits` and
+    /// `board_data_edits` stay index-aligned for backtracing.
+    pending_edit: BoardEdit,
+    /// Per-`(net, layer)` prenavmesh bases. The vertex triangulation
+    /// depends only on the ratline's net and the board's fixed
+    /// primitives, which do not change while routing, so it is built
+    /// once per net and cloned per ratline. The constrained base adds
+    /// constraint edges; it is invalidated by rip-ups and extended
+    /// incrementally as more bands commit.
+    prenavmesh_bases: PrenavmeshBases,
 }
 
 impl PlanarAutorouteExecutionStepper {
@@ -109,25 +134,18 @@ impl PlanarAutorouteExecutionStepper {
             return Err(AutorouterError::NothingToRoute);
         };
 
-        let (origin, destination) = configuration.ratline_terminating_dots(autorouter, 0);
-        let mut router = Router::new(autorouter.board.layout_mut(), options.router);
-
-        let mut route = router.route(
-            LayoutEdit::new(),
-            origin,
-            destination,
-            options.router.routed_band_width,
-        )?;
-        route.set_obstacle_penalties(configuration.obstacle_penalties.clone());
-
-        Ok(Self {
+        let mut this = Self {
             configuration,
             curr_ratline_index: 0,
-            route: Some(route),
+            route: None,
             layout_edits: vec![],
             board_data_edits: vec![],
             options,
-        })
+            pending_edit: BoardEdit::new(),
+            prenavmesh_bases: PrenavmeshBases::default(),
+        };
+        this.start_routing_ratline(autorouter)?;
+        Ok(this)
     }
 
     fn backtrace_to_index(
@@ -139,7 +157,7 @@ impl PlanarAutorouteExecutionStepper {
             return Err(AutorouterError::NothingToUndoForReconfiguration);
         }
 
-        self.dissolve_route_stepper_and_push_layout_edit();
+        self.dissolve_route_stepper_and_push_edits();
 
         let board_edit = BoardEdit::new_from_edits(
             BoardDataEdit::merge_iter(self.board_data_edits.split_off(index)),
@@ -152,6 +170,24 @@ impl PlanarAutorouteExecutionStepper {
         Ok(self.start_routing_ratline(autorouter)?)
     }
 
+    /// Builds the ratline's navmesh, reusing a cached per-net
+    /// prenavmesh vertex triangulation when one exists. The triangulation
+    /// is the dominant cost of navmesh construction, and its vertex set
+    /// only depends on the ratline's net and layer, not on routed bands.
+    fn make_navmesh(
+        &mut self,
+        layout: &crate::layout::Layout<impl AccessMesadata>,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
+    ) -> Result<Navmesh, AutorouterError> {
+        Ok(self.prenavmesh_bases.navmesh(
+            layout,
+            origin,
+            destination,
+            self.options.router,
+        )?)
+    }
+
     fn start_routing_ratline(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
@@ -159,25 +195,36 @@ impl PlanarAutorouteExecutionStepper {
         let (origin, destination) = self
             .configuration
             .ratline_terminating_dots(autorouter, self.curr_ratline_index);
-        let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
+        let navmesh = self.make_navmesh(autorouter.board.layout(), origin, destination)?;
 
-        let mut route = router.route(
+        let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
+        let mut route = RouteStepper::new_from_navmesh(
+            &mut router,
             LayoutEdit::new(),
-            origin,
-            destination,
+            navmesh,
             self.options.router.routed_band_width,
-        )?;
+        );
         route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
         self.route = Some(route);
 
         Ok(())
     }
 
-    fn dissolve_route_stepper_and_push_layout_edit(&mut self) {
+    /// Dissolves the in-flight route and pushes one aligned entry onto
+    /// both edit vecs: any pending work (band registry updates,
+    /// surgical rip-ups) applied since the last boundary, plus the
+    /// route's own edit. Pushed unconditionally so the vecs stay
+    /// index-aligned for `backtrace_to_index`, even for skipped
+    /// ratlines that produce no board data edit.
+    fn dissolve_route_stepper_and_push_edits(&mut self) {
         if let Some(taken_route) = self.route.take() {
             let (_thetastar, navcord, ..) = taken_route.dissolve();
-            self.layout_edits.push(navcord.recorder);
+            self.pending_edit.layout_edit.merge(navcord.recorder);
         }
+
+        let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
+        self.layout_edits.push(pending.layout_edit);
+        self.board_data_edits.push(pending.board_data_edit);
     }
 
     /// Finishes routing early: the in-flight ratline's partial band is
@@ -189,11 +236,15 @@ impl PlanarAutorouteExecutionStepper {
         }
 
         if let Some(taken_route) = self.route.take() {
-            // Undo the in-flight ratline's partially drawn band.
+            // Undo the in-flight ratline's partially drawn band, along
+            // with any uncommitted pending work such as surgical
+            // rip-ups.
             let (_thetastar, navcord, ..) = taken_route.dissolve();
-            let edit = BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
-            autorouter.board.apply_edit(&edit.reverse());
+            self.pending_edit.layout_edit.merge(navcord.recorder);
         }
+
+        let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
+        autorouter.board.apply_edit(&pending.reverse());
 
         self.curr_ratline_index = self.configuration.ratlines.len();
     }
@@ -212,7 +263,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
         // TODO: Use a proper state machine here for better readability?
 
         if self.curr_ratline_index >= self.configuration().ratlines.len() {
-            self.dissolve_route_stepper_and_push_layout_edit();
+            self.dissolve_route_stepper_and_push_edits();
 
             if self.options.improve_pad_entry {
                 let mut layout_edit = LayoutEdit::new();
@@ -287,7 +338,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
                 band,
             );
 
-            self.board_data_edits.push(board_data_edit);
+            self.pending_edit.board_data_edit.merge(board_data_edit);
 
             PlanarAutorouteContinueStatus::Routed(band_termseg)
         };
@@ -300,7 +351,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
             .get(self.curr_ratline_index)
             .is_some()
         {
-            self.dissolve_route_stepper_and_push_layout_edit();
+            self.dissolve_route_stepper_and_push_edits();
             self.start_routing_ratline(autorouter);
         }
 
@@ -324,6 +375,99 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for PlanarAutorouteExecutionS
         autorouter: &mut Autorouter<M>,
         new_configuration: PlanarAutorouteConfiguration,
     ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
+        if !new_configuration.rip_up.is_empty() {
+            // Surgical rip-up: revert the failed route's partial work,
+            // then remove only the blocking bands. Every other routed
+            // band survives, and the ripped-up ratlines are requeued
+            // right after the failed one in the new ordering.
+            log::debug!(
+                "surgical rip-up: removing {} blocker bands at ratline {}",
+                new_configuration.rip_up.len(),
+                self.curr_ratline_index,
+            );
+            if let Some(taken_route) = self.route.take() {
+                let (_thetastar, navcord, ..) = taken_route.dissolve();
+                let edit =
+                    BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
+                autorouter.board.apply_edit(&edit.reverse());
+            }
+
+            // Drop the ripped-up ratlines' edit slots, preserving the
+            // per-position alignment between the edit vecs and the
+            // configuration's ratlines. The dropped entries merge into
+            // `pending_edit` before the surgical removals so each
+            // ripped band's creation and removal records coalesce into
+            // a no-op instead of resurrecting the band on undo.
+            let mut indices: Vec<_> = new_configuration
+                .rip_up
+                .iter()
+                .filter_map(|ratline| {
+                    self.configuration
+                        .ratlines
+                        .iter()
+                        .position(|uid| uid == ratline)
+                })
+                .collect();
+            indices.sort_unstable();
+
+            let mut ripped_edits = BoardEdit::new();
+            for index in indices.iter().rev() {
+                ripped_edits
+                    .layout_edit
+                    .merge(self.layout_edits.remove(*index));
+                ripped_edits
+                    .board_data_edit
+                    .merge(self.board_data_edits.remove(*index));
+            }
+
+            let mut removal_edit = BoardEdit::new();
+            for ratline in &new_configuration.rip_up {
+                let index = new_configuration
+                    .ratlines
+                    .iter()
+                    .position(|uid| uid == ratline)
+                    .unwrap();
+                let (origin, destination) =
+                    new_configuration.ratline_terminating_dots(autorouter, index);
+
+                let Some(band) = autorouter.board.band_between_nodes(origin, destination)
+                else {
+                    continue;
+                };
+
+                autorouter
+                    .board
+                    .remove_band_between_nodes(&mut removal_edit, origin, destination)
+                    .map_err(|_| AutorouterError::CouldNotRemoveBand(band[false]))?;
+            }
+
+            // Chronological merge: the ripped bands' original edits
+            // precede their surgical removals, so each pair coalesces
+            // to a no-op when the pending edit later merges into the
+            // failed ratline's slot.
+            self.pending_edit.merge(ripped_edits);
+            self.pending_edit.merge(removal_edit);
+
+            let failed = self.configuration.ratlines[self.curr_ratline_index];
+            let result = PlanarAutorouteConfigurationStatus {
+                configuration: std::mem::replace(&mut self.configuration, new_configuration),
+                costs: PlanarAutorouteCosts {
+                    lengths: (0..*self.curr_ratline_index()).map(|_| 0.0).collect(),
+                },
+            };
+
+            // The failed ratline keeps its slot in the new ordering;
+            // the ripped-up ratlines follow right after.
+            self.curr_ratline_index = self
+                .configuration
+                .ratlines
+                .iter()
+                .position(|uid| *uid == failed)
+                .unwrap();
+            self.start_routing_ratline(autorouter)?;
+            return Ok(result);
+        }
+
         let Some(new_index) = new_configuration
             .ratlines
             .iter()

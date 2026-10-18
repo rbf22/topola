@@ -66,6 +66,9 @@ pub struct GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> {
     geometry: Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
     rtree: GeometryRTree<PI, CW>,
     layer_count: usize,
+    /// Counts every mutation of the geometry, however applied. Two equal
+    /// generations guarantee identical primitive topology and weights.
+    generation: u64,
 }
 
 impl<PW: Clone, DW, SW, BW, CW: Clone, Cel: Clone, PI: Clone, DI, SI, BI> Clone
@@ -76,6 +79,7 @@ impl<PW: Clone, DW, SW, BW, CW: Clone, Cel: Clone, PI: Clone, DI, SI, BI> Clone
             geometry: self.geometry.clone(),
             rtree: self.rtree.clone(),
             layer_count: self.layer_count,
+            generation: self.generation,
         }
     }
 }
@@ -108,7 +112,12 @@ impl<
             geometry: Geometry::new(),
             rtree: RTree::new_with_params(),
             layer_count,
+            generation: 0,
         }
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation += 1;
     }
 
     pub fn add_dot<W: AccessDotWeight + Into<PW> + GetLayer>(
@@ -118,6 +127,7 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        self.bump_generation();
         let dot = self.geometry.add_dot(weight);
         self.init_dot_bbox(dot.into().try_into().unwrap_or_else(|_| unreachable!()));
         dot
@@ -128,6 +138,7 @@ impl<
         dot: DI,
         weight: W,
     ) {
+        self.bump_generation();
         self.geometry
             .add_dot_at_index(GenericIndex::<W>::new(dot.index()), weight);
         self.init_dot_bbox(dot);
@@ -142,6 +153,7 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        self.bump_generation();
         let seg = self.geometry.add_seg(from, to, weight);
         self.init_seg_bbox(seg.into().try_into().unwrap_or_else(|_| unreachable!()));
         seg
@@ -154,6 +166,7 @@ impl<
         to: DI,
         weight: W,
     ) {
+        self.bump_generation();
         self.geometry
             .add_seg_at_index(GenericIndex::<W>::new(seg.index()), from, to, weight);
         self.init_seg_bbox(seg);
@@ -169,12 +182,14 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        self.bump_generation();
         let bend = self.geometry.add_bend(from, to, core, weight);
         self.init_bend_bbox(bend.into().try_into().unwrap_or_else(|_| unreachable!()));
         bend
     }
 
     pub(super) fn add_compound_at_index(&mut self, compound: GenericIndex<CW>, weight: CW) {
+        self.bump_generation();
         self.geometry
             .add_compound_at_index(GenericIndex::<CW>::new(compound.index()), weight);
     }
@@ -188,6 +203,7 @@ impl<
         Self::rtree_remove_must_be_successful(
             self.rtree.remove(&self.make_compound_bbox(compound)),
         );
+        self.bump_generation();
         self.geometry
             .add_to_compound(primitive, entry_label, compound);
         self.rtree.insert(self.make_compound_bbox(compound));
@@ -196,6 +212,7 @@ impl<
     pub fn remove_dot(&mut self, dot: DI) {
         // One of the possible causes: you have failed to delete navcord's final
         // termseg.
+        self.bump_generation();
         debug_assert!(self.geometry.joined_segs(dot).next().is_none());
         debug_assert!(self.geometry.joined_bends(dot).next().is_none());
 
@@ -204,6 +221,7 @@ impl<
     }
 
     pub fn remove_seg(&mut self, seg: SI) {
+        self.bump_generation();
         Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_seg_bbox(seg)));
         self.geometry.remove_primitive(seg.into());
     }
@@ -213,6 +231,7 @@ impl<
         // here because it starts iteration from the bend we currently operate
         // on, which obviously does not exist after deletion.
 
+        self.bump_generation();
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {
             Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_bend_bbox(next)));
@@ -221,6 +240,7 @@ impl<
         Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_bend_bbox(bend)));
         self.geometry.remove_primitive(bend.into());
 
+
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {
             self.rtree.insert(self.make_bend_bbox(next));
@@ -228,6 +248,7 @@ impl<
     }
 
     pub fn remove_compound(&mut self, compound: GenericIndex<CW>) {
+        self.bump_generation();
         Self::rtree_remove_must_be_successful(
             self.rtree.remove(&self.make_compound_bbox(compound)),
         );
@@ -244,6 +265,7 @@ impl<
     where
         F: FnOnce(&mut Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>, DI),
     {
+        self.bump_generation();
         for seg in self.geometry.joined_segs(dot) {
             Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_seg_bbox(seg)));
         }
@@ -274,6 +296,7 @@ impl<
     }
 
     pub fn flip_bend(&mut self, bend: BI) {
+        self.bump_generation();
         // Does not affect the bbox because it covers the whole guidecircle.
         self.geometry.flip_bend(bend);
     }
@@ -288,6 +311,7 @@ impl<
     where
         F: FnOnce(&mut Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>, BI),
     {
+        self.bump_generation();
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {
             Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_bend_bbox(next)));
@@ -298,6 +322,7 @@ impl<
         f(&mut self.geometry, bend);
 
         self.rtree.insert(self.make_bend_bbox(bend));
+
 
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {
@@ -472,12 +497,14 @@ impl<
     type EntryLabel = Cel;
 
     fn add_compound(&mut self, weight: CW) -> GenericIndex<CW> {
+        self.bump_generation();
         let compound = self.geometry.add_compound(weight);
         self.rtree.insert(self.make_compound_bbox(compound));
         compound
     }
 
     fn remove_compound(&mut self, compound: GenericIndex<CW>) {
+        self.bump_generation();
         Self::rtree_remove_must_be_successful(
             self.rtree.remove(&self.make_compound_bbox(compound)),
         );
@@ -527,6 +554,7 @@ impl<
     for GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
 {
     fn apply(&mut self, edit: &GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>) {
+        self.bump_generation();
         // First we remove every node that is in the edit. But we have to do
         // this in a correct order, because otherwise some removals of some
         // nodes may fail due to inadvertent invalidation of the bboxes of these

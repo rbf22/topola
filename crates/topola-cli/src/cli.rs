@@ -73,6 +73,21 @@ pub struct Cli {
     pub escape_presort: bool,
     #[arg(
         long,
+        help = "Lay escape stubs from surrounded pads through the widest local gap before routing (BGA escape)"
+    )]
+    pub escape_stubs: bool,
+    #[arg(
+        long,
+        help = "Rip up only blocking bands on failure instead of backtracing (negotiated congestion)"
+    )]
+    pub surgical_ripup: bool,
+    #[arg(
+        long,
+        help = "Route across all layers, fanning out to vias (multilayer autorouting)"
+    )]
+    pub multilayer: bool,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,

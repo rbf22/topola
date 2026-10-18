@@ -193,6 +193,13 @@ impl<CW, Cel, R> Drawing<CW, Cel, R> {
     pub fn node_count(&self) -> usize {
         self.recording_geometry_with_rtree.node_count()
     }
+
+    /// Counts every mutation of the drawing's geometry, however applied.
+    /// Two equal generations guarantee identical primitive topology and
+    /// weights, which e.g. lets cached navmeshes be validated cheaply.
+    pub fn generation(&self) -> u64 {
+        self.recording_geometry_with_rtree.generation()
+    }
 }
 
 impl<CW: Clone, Cel: Copy, R> Drawing<CW, Cel, R> {

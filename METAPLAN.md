@@ -40,11 +40,33 @@ Key findings:
 | C3 | probe verdict memoization on `Navcord` | 14s | 29K/105K probes replayed virtually |
 | C4a | trusted replay — `drawn_memo` + `*_infringably` draw paths | 3.6s | 65K/71K draws skip all checks |
 | C5 | query filter reordering + loose-dot early-out | 3.1s | candidates 14.8M→8.8M, queries 2.3→1.4s |
+| C6+C7 | trig removal + ghost probes (no speculative mutation) | 1.8s | step_to errors 71K→126; queries still ~200ms |
+| C8 | virtual navcord — `VirtualCane` state, materialize at commit | ~1.8s | inserts 265K→2.6K, removes 263K→0, rework churn gone |
+| C9 | `step_memo` — replay memoized `.step_to(..)` verdicts | ~1.0s | 77.6K hits (56%), rework redraws ~580ms→19ms |
+| B0 | spade `bulk_load_cdt` for prenavmesh vertices | ~0.8s | prenavmesh 501→332ms, construction 567→375ms |
+| B2' | per-(net,layer) prenavmesh vertex-base cache | ~0.7s | 133 builds → 12 bases + 133 from-base clones |
+| B3 | constrained-base delta cache (geometry `ConstraintKey`s) | ~0.8s | construction 227→~126ms; deltas 144x on 4x4 |
+| — | geometry `generation` counter on `GeometryWithRtree` | — | bumps on all mutators + `apply` (undo/redo safe) |
 
-Post-C5 breakdown on 4x4 (instrumented): step_to ~2.3s (infringe queries
-1.38s, mutations ~1.2s), navmesh+prenavmesh ~0.7s (~20%), rest small.
-Remaining real probes (~75K) still pay ~3-4 queries each — next lever is
-ghost probes (shape-based union query, no mutation) or Phase D laziness.
+candE.dsn after C8–B2' (300s cap): construction 197s (~66%),
+step_to evals 72.9s, rework 2.7s, draw machinery ~0 — profile is now
+dominated by prenavmesh rebuilds (hence B2'/B3) and by the search not
+converging (oscillates 9–26/107 — an ordering problem, not raw speed).
+
+Whole-navmesh caching was tried and **rejected**: navnodes retain
+`LooseBend`/`PrimitiveIndex` references whose slots are recycled after
+rip-ups and redraws, so a cached navmesh dereferences stale weights
+(`unreachable!` in `GetWeight`). The safe boundary is prenavmesh-level
+caching: vertex bases keyed by (net, layer) plus constrained bases
+validated by geometry-based `ConstraintKey` sets (immune to index
+recycling). The `generation` counter is kept for future caches and
+detects any board mutation including `apply`/undo — it is deliberately
+NOT used as a cache key because every band commit bumps it.
+
+Post-B2' breakdown on 4x4 (instrumented): construction ~227ms (~30%),
+step_to eval ~334ms (~45%), thetastar bookkeeping + rest ~200ms.
+Unit coverage for the virtual navcord: 8 tests in `router::navcord::tests`
+(virtual step, materialize, step_back, finish, replay, AlreadyConnected).
 
 ---
 
@@ -63,21 +85,28 @@ ghost probes (shape-based union query, no mutation) or Phase D laziness.
 
 ## Phase B — Prenavmesh reuse
 
-- [ ] B1. `probe_channels`: hoist `Prenavmesh::new` out of the per-ratline
-      loop. Board is reverted between probes, so one triangulation can be
-      reused for all probes via `Navmesh::new_from_prenavmesh`.
-- [ ] B2. Sequential autoroute: keep a persistent `Triangulation`; after
-      each routed band, incrementally insert its new fixed primitives
-      (`Triangulation::add_vertex` / `add_constraint_edge`) instead of a
-      full `Prenavmesh::new` rebuild. Invalidate/rebuild only the affected
-      navnode region of the navmesh graph.
-- [ ] B3. Benchmark: expect navmesh construction to drop out of the profile
-      for all but the first ratline.
+- [x] B0. spade `bulk_load_cdt` for the vertex set in
+      `Triangulation::bulk_load` — near-linear CDT build instead of a
+      locate+insert per vertex. ~35% off prenavmesh construction.
+- [x] B2'. Per-(net,layer) vertex-base cache — done differently than
+      planned: spade CDTs cannot remove constraints, so instead
+      `Prenavmesh::vertex_triangulation_for_net` builds the vertex set
+      once per (net, layer) and `PlanarAutorouteExecutionStepper` clones
+      it per ratline; `from_vertex_base` adds origin/destination and the
+      current constraints. 133 builds → 12 bases on 4x4.
+- [x] B1. `probe_channels`: shared `PrenavmeshBases` cache hoisted out of
+      the per-ratline loop — probes reuse vertex/constrained bases since
+      the board reverts after each probe.
+- [x] B3. Constraint-side caching: `PrenavmeshBases` keeps a cloned
+      constrained base per (net, layer) and applies delta additions for
+      newly committed loose segs. Validation compares `ConstraintKey`
+      sets built from endpoint/core geometry (not `PrimitiveIndex`es),
+      so rip-ups and index recycling fail the subset check and force a
+      rebuild — self-validating, no explicit invalidation hooks needed.
 
-Risk: incremental correctness (bands add loose bends/segs that later become
-fixed obstacles; fillets and unions complicate this). Mitigate with
-fallback: rebuild when the delta exceeds a threshold or when incremental
-insert hits an unsupported case.
+Risk (resolved): incremental vertex insertion turned out unnecessary —
+bulk_load + clone amortizes it. Whole-navmesh caching was rejected
+(stale `LooseBend` references; see progress log).
 
 ## Phase C — Cheap wins in the search loop
 
@@ -102,13 +131,18 @@ insert hits an unsupported case.
 - [x] C5. Query filter reordering (`query.rs`): reject loose-dot and
       same-net infringees before geometric evaluation; early-out when
       infringer is a loose dot. Candidates 14.8M→8.8M, query time 2.3→1.4s.
-- [ ] C6. `SegShape` trig removal: replaced `rotate_around_point(-90°)`
+- [x] C6. `SegShape` trig removal: replaced `rotate_around_point(-90°)`
       with direct `(y, -x)` in `corners`/`rect_intersects_rect`.
-- [ ] C7. Ghost probes: evaluate probe feasibility on hypothetical
-      shapes (dot/seg/zero-length bend + moved head limbs) via one union
-      R-tree query — no speculative insertion/removal, no edit recording.
-      Fall back to the real `step_to` on failure (insert_cane squeeze
-      path needs real mutation anyway).
+- [x] C7. Ghost probes: evaluate probe feasibility on hypothetical
+      shapes — `Navcord::ghost_step_to` replicates every check of the
+      real draw on shapes only. Real `step_to` errors dropped 71K→126.
+- [x] C8. Virtual navcord: the in-flight band lives as `VirtualCane`
+      geometry in `navcord.canes`; `materialize` draws it once at
+      destination commit via checked `wrap`. Physical mutation during
+      search eliminated (removes 263K→0 on 4x4; 10.9M→0 on candE).
+- [x] C9. `step_memo`: `.step_to(..)` verdicts memoized on
+      (path, materialized-prefix-len, to) — `rework_path` redraws become
+      replays. 9.08M hits on candE, rework redraws ~580ms→19ms on 4x4.
 
 ## Phase D — Lazy edge validation (Lazy-Theta*)
 

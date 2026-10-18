@@ -152,19 +152,19 @@ impl Navmesh {
         destination: FixedDotIndex,
         options: RouterOptions,
     ) -> Result<Self, NavmeshError> {
-        crate::metrics::incr(&crate::metrics::METRICS.navmesh_builds);
-        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.navmesh_nanos);
         let prenavmesh = Prenavmesh::new(layout, origin, destination, options)?;
         Self::new_from_prenavmesh(layout, prenavmesh, origin, destination, options)
     }
 
-    fn new_from_prenavmesh(
+    pub(crate) fn new_from_prenavmesh(
         layout: &Layout<impl AccessRules>,
         prenavmesh: Prenavmesh,
         origin: FixedDotIndex,
         destination: FixedDotIndex,
         options: RouterOptions,
     ) -> Result<Self, NavmeshError> {
+        crate::metrics::incr(&crate::metrics::METRICS.navmesh_builds);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.navmesh_nanos);
         assert!(
             origin.primitive_ref(layout.drawing()).layer()
                 == destination.primitive_ref(layout.drawing()).layer()

@@ -35,6 +35,8 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
             max_reconfigurations: None,
             improve_pad_entry: false,
             pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+            escape_stubs: false,
+            surgical_ripup: false,
         },
     )
 }

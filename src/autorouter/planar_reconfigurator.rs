@@ -8,6 +8,7 @@ use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
     autorouter::{
+        escape_stubs,
         invoker::GetDebugOverlayData,
         planar_autoroute::{
             PlanarAutorouteConfigurationStatus, PlanarAutorouteContinueStatus,
@@ -20,9 +21,10 @@ use crate::{
         planar_reconfigurer::{MakeNextPlanarAutorouteConfiguration, PlanarAutorouteReconfigurer},
         Autorouter, AutorouterError, PlanarAutorouteOptions,
     },
-    board::edit::BoardEdit,
+    board::edit::{BoardDataEdit, BoardEdit},
     drawing::graph::PrimitiveIndex,
-    geometry::primitive::PrimitiveShape,
+    geometry::{edit::Edit, primitive::PrimitiveShape},
+    layout::LayoutEdit,
     router::{navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper},
     stepper::{
         Abort, EstimateProgress, GetTimeoutProgress, LinearScale, ReconfiguratorStatus,
@@ -38,6 +40,11 @@ pub struct PlanarAutorouteReconfigurator {
     timeout: TimeVsProgressAccumulatorTimeout,
     reconfigurer: PlanarAutorouteReconfigurer,
     options: PlanarAutorouteOptions,
+    /// Geometry of the escape stubs laid before routing started. Kept
+    /// out of the stepper's per-ratline edits so backtracing never
+    /// removes stubs that `terminating_dot_map` still points at; merged
+    /// into the command's edit when it is produced, reversed on abort.
+    escape_stub_edit: LayoutEdit,
     /// Set by [`PlanarAutorouteReconfigurator::finish_early`] to prevent any
     /// further reconfiguration once early finishing is requested.
     finished: bool,
@@ -59,7 +66,20 @@ impl PlanarAutorouteReconfigurator {
             },
             &options,
         );
-        let preconfiguration = preconfigurer.preconfigure(autorouter, input);
+        let mut preconfiguration = preconfigurer.preconfigure(autorouter, input);
+
+        let mut escape_stub_edit = LayoutEdit::new();
+        if options.escape_stubs {
+            let stats = escape_stubs::anteroute_escape_stubs(
+                autorouter,
+                &mut escape_stub_edit,
+                &preconfiguration.ratlines,
+                &mut preconfiguration.terminating_dot_map,
+                &options,
+            );
+            log::debug!("escape stubs: {stats:?}");
+        }
+
         let reconfigurer = PlanarAutorouteReconfigurer::new(
             autorouter,
             preconfiguration.clone(),
@@ -73,6 +93,7 @@ impl PlanarAutorouteReconfigurator {
             // Note: I assume here that the first permutation is the same as the original order.
             reconfigurer,
             options,
+            escape_stub_edit,
             finished: false,
             reconfiguration_count: 0,
         })
@@ -147,7 +168,16 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
         }
 
         match self.stepper.step(autorouter) {
-            Ok(ControlFlow::Break(maybe_edit)) => Ok(ControlFlow::Break(maybe_edit)),
+            Ok(ControlFlow::Break(maybe_edit)) => {
+                Ok(ControlFlow::Break(maybe_edit.map(|edit| {
+                    let mut merged = BoardEdit::new_from_edits(
+                        BoardDataEdit::new(),
+                        self.escape_stub_edit.clone(),
+                    );
+                    merged.merge(edit);
+                    merged
+                })))
+            }
             Ok(ControlFlow::Continue(status)) => {
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status)))
             }
@@ -171,6 +201,13 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
 impl<M: AccessMesadata> Abort<Autorouter<M>> for PlanarAutorouteReconfigurator {
     fn abort(&mut self, autorouter: &mut Autorouter<M>) {
         self.stepper.abort(autorouter);
+        autorouter.board.apply_edit(
+            &BoardEdit::new_from_edits(
+                BoardDataEdit::new(),
+                self.escape_stub_edit.clone(),
+            )
+            .reverse(),
+        );
     }
 }
 

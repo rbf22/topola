@@ -13,6 +13,8 @@ use topola::autorouter::history::History;
 use topola::autorouter::invoker::Invoker;
 use topola::autorouter::ratline::RatlineUid;
 use topola::autorouter::selection::PinSelection;
+use topola::autorouter::anterouter::AnterouterOptions;
+use topola::autorouter::multilayer_autoroute::MultilayerAutorouteOptions;
 use topola::autorouter::Autorouter;
 use topola::autorouter::PlanarAutorouteOptions;
 use topola::autorouter::PresortBy;
@@ -116,35 +118,51 @@ fn main() -> Result<(), std::io::Error> {
         } else {
             PinSelection::new_select_layer(&board, 0)
         };
-        history.do_(
-            Command::Autoroute(
+        let planar_options = PlanarAutorouteOptions {
+            principal_layer: 0,
+            presort_by: if args.escape_presort {
+                PresortBy::RatlineEscapeDensity
+            } else {
+                PresortBy::RatlineIntersectionCountAndLength
+            },
+            permutate: true,
+            reconfigure_by: Default::default(),
+            congestion_penalty: 500.0,
+            router: RouterOptions {
+                wrap_around_bands: true,
+                squeeze_through_under_bends: args.multilayer,
+                routed_band_width: 100.0,
+            },
+            timeout: TimeoutOptions {
+                initial: 1.0,
+                progress_bonus: 0.005,
+            },
+            max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
+            improve_pad_entry: args.pad_entry,
+            pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+            escape_stubs: args.escape_stubs,
+            surgical_ripup: args.surgical_ripup,
+        };
+
+        let command = if args.multilayer {
+            Command::MultilayerAutoroute(
                 selection,
-                PlanarAutorouteOptions {
-                    principal_layer: 0,
-                    presort_by: if args.escape_presort {
-                        PresortBy::RatlineEscapeDensity
-                    } else {
-                        PresortBy::RatlineIntersectionCountAndLength
+                MultilayerAutorouteOptions {
+                    anterouter: AnterouterOptions {
+                        fanout_clearance: 200.0,
                     },
-                    permutate: true,
-                    reconfigure_by: Default::default(),
-                    congestion_penalty: 500.0,
-                    router: RouterOptions {
-                        wrap_around_bands: true,
-                        squeeze_through_under_bends: false,
-                        routed_band_width: 100.0,
-                    },
+                    planar: planar_options,
                     timeout: TimeoutOptions {
-                        initial: 1.0,
-                        progress_bonus: 0.005,
+                        initial: 5.0,
+                        progress_bonus: 0.5,
                     },
-                    max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
-                    improve_pad_entry: args.pad_entry,
-                    pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
                 },
-            ),
-            None,
-        );
+            )
+        } else {
+            Command::Autoroute(selection, planar_options)
+        };
+
+        history.do_(command, None);
         history
     };
 

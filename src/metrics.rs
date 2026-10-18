@@ -37,9 +37,20 @@ macro_rules! metrics_struct {
                 writeln!(f, "== topola metrics ==")?;
                 writeln!(
                     f,
-                    "construction: prenavmesh {}x ({:.1}ms), navmesh {}x ({:.1}ms), navnodes {} edges {}",
+                    "construction: prenavmesh {}x ({:.1}ms), bases {}x ({:.1}ms) + from-base {}x ({:.1}ms) + constrained {}x ({:.1}ms, deltas {}x), navmesh {}x ({:.1}ms), navnodes {} edges {}",
                     self.prenavmesh_builds.load(Ordering::Relaxed),
                     ms(self.prenavmesh_nanos.load(Ordering::Relaxed)),
+                    self.prenavmesh_base_builds.load(Ordering::Relaxed),
+                    ms(self.prenavmesh_base_nanos.load(Ordering::Relaxed)),
+                    self.prenavmesh_from_base_builds.load(Ordering::Relaxed),
+                    ms(self.prenavmesh_from_base_nanos.load(Ordering::Relaxed)),
+                    self.prenavmesh_constrained_base_builds
+                        .load(Ordering::Relaxed),
+                    ms(self
+                        .prenavmesh_constrained_base_nanos
+                        .load(Ordering::Relaxed)),
+                    self.prenavmesh_delta_constraint_adds
+                        .load(Ordering::Relaxed),
                     self.navmesh_builds.load(Ordering::Relaxed),
                     ms(self.navmesh_nanos.load(Ordering::Relaxed)),
                     self.navmesh_nodes_total.load(Ordering::Relaxed),
@@ -65,10 +76,11 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
-                    "draw: step_to ok {} err {} trusted {} ({:.1}ms), step_back {} ({:.1}ms)",
+                    "draw: step_to ok {} err {} trusted {} memo {} ({:.1}ms), step_back {} ({:.1}ms)",
                     self.step_to_ok.load(Ordering::Relaxed),
                     self.step_to_err.load(Ordering::Relaxed),
                     self.step_to_trusted.load(Ordering::Relaxed),
+                    self.step_memo_hits.load(Ordering::Relaxed),
                     ms(self.step_to_nanos.load(Ordering::Relaxed)),
                     self.step_backs.load(Ordering::Relaxed),
                     ms(self.step_back_nanos.load(Ordering::Relaxed)),
@@ -112,6 +124,13 @@ metrics_struct!(
     // Construction
     prenavmesh_builds,
     prenavmesh_nanos,
+    prenavmesh_base_builds,
+    prenavmesh_base_nanos,
+    prenavmesh_from_base_builds,
+    prenavmesh_from_base_nanos,
+    prenavmesh_constrained_base_builds,
+    prenavmesh_constrained_base_nanos,
+    prenavmesh_delta_constraint_adds,
     navmesh_builds,
     navmesh_nanos,
     navmesh_nodes_total,
@@ -131,6 +150,7 @@ metrics_struct!(
     step_to_ok,
     step_to_err,
     step_to_trusted,
+    step_memo_hits,
     step_to_nanos,
     step_backs,
     step_back_nanos,

@@ -6,6 +6,7 @@ pub mod anterouter;
 mod autorouter;
 pub mod compass_direction;
 pub mod connected_components;
+pub mod escape_stubs;
 pub mod execution;
 pub mod history;
 pub mod invoker;
