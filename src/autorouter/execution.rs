@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    invoker::{GetDebugOverlayData, Invoker, InvokerError},
+    invoker::{Invoker, InvokerError},
     measure_length::MeasureLengthExecutionStepper,
     place_via::PlaceViaExecutionStepper,
     remove_bands::RemoveBandsExecutionStepper,
@@ -91,15 +91,6 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
                                 *band,
                             );
                         }
-
-                        let topo_navmesh = autoroute.maybe_topo_navmesh().unwrap().to_owned();
-                        log::debug!(
-                            "topo navmesh result: {}",
-                            serde_json::to_string_pretty(&ng::pie::navmesh::NavmeshSer::from(
-                                topo_navmesh
-                            ))
-                            .unwrap()
-                        );
 
                         ControlFlow::Break((
                             Some(autoroute.last_recorder.clone()),

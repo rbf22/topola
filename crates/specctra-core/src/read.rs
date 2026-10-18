@@ -5,7 +5,43 @@
 use super::error::{ParseError, ParseErrorContext};
 use super::structure::Parser;
 use super::ListToken;
-use utf8_chars::BufReadCharsExt;
+
+/// Reads one UTF-8-encoded `char` from `reader`, or `None` at EOF.
+fn read_char(reader: &mut impl std::io::BufRead) -> std::io::Result<Option<char>> {
+    let mut buf = [0u8; 4];
+    let Some(&first) = reader.fill_buf()?.first() else {
+        return Ok(None);
+    };
+    buf[0] = first;
+    reader.consume(1);
+
+    let len = match first {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid UTF-8 leading byte",
+            ))
+        }
+    };
+    for byte in &mut buf[1..len] {
+        let Some(&next) = reader.fill_buf()?.first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "truncated UTF-8 sequence",
+            ));
+        };
+        *byte = next;
+        reader.consume(1);
+    }
+    Ok(std::str::from_utf8(&buf[..len])
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?
+        .chars()
+        .next())
+}
 
 pub struct InputToken {
     pub token: ListToken,
@@ -171,9 +207,7 @@ impl<R: std::io::BufRead> ListTokenizer<R> {
         Ok(if let Some(chr) = self.peeked_char {
             chr
         } else {
-            let chr = self
-                .reader
-                .read_char()
+            let chr = read_char(&mut self.reader)
                 .transpose()
                 .ok_or(self.add_context(ParseError::Eof))?
                 .map_err(|err| self.add_context(err.into()))?;
