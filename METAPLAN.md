@@ -129,8 +129,49 @@ Unit coverage for the virtual navcord: 8 tests in `router::navcord::tests`
       outcome classes (los_ok/failed/backtracked).
 - [x] A3. Baselines captured (table above): 4x4_1206_led_matrix and
       candE.dsn.
-- [ ] A4. Optional later: samply flamegraph to break down step_to
-      internals (bitangents vs. collision query vs. R-tree insert).
+- [x] A4. samply flamegraph of candE `--multilayer --corridor-presort`
+      (40s window, release+debuginfo build; offline-symbolicated since
+      samply leaves offsets unresolved — add 0x100000000 and run
+      `atos -o target/release/topola`):
+
+      Post-D3 cost structure on candE — `step_to` is 49% total, but the
+      big new bucket is **navmesh per-attempt work at ~31%**
+      (`PrenavmeshBases::navmesh_in` 14.5% self / 31.4% total):
+      `add_prenavedge_to_repr_as_quadrinavedges` 5.7% rebuilding navmesh
+      edges, plus ~6.6% just computing cache keys
+      (`fixed_fingerprint` 3.9% + `navmesh_key_and_snapshot` 2.7%).
+      Retained search state avoids re-search but not re-build.
+      rstar `SelectionIterator::next` is the hottest single frame at
+      23.5% self — R-tree traversal inside `overlapee_limbs` (11.4%)
+      and infringement queries. `ghost_extend_head` 18% total remains
+      the inner draw path. Iterator/collection machinery (FlatMap,
+      SmallVec extend, DefaultHasher) ~13% combined — navmesh-build
+      bookkeeping. `reconfigure` 10.6%.
+
+      Corroborating `--features metrics` run on candE: `navmesh` builds
+      **421× @ 8.7s with only 15 cache hits** — the whole-navmesh
+      loose-snapshot match almost never succeeds once attempts mutate
+      the board; `search_states` similarly **65 stored, 0 hits** (D3
+      retention can't fire without a navmesh hit, since memo keys are
+      NavnodeIndexes into that navmesh). `infringe` is the hottest
+      single operation: 3.8M calls @ 12.3s, 53.7M candidate checks —
+      the same rstar traversal the flamegraph flags. `visit_navnode`/
+      `path_reconstruct`/`rework_path` run 4.6M× each — every A*
+      expansion pays a navcord rework (cheap per call, 778ms total).
+
+      Fix landed from this data: `Navmesh.graph`/`prenavmesh` are now
+      `Arc`-shared so the cache-hit path (and probe-worker clones of
+      `Autorouter`, which carry `PrenavmeshBases`) no longer
+      deep-copies a graph plus a whole triangulation per handout.
+
+      Next targets implied: (a) `infringe` candidate reduction —
+      tighter R-tree envelopes or per-bend region pruning inside
+      `overlapee_limbs`; (b) navmesh reuse across attempts — the
+      vertex/constrained bases already share, but quadrinavedge
+      rebuild (5.7%) could be keyed looser if navnodes prove
+      independent of mutable loose geometry; (c) memoize
+      `fixed_fingerprint`/`loose_snapshot` per `Drawing::generation`
+      when consecutive `navmesh_in` calls see an unmutated board.
 
 ## Phase B — Prenavmesh reuse
 

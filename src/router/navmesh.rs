@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
@@ -130,7 +130,10 @@ pub enum NavmeshError {
 /// The name "navmesh" is a blend of "navigation mesh".
 #[derive(Clone, Getters)]
 pub struct Navmesh {
-    graph: UnGraph<NavnodeWeight, (), usize>,
+    /// `Arc` so that handing a navmesh out of `PrenavmeshBases`'s
+    /// whole-navmesh cache does not deep-copy the graph. Immutable
+    /// after construction, so sharing is sound.
+    graph: Arc<UnGraph<NavnodeWeight, (), usize>>,
     #[getter(skip)]
     origin: FixedDotIndex,
     #[getter(skip)]
@@ -141,7 +144,8 @@ pub struct Navmesh {
     destination_navnode: NavnodeIndex,
 
     /// Original constrainted triangulation stored for debugging purposes.
-    prenavmesh: Prenavmesh,
+    /// `Arc` for the same reason as `graph`.
+    prenavmesh: Arc<Prenavmesh>,
 }
 
 impl Navmesh {
@@ -339,14 +343,14 @@ impl Navmesh {
         );
 
         Ok(Self {
-            graph,
+            graph: Arc::new(graph),
             origin,
             origin_navnode: NavnodeIndex(origin_navnode.ok_or(NavmeshError::UnreachableOrigin)?),
             destination,
             destination_navnode: NavnodeIndex(
                 destination_navnode.ok_or(NavmeshError::UnreachableDestination)?,
             ),
-            prenavmesh,
+            prenavmesh: Arc::new(prenavmesh),
         })
     }
 
