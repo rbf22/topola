@@ -68,6 +68,11 @@ pub struct Cli {
     pub apply_shifts: Option<std::path::PathBuf>,
     #[arg(
         long,
+        help = "Order ratlines by endpoint crowding, most-crowded first (BGA escape heuristic)"
+    )]
+    pub escape_presort: bool,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,

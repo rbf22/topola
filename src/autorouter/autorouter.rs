@@ -42,6 +42,10 @@ use super::{
 pub enum PresortBy {
     RatlineIntersectionCountAndLength,
     PairwiseDetours,
+    /// Order each SCC's ratlines by endpoint crowding, most-crowded
+    /// first: ratlines escaping dense pin regions route while their
+    /// corridors are still open.
+    RatlineEscapeDensity,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

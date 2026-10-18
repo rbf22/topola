@@ -121,7 +121,11 @@ fn main() -> Result<(), std::io::Error> {
                 selection,
                 PlanarAutorouteOptions {
                     principal_layer: 0,
-                    presort_by: PresortBy::RatlineIntersectionCountAndLength,
+                    presort_by: if args.escape_presort {
+                        PresortBy::RatlineEscapeDensity
+                    } else {
+                        PresortBy::RatlineIntersectionCountAndLength
+                    },
                     permutate: true,
                     reconfigure_by: Default::default(),
                     congestion_penalty: 500.0,
