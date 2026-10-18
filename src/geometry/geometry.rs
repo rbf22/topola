@@ -149,10 +149,13 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
     where
         PW: Copy,
     {
-        if let GenericNode::Primitive(weight) = self.graph.node_weight(index.into()).unwrap() {
-            *weight
-        } else {
-            unreachable!()
+        match self.graph.node_weight(index.into()) {
+            Some(GenericNode::Primitive(weight)) => *weight,
+            Some(GenericNode::Compound(_)) => panic!(
+                "stale primitive index {index}: slot now holds a compound \
+                 (index recycled across a mutation?)"
+            ),
+            None => panic!("stale primitive index {index}: slot is vacant"),
         }
     }
 }

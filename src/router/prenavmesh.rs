@@ -888,15 +888,44 @@ mod tests {
         io::BufReader,
     };
 
+    use geo::point;
     use petgraph::visit::IntoNodeIdentifiers;
 
     use super::*;
     use crate::{
         autorouter::{ratline::RatlineUid, Autorouter},
         board::edit::BoardEdit,
+        drawing::{
+            dot::{FixedDotWeight, GeneralDotWeight},
+            seg::{GeneralSegWeight, LoneLooseSegWeight},
+        },
+        geometry::edit::{ApplyGeometryEdit, Edit},
         graph::MakeRef,
-        specctra::design::SpecctraDesign,
+        layout::LayoutEdit,
+        math::Circle,
+        specctra::{design::SpecctraDesign, mesadata::SpecctraMesadata},
     };
+
+    fn autorouter_0603() -> Autorouter<SpecctraMesadata> {
+        let design_file =
+            File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+        Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+    }
+
+    fn first_ratline(autorouter: &Autorouter<SpecctraMesadata>) -> RatlineUid {
+        autorouter
+            .ratsnests()
+            .on_principal_layer(0)
+            .graph()
+            .edge_indices()
+            .map(|index| RatlineUid {
+                principal_layer: 0,
+                index,
+            })
+            .next()
+            .unwrap()
+    }
 
     /// A prenavmesh built from a cached per-net vertex base must equal
     /// one built from scratch: same vertex set, same constraint set.
@@ -954,5 +983,194 @@ mod tests {
                 .collect::<BTreeSet<_>>()
         };
         assert_eq!(constraints(&from_base), constraints(&fresh));
+    }
+
+    /// The fixed-primitive fingerprint keys the vertex bases — it must
+    /// stay stable while loose primitives come and go. Loose
+    /// insertions shift the rtree traversal order, which is why the
+    /// fold is order-independent; a regression here rebuilds the
+    /// vertex bases on every call.
+    #[test]
+    fn fixed_fingerprint_ignores_loose_prims() {
+        let mut autorouter = autorouter_0603();
+        let layout = autorouter.board_mut().layout_mut();
+
+        let mut dots_edit = LayoutEdit::new();
+        let dot = |x: f64| {
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: x, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(90),
+            })
+        };
+        let a = layout.add_fixed_dot_infringably(&mut dots_edit, dot(0.0));
+        let b = layout.add_fixed_dot_infringably(&mut dots_edit, dot(500.0));
+
+        let fingerprint = Prenavmesh::fixed_fingerprint(layout, 0);
+
+        let mut seg_edit = LayoutEdit::new();
+        layout
+            .add_lone_loose_seg(
+                &mut seg_edit,
+                a,
+                b,
+                LoneLooseSegWeight(GeneralSegWeight {
+                    width: 100.0,
+                    layer: 0,
+                    maybe_net: Some(90),
+                }),
+            )
+            .unwrap();
+        assert_eq!(Prenavmesh::fixed_fingerprint(layout, 0), fingerprint);
+
+        layout.apply(&seg_edit.reverse());
+        assert_eq!(Prenavmesh::fixed_fingerprint(layout, 0), fingerprint);
+    }
+
+    /// The fingerprint must notice a via-style swap: a fixed primitive
+    /// removed and another placed at the same index and position but
+    /// on a different net. Navnode net classification is baked into a
+    /// cached navmesh at build time, so a net change must invalidate.
+    #[test]
+    fn fixed_fingerprint_distinguishes_net_at_same_index() {
+        let mut autorouter = autorouter_0603();
+        let layout = autorouter.board_mut().layout_mut();
+
+        let mut edit = LayoutEdit::new();
+        let dot = layout.add_fixed_dot_infringably(
+            &mut edit,
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: 0.0, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(90),
+            }),
+        );
+        let fingerprint = Prenavmesh::fixed_fingerprint(layout, 0);
+
+        layout.apply(&edit.reverse());
+        let swapped = layout.add_fixed_dot_infringably(
+            &mut LayoutEdit::new(),
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: 0.0, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(91),
+            }),
+        );
+        assert_eq!(swapped, dot);
+        assert_ne!(Prenavmesh::fixed_fingerprint(layout, 0), fingerprint);
+    }
+
+    /// The loose-primitive snapshot gates whole-navmesh reuse — it
+    /// must capture insertions exactly and be restored bit-for-bit by
+    /// `apply(reverse)`, which is what makes backtrace hits sound.
+    #[test]
+    fn loose_snapshot_round_trips_through_undo() {
+        let mut autorouter = autorouter_0603();
+        let layout = autorouter.board_mut().layout_mut();
+
+        let mut dots_edit = LayoutEdit::new();
+        let dot = |x: f64| {
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: x, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(90),
+            })
+        };
+        let a = layout.add_fixed_dot_infringably(&mut dots_edit, dot(0.0));
+        let b = layout.add_fixed_dot_infringably(&mut dots_edit, dot(500.0));
+
+        let snapshot = loose_snapshot(layout, 0);
+
+        let mut seg_edit = LayoutEdit::new();
+        layout
+            .add_lone_loose_seg(
+                &mut seg_edit,
+                a,
+                b,
+                LoneLooseSegWeight(GeneralSegWeight {
+                    width: 100.0,
+                    layer: 0,
+                    maybe_net: Some(90),
+                }),
+            )
+            .unwrap();
+        assert_ne!(loose_snapshot(layout, 0), snapshot);
+
+        layout.apply(&seg_edit.reverse());
+        assert_eq!(loose_snapshot(layout, 0), snapshot);
+    }
+
+    /// After loose geometry is added and then undone, a navmesh
+    /// rebuild through the cache must yield an identical structure —
+    /// equal snapshots make the cached entry hit-eligible, and an
+    /// exact rebuild yields equal content either way.
+    #[test]
+    fn navmesh_cache_restores_identical_navmesh_after_undo() {
+        let mut autorouter = autorouter_0603();
+        let ratline = first_ratline(&autorouter);
+        let (origin, destination) = ratline.ref_(&autorouter).endpoint_dots();
+        let options = RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: false,
+            routed_band_width: 100.0,
+        };
+
+        // Fixed dots the loose seg will span; they persist for the
+        // whole test so the first and final navmeshes see the same
+        // fixed geometry.
+        let layout = autorouter.board_mut().layout_mut();
+        let mut dots_edit = LayoutEdit::new();
+        let dot = |x: f64| {
+            FixedDotWeight(GeneralDotWeight {
+                circle: Circle {
+                    pos: point!(x: x, y: -8000.0),
+                    r: 100.0,
+                },
+                layer: 0,
+                maybe_net: Some(90),
+            })
+        };
+        let a = layout.add_fixed_dot_infringably(&mut dots_edit, dot(0.0));
+        let b = layout.add_fixed_dot_infringably(&mut dots_edit, dot(500.0));
+
+        let mut bases = PrenavmeshBases::default();
+        let first = bases.navmesh(layout, origin, destination, options).unwrap();
+        let (nodes, edges) = (first.graph().node_count(), first.graph().edge_count());
+
+        // Mutate loose state, forcing a rebuild against different
+        // geometry.
+        let mut seg_edit = LayoutEdit::new();
+        layout
+            .add_lone_loose_seg(
+                &mut seg_edit,
+                a,
+                b,
+                LoneLooseSegWeight(GeneralSegWeight {
+                    width: 100.0,
+                    layer: 0,
+                    maybe_net: Some(90),
+                }),
+            )
+            .unwrap();
+        bases
+            .navmesh(layout, origin, destination, options)
+            .unwrap();
+
+        layout.apply(&seg_edit.reverse());
+        let third = bases.navmesh(layout, origin, destination, options).unwrap();
+        assert_eq!(third.graph().node_count(), nodes);
+        assert_eq!(third.graph().edge_count(), edges);
     }
 }

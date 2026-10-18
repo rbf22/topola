@@ -145,3 +145,78 @@ impl MultilayerPreconfigurer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader};
+
+    use super::*;
+    use crate::{
+        board::edit::BoardEdit,
+        specctra::{design::SpecctraDesign, mesadata::SpecctraMesadata},
+    };
+
+    fn astable() -> Autorouter<SpecctraMesadata> {
+        let design_file = File::open(
+            "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn",
+        )
+        .unwrap();
+        let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+        Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+    }
+
+    /// Every ratline on every principal layer.
+    fn input(autorouter: &Autorouter<SpecctraMesadata>) -> MultilayerAutoroutePreconfigurerInput {
+        let mut ratlines = BTreeSet::new();
+        for layer in 0..autorouter.board().layout().drawing().layer_count() {
+            ratlines.extend(
+                autorouter
+                    .ratsnests()
+                    .on_principal_layer(layer)
+                    .graph()
+                    .edge_indices()
+                    .map(|index| RatlineUid {
+                        principal_layer: layer,
+                        index,
+                    }),
+            );
+        }
+        MultilayerAutoroutePreconfigurerInput { ratlines }
+    }
+
+    #[test]
+    fn seeded_assignment_is_deterministic_and_bounded() {
+        let autorouter = astable();
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+        let input = input(&autorouter);
+
+        let first = MultilayerPreconfigurer::new_seeded(&autorouter, input.clone(), 7);
+        let second = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7);
+        assert_eq!(first.plan().layer_map, second.plan().layer_map);
+        assert!(first
+            .plan()
+            .layer_map
+            .values()
+            .all(|layer| *layer < layer_count));
+    }
+
+    #[test]
+    fn zero_seed_keeps_preferred_layers() {
+        let autorouter = astable();
+        let input = input(&autorouter);
+
+        let preferred = MultilayerPreconfigurer::new(&autorouter, input.clone());
+        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 0);
+        assert_eq!(preferred.plan().layer_map, seeded.plan().layer_map);
+    }
+
+    #[test]
+    fn nonzero_seed_changes_assignment() {
+        let autorouter = astable();
+        let input = input(&autorouter);
+
+        let preferred = MultilayerPreconfigurer::new(&autorouter, input.clone());
+        let seeded = MultilayerPreconfigurer::new_seeded(&autorouter, input, 7);
+        assert_ne!(preferred.plan().layer_map, seeded.plan().layer_map);
+    }
+}

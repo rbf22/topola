@@ -54,6 +54,8 @@ Key findings:
 | C1 | index-addressed thetastar maps (scores/est/predecessors = Vec<Option<T>> via GetIndex); compound-compare without Vec collects | ~0.5s | same search behavior (pops 3941, visits 100745) |
 | F2b | `layer_seed` on `MultilayerAutorouteOptions` — parallel workers get pseudo-random initial layer assignments, fanout failures fall back to preferred layer | — | seed 7 routes astable_multivibrator 16/16 |
 | G1' | multilayer layer search now rotates **blocker** ratlines too, not only the failed ratline — `record_blockers`' output is surfaced via `PlanarAutorouteReconfigurator::blockers()` and pushed as A* candidates | — | fixes "blocker stays on contested layer" dead-ends |
+| — | `fixed_fingerprint` now includes `maybe_net` — a same-index/same-position via swap between nets must invalidate caches | — | found in review; navnode net classification is baked at build time |
+| — | cache-invariant tests: fingerprint ignores loose prims, distinguishes same-index net swaps; `loose_snapshot` round-trips through undo; navmesh cache restores identical structure; `new_seeded` determinism/zero-seed/difference | — | `primitive_weight`'s `unreachable` now reports the stale index and slot kind |
 
 candE.dsn is a **4-layer board** (F.Cu, In1.Cu, In2.Cu, B.Cu): all
 earlier runs were single-layer, where ~26/107 is a hard ceiling, not
