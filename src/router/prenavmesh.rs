@@ -5,6 +5,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::{Index, IndexMut},
+    sync::Arc,
 };
 
 use derive_getters::Getters;
@@ -729,6 +730,12 @@ pub struct PrenavmeshBases {
     /// proof the whole-navmesh cache relies on — so memos recorded
     /// under one board state can never leak into another.
     search_states: Vec<(NavmeshKey, LooseSnapshot, NavcordSearchState)>,
+    /// Filtered fixed-dot overlapees per prenavnode — the dominant
+    /// per-build navmesh cost — keyed by layer and guarded by the
+    /// layer's fixed fingerprint: a matching fingerprint proves the
+    /// fixed geometry (and hence every cached overlapee list) is
+    /// identical.
+    overlapee_dots: HashMap<usize, (u64, HashMap<PrenavnodeNodeIndex, Arc<Vec<FixedDotIndex>>>)>,
 }
 
 /// Bounds the number of constrained bases kept per `(net, layer)`.
@@ -754,6 +761,7 @@ impl PrenavmeshBases {
         self.map.clear();
         self.navmeshes.clear();
         self.search_states.clear();
+        self.overlapee_dots.clear();
     }
 
     /// The cache key plus the layer's loose-primitive snapshot that a
@@ -857,12 +865,23 @@ impl PrenavmeshBases {
 
         let loose_constraints = Prenavmesh::loose_constraints(layout, maybe_net, layer);
         let prenavmesh = self.prenavmesh_with(layout, origin, destination, loose_constraints)?;
+
+        let fingerprint = key.4;
+        let overlapee_dots = self
+            .overlapee_dots
+            .entry(layer)
+            .or_insert_with(|| (fingerprint, HashMap::new()));
+        if overlapee_dots.0 != fingerprint {
+            *overlapee_dots = (fingerprint, HashMap::new());
+        }
+
         let navmesh = super::navmesh::Navmesh::new_from_prenavmesh(
             layout,
             prenavmesh,
             origin,
             destination,
             options,
+            &mut overlapee_dots.1,
         )?;
 
         if self.navmeshes.len() >= NAVMESH_CACHE_CAP {

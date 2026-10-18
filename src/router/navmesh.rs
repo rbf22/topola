@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
@@ -157,7 +157,14 @@ impl Navmesh {
         options: RouterOptions,
     ) -> Result<Self, NavmeshError> {
         let prenavmesh = Prenavmesh::new(layout, origin, destination, options)?;
-        Self::new_from_prenavmesh(layout, prenavmesh, origin, destination, options)
+        Self::new_from_prenavmesh(
+            layout,
+            prenavmesh,
+            origin,
+            destination,
+            options,
+            &mut HashMap::new(),
+        )
     }
 
     pub(crate) fn new_from_prenavmesh(
@@ -166,6 +173,7 @@ impl Navmesh {
         origin: FixedDotIndex,
         destination: FixedDotIndex,
         options: RouterOptions,
+        overlapee_dots: &mut HashMap<PrenavnodeNodeIndex, Arc<Vec<FixedDotIndex>>>,
     ) -> Result<Self, NavmeshError> {
         crate::metrics::incr(&crate::metrics::METRICS.navmesh_builds);
         let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.navmesh_nanos);
@@ -214,6 +222,7 @@ impl Navmesh {
                     layout,
                     &mut overlapping_prenavnodes_unions,
                     prenavnode,
+                    overlapee_dots,
                 );
 
                 let gear = Into::<GearIndex>::into(Into::<BinavnodeNodeIndex>::into(prenavnode));
@@ -372,7 +381,26 @@ impl Navmesh {
         layout: &Layout<impl AccessRules>,
         overlapping_prenavnodes_unions: &mut UnionFind<usize>,
         prenavnode: PrenavnodeNodeIndex,
+        overlapee_dots: &mut HashMap<PrenavnodeNodeIndex, Arc<Vec<FixedDotIndex>>>,
     ) {
+        // The filtered overlapee list is a pure function of the fixed
+        // geometry — loose overlapees are discarded — so the caller's
+        // fingerprint-keyed cache can serve repeat builds of any
+        // navmesh on the layer.
+        let dots = overlapee_dots
+            .entry(prenavnode)
+            .or_insert_with(|| Arc::new(Self::overlapee_fixed_dots(layout, prenavnode)));
+        for &overlapee in dots.iter() {
+            overlapping_prenavnodes_unions.union(prenavnode.index(), overlapee.index());
+        }
+    }
+
+    /// The fixed-dot overlapees of `prenavnode`, with fillets ignored,
+    /// as `.unionize_with_overlapees(..)` uses them.
+    fn overlapee_fixed_dots(
+        layout: &Layout<impl AccessRules>,
+        prenavnode: PrenavnodeNodeIndex,
+    ) -> Vec<FixedDotIndex> {
         // Ignore overlaps of a fillet.
         if layout
             .drawing()
@@ -380,26 +408,32 @@ impl Navmesh {
             .find(|(label, _)| *label == CompoundEntryLabel::Fillet)
             .is_some()
         {
-            return;
+            return vec![];
         }
 
-        for overlapee in layout.drawing().overlapees(prenavnode.into()) {
-            // Ignore overlaps with fillets.
-            if layout
-                .drawing()
-                .compounds(GenericIndex::<()>::new(overlapee.2.index()))
-                .find(|(label, _)| *label == CompoundEntryLabel::Fillet)
-                .is_some()
-            {
-                continue;
-            }
+        crate::metrics::incr(&crate::metrics::METRICS.navmesh_overlapee_queries);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.navmesh_overlapee_nanos);
+        layout
+            .drawing()
+            .overlapees(prenavnode.into())
+            .filter_map(|overlapee| {
+                // Ignore overlaps with fillets.
+                if layout
+                    .drawing()
+                    .compounds(GenericIndex::<()>::new(overlapee.2.index()))
+                    .find(|(label, _)| *label == CompoundEntryLabel::Fillet)
+                    .is_some()
+                {
+                    return None;
+                }
 
-            let PrimitiveIndex::FixedDot(overlapee) = overlapee.2 else {
-                continue;
-            };
+                let PrimitiveIndex::FixedDot(overlapee) = overlapee.2 else {
+                    return None;
+                };
 
-            overlapping_prenavnodes_unions.union(prenavnode.index(), overlapee.index());
-        }
+                Some(overlapee)
+            })
+            .collect()
     }
 
     fn add_prenavnode_as_binavnode(

@@ -61,6 +61,12 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
+                    "  navmesh overlapees: {}x ({:.1}ms)",
+                    self.navmesh_overlapee_queries.load(Ordering::Relaxed),
+                    ms(self.navmesh_overlapee_nanos.load(Ordering::Relaxed)),
+                )?;
+                writeln!(
+                    f,
                     "search: pops {} (stale {}), visit_navnode {}x, path_reconstruct {}x",
                     self.frontier_pops.load(Ordering::Relaxed),
                     self.stale_frontier_pops.load(Ordering::Relaxed),
@@ -148,6 +154,8 @@ metrics_struct!(
     navmesh_nanos,
     navmesh_nodes_total,
     navmesh_edges_total,
+    navmesh_overlapee_queries,
+    navmesh_overlapee_nanos,
     // Search
     frontier_pops,
     stale_frontier_pops,
