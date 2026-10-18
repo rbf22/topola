@@ -27,6 +27,47 @@ use topola::stepper::{EstimateProgress, TimeoutOptions};
 pub mod cli;
 pub mod suggest;
 use cli::Cli;
+use serde::Deserialize;
+
+/// Applies the per-owner displacements of a `--suggest-shifts` report
+/// to the board before routing ("component shifting" for congestion
+/// relief). Only reference-designator owners are components;
+/// `wire:<net>` blockers are routed geometry and `<board>` owners are
+/// netless shapes, neither of which can be translated.
+fn apply_shift_report(
+    board: &mut topola::board::Board<topola::specctra::mesadata::SpecctraMesadata>,
+    report_filename: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    #[derive(Deserialize)]
+    struct ShiftEntry {
+        dx: f64,
+        dy: f64,
+    }
+
+    #[derive(Deserialize)]
+    struct ShiftReport {
+        shifts: BTreeMap<String, ShiftEntry>,
+    }
+
+    let report: ShiftReport =
+        serde_json::from_reader(BufReader::new(File::open(report_filename)?))?;
+
+    let mut edit = BoardEdit::new();
+    for (refdes, shift) in report.shifts {
+        if refdes.starts_with("wire:") || refdes == "<board>" {
+            continue;
+        }
+
+        match board.shift_component(&mut edit, &refdes, (shift.dx, shift.dy)) {
+            Some(moved) => eprintln!(
+                "[topola] shifted {} ({} dots) by ({:.0}, {:.0})",
+                refdes, moved, shift.dx, shift.dy
+            ),
+            None => eprintln!("[topola] skipped shift of {}", refdes),
+        }
+    }
+    Ok(())
+}
 
 fn main() -> Result<(), std::io::Error> {
     env_logger::init();
@@ -37,7 +78,11 @@ fn main() -> Result<(), std::io::Error> {
     let design =
         SpecctraDesign::load(design_bufread).expect("File failed to parse as Specctra DSN");
 
-    let board = design.make_board(&mut BoardEdit::new());
+    let mut board = design.make_board(&mut BoardEdit::new());
+
+    if let Some(report_filename) = &args.apply_shifts {
+        apply_shift_report(&mut board, report_filename)?;
+    }
 
     let history = if let Some(commands_filename) = args.commands {
         let command_file = File::open(commands_filename)?;

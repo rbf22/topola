@@ -25,6 +25,7 @@ use super::{
     place_via::PlaceViaExecutionStepper,
     remove_bands::RemoveBandsExecutionStepper,
     selection::{BandSelection, PinSelection},
+    shift_components::{ComponentShift, ShiftComponentsExecutionStepper},
     Autorouter, PlanarAutorouteOptions,
 };
 
@@ -40,6 +41,7 @@ pub enum Command {
         routed_band_width: f64,
     },
     PlaceVia(ViaWeight),
+    ShiftComponents(Vec<ComponentShift>),
     RemoveBands(BandSelection),
     MeasureLength(BandSelection),
 }
@@ -50,6 +52,7 @@ pub enum ExecutionStepper<M> {
     PlanarAutoroute(PlanarAutorouteReconfigurator),
     TopoAutoroute(ng::AutorouteExecutionStepper<M>),
     PlaceVia(PlaceViaExecutionStepper),
+    ShiftComponents(ShiftComponentsExecutionStepper),
     RemoveBands(RemoveBandsExecutionStepper),
     MeasureLength(MeasureLengthExecutionStepper),
 }
@@ -115,6 +118,10 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
                 let edit = place_via.doit(autorouter)?;
                 ControlFlow::Break((edit, "finished placing via".to_string()))
             }
+            ExecutionStepper::ShiftComponents(shift_components) => {
+                let edit = shift_components.doit(autorouter)?;
+                ControlFlow::Break((edit, "finished shifting components".to_string()))
+            }
             ExecutionStepper::RemoveBands(remove_bands) => {
                 let edit = remove_bands.doit(autorouter)?;
                 ControlFlow::Break((edit, "finished removing bands".to_string()))
@@ -164,6 +171,7 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
                 autoroute.abort(&mut ());
             }
             ExecutionStepper::PlaceVia(..)
+            | ExecutionStepper::ShiftComponents(..)
             | ExecutionStepper::RemoveBands(..)
             | ExecutionStepper::MeasureLength(..) => (),
         }
@@ -185,6 +193,7 @@ impl<M: AccessMesadata + Clone> Abort<Invoker<M>> for ExecutionStepper<M> {
                 *invoker.autorouter.board.layout_mut() = autoroute.last_layout.clone();
             }
             ExecutionStepper::PlaceVia(_place_via) => (), //place_via.abort(),
+            ExecutionStepper::ShiftComponents(_shift_components) => (),
             ExecutionStepper::RemoveBands(_remove_bands) => (), //remove_bands.abort(),
             ExecutionStepper::MeasureLength(_measure_length) => (), //measure_length.abort(),
         }
@@ -205,6 +214,9 @@ impl<M> EstimateProgress for ExecutionStepper<M> {
                 LinearScale::new(0, 0, LinearScale::new(0.0, 0.0, ()))
             }
             ExecutionStepper::PlaceVia(..) => {
+                LinearScale::new(0, 0, LinearScale::new(0.0, 0.0, ()))
+            }
+            ExecutionStepper::ShiftComponents(..) => {
                 LinearScale::new(0, 0, LinearScale::new(0.0, 0.0, ()))
             }
             ExecutionStepper::RemoveBands(..) => {
@@ -228,6 +240,7 @@ impl<M> GetTimeoutProgress for ExecutionStepper<M> {
             ExecutionStepper::PlanarAutoroute(_autoroute) => None,
             ExecutionStepper::TopoAutoroute(..) => None,
             ExecutionStepper::PlaceVia(..) => None,
+            ExecutionStepper::ShiftComponents(..) => None,
             ExecutionStepper::RemoveBands(..) => None,
             ExecutionStepper::MeasureLength(..) => None,
         }

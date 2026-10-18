@@ -1,0 +1,72 @@
+{
+  "done": [
+    {
+      "Autoroute": [
+        [
+          {
+            "pin": "R1-2",
+            "layer": "F.Cu"
+          },
+          {
+            "pin": "J1-2",
+            "layer": "F.Cu"
+          }
+        ],
+        {
+          "presort_by": "RatlineIntersectionCountAndLength",
+          "router": {
+            "wrap_around_bands": true,
+            "squeeze_through_under_bends": true,
+            "routed_band_width": 100.0
+          },
+          "permutate": false,
+          "principal_layer": 0,
+          "timeout": {
+            "initial": 1.0,
+            "progress_bonus": 0.005
+          }
+        }
+      ]
+    },
+    {
+      "Autoroute": [
+        [
+          {
+            "pin": "J1-1",
+            "layer": "F.Cu"
+          },
+          {
+            "pin": "R1-1",
+            "layer": "F.Cu"
+          }
+        ],
+        {
+          "presort_by": "RatlineIntersectionCountAndLength",
+          "router": {
+            "wrap_around_bands": true,
+            "squeeze_through_under_bends": true,
+            "routed_band_width": 100.0
+          },
+          "permutate": false,
+          "principal_layer": 0,
+          "timeout": {
+            "initial": 1.0,
+            "progress_bonus": 0.005
+          }
+        }
+      ]
+    },
+    {
+      "ShiftComponents": [
+        {
+          "refdes": "R1",
+          "delta": [
+            30.0,
+            15.0
+          ]
+        }
+      ]
+    }
+  ],
+  "undone": []
+}

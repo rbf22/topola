@@ -40,6 +40,22 @@ fn autoroute_0603_breakout(variant: &str) {
 }
 
 #[apply(test_master)]
+fn autoroute_0603_breakout_then_shift_r1(variant: &str) {
+    let mut autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    common::assert_layer_0_navnode_count(&mut autorouter, "R1-2", "J1-2", 22);
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+    common::replay_and_assert_and_report(
+        &mut invoker,
+        "tests/unilayer/0603_breakout/autoroute_all_then_shift_r1.cmd",
+        variant,
+    );
+
+    let (mut autorouter, ..) = invoker.dissolve();
+
+    common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
+#[apply(test_master)]
 fn autoroute_4x_3rd_order_smd_lc_filters(variant: &str) {
     let mut autorouter = common::load_design(
         "tests/unilayer/4x_3rd_order_smd_lc_filters/4x_3rd_order_smd_lc_filters.dsn",

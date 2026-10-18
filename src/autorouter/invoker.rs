@@ -36,6 +36,7 @@ use super::{
     place_via::PlaceViaExecutionStepper,
     planar_reconfigurator::PlanarAutorouteReconfigurator,
     remove_bands::RemoveBandsExecutionStepper,
+    shift_components::ShiftComponentsExecutionStepper,
     Autorouter, AutorouterError,
 };
 
@@ -256,6 +257,9 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
             Command::PlaceVia(weight) => {
                 ExecutionStepper::PlaceVia(self.autorouter.place_via(*weight)?)
             }
+            Command::ShiftComponents(shifts) => ExecutionStepper::ShiftComponents(
+                ShiftComponentsExecutionStepper::new(shifts.clone())?,
+            ),
             Command::RemoveBands(selection) => {
                 ExecutionStepper::RemoveBands(self.autorouter.remove_bands(selection)?)
             }

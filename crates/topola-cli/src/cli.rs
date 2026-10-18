@@ -62,6 +62,12 @@ pub struct Cli {
     pub suggest_shifts: Option<std::path::PathBuf>,
     #[arg(
         long,
+        value_name = "FILE",
+        help = "Apply per-component shifts from a --suggest-shifts report before routing"
+    )]
+    pub apply_shifts: Option<std::path::PathBuf>,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,

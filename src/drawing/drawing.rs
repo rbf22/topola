@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
+use std::collections::BTreeSet;
+
 use contracts_try::{debug_ensures, debug_invariant};
 use derive_getters::Getters;
 use geo::{Point, Polygon};
@@ -28,7 +30,8 @@ use crate::{
         },
     },
     geometry::{
-        edit::{ApplyGeometryEdit, GeometryEdit},
+        compound::ManageCompounds,
+        edit::{ApplyGeometryEdit, Edit, GeometryEdit},
         primitive::PrimitiveShape,
         recording_with_rtree::RecordingGeometryWithRtree,
         with_rtree::GeometryRTree,
@@ -962,6 +965,134 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         }
 
         Ok(())
+    }
+
+    /// Translates every member dot of `compound` by `delta`, re-solves
+    /// the outward bows of bands terminating at the compound's apexes,
+    /// and verifies the moved geometry for infringements.
+    ///
+    /// Members must all be dots and segs (segs follow their moved
+    /// joints implicitly): a member bend's inner circle cannot follow
+    /// a translation, so compounds containing one are rejected.
+    ///
+    /// Returns the moved member dots on success. Returns `None` — all
+    /// recorded ops reverted — when the compound is unsupported or the
+    /// shifted geometry infringes.
+    #[debug_ensures(self.recording_geometry_with_rtree.node_count() == old(self.recording_geometry_with_rtree.node_count()))]
+    pub fn shift_compound(
+        &mut self,
+        recorder: &mut DrawingEdit<CW, Cel>,
+        compound: GenericIndex<CW>,
+        delta: (f64, f64),
+    ) -> Option<Vec<FixedDotIndex>> {
+        let member_dots = self.shiftable_member_dots(compound)?;
+
+        self.shift_dots(recorder, &member_dots, delta)
+            .map(|_| member_dots)
+    }
+
+    /// The compound's member dots when every member is a dot or a seg
+    /// — the only shapes that follow a translation — and `None` when
+    /// the compound cannot be shifted (e.g. it has a member bend,
+    /// whose inner circle would not move with its joints).
+    pub fn shiftable_member_dots(
+        &self,
+        compound: GenericIndex<CW>,
+    ) -> Option<Vec<FixedDotIndex>> {
+        let mut member_dots = vec![];
+
+        for (_label, node) in self.geometry().compound_members(compound) {
+            match node {
+                PrimitiveIndex::FixedDot(dot) => member_dots.push(dot),
+                PrimitiveIndex::FixedSeg(..) => (),
+                _ => return None,
+            }
+        }
+
+        Some(member_dots)
+    }
+
+    /// Translates `dots` by `delta`, re-solves the outward bows of
+    /// bands terminating at them, and verifies the moved geometry for
+    /// infringements. Returns `None` — all recorded ops reverted —
+    /// when the shifted geometry infringes.
+    #[debug_ensures(self.recording_geometry_with_rtree.node_count() == old(self.recording_geometry_with_rtree.node_count()))]
+    pub fn shift_dots(
+        &mut self,
+        recorder: &mut DrawingEdit<CW, Cel>,
+        dots: &[FixedDotIndex],
+        delta: (f64, f64),
+    ) -> Option<()> {
+        // The first bend of each band terminating at a moved dot is
+        // re-solved after the move to restore its bow's tangency.
+        let mut first_bends = BTreeSet::new();
+        for &dot in dots {
+            for seg in self.primitive_ref(dot).segs() {
+                let SegIndex::SeqLoose(termseg) = seg else {
+                    continue;
+                };
+                if let Some(LooseIndex::Bend(bend)) =
+                    self.loose(LooseIndex::SeqSeg(termseg)).next_loose(None)
+                {
+                    first_bends.insert(bend);
+                }
+            }
+        }
+
+        let mut scratch = DrawingEdit::new();
+
+        for &dot in dots {
+            let pos = self.geometry().dot_weight(dot.into()).pos();
+            self.move_dot_infringably(
+                &mut scratch,
+                dot.into(),
+                Point::new(pos.x() + delta.0, pos.y() + delta.1),
+            );
+        }
+
+        for &bend in &first_bends {
+            self.update_this_and_outward_bows(&mut scratch, bend)
+                .unwrap(); // Must never fail.
+        }
+
+        // Verify the moved dots, their limbs (member segs and
+        // terminating segs of attached bands), and the re-solved bows
+        // (bends plus the limbs of their moved joints).
+        let mut affected: BTreeSet<PrimitiveIndex> = BTreeSet::new();
+
+        for &dot in dots {
+            affected.insert(dot.into());
+            affected.extend(self.primitive_ref(dot).limbs());
+        }
+
+        for &bend in &first_bends {
+            let mut to_check = vec![bend];
+            let mut outwards = self.primitive_ref(bend).outwards();
+            while let Some(outer) = outwards.walk_next(self) {
+                to_check.push(outer);
+            }
+
+            for bend in to_check {
+                affected.insert(bend.into());
+                let (from, to) = self.primitive_ref(bend).joints();
+                for joint in [from, to] {
+                    affected.extend(joint.primitive_ref(self).limbs());
+                }
+            }
+        }
+
+        for primitive in affected {
+            if self
+                .find_infringement_except(primitive, &|_drawing, _infringer, _infringee| true)
+                .is_some()
+            {
+                self.apply(&scratch.reverse());
+                return None;
+            }
+        }
+
+        recorder.merge(scratch);
+        Some(())
     }
 
     #[debug_ensures(self.recording_geometry_with_rtree.node_count() == old(self.recording_geometry_with_rtree.node_count()))]

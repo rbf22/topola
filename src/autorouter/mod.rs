@@ -28,5 +28,6 @@ pub mod ratsnests;
 pub mod remove_bands;
 pub mod scc;
 pub mod selection;
+pub mod shift_components;
 
 pub use autorouter::*;

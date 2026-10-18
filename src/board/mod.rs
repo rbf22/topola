@@ -12,6 +12,8 @@ use std::collections::btree_map::Entry as BTreeMapEntry;
 use edit::{BoardDataEdit, BoardEdit};
 pub use specctra_core::mesadata::AccessMesadata;
 
+use std::collections::BTreeSet;
+
 use bimap::BiBTreeMap;
 use derive_getters::Getters;
 use geo::Point;
@@ -253,6 +255,70 @@ impl<M: AccessMesadata> Board<M> {
     /// Returns the pin name associated with a given node.
     pub fn node_pinname(&self, node: &NodeIndex) -> Option<&String> {
         self.pinname_nodes.get_key(node)
+    }
+
+    /// Translates all pads and vias of the component `refdes` by
+    /// `delta` ("component shifting" for congestion relief).
+    ///
+    /// The shift is atomic: it succeeds only when every pin's members
+    /// can follow a translation (all dots and segs — a member bend's
+    /// inner circle cannot) and the shifted geometry, including the
+    /// re-solved bows of attached bands, infringes nothing. Returns
+    /// the moved dot count on success, `None` when the component does
+    /// not exist, cannot be translated, or the shift would infringe.
+    pub fn shift_component(
+        &mut self,
+        recorder: &mut BoardEdit,
+        refdes: &str,
+        delta: (f64, f64),
+    ) -> Option<usize> {
+        let mut compounds = BTreeSet::new();
+        let mut standalone_dots = vec![];
+
+        for pin in self
+            .pinnames()
+            .filter(|pin| pin.rsplit_once('-').is_some_and(|(r, _)| r == refdes))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            for node in self.pinname_nodes(&pin).collect::<Vec<_>>() {
+                match node {
+                    NodeIndex::Compound(compound) => {
+                        compounds.insert(compound);
+                    }
+                    NodeIndex::Primitive(PrimitiveIndex::FixedDot(dot)) => {
+                        standalone_dots.push(dot);
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        let mut member_dots = BTreeSet::new();
+
+        for &compound in &compounds {
+            for dot in self.layout.shiftable_member_dots(compound)? {
+                member_dots.insert(dot);
+            }
+        }
+
+        let dots: Vec<FixedDotIndex> = member_dots
+            .iter()
+            .copied()
+            .chain(
+                standalone_dots
+                    .into_iter()
+                    .filter(|dot| !member_dots.contains(dot)),
+            )
+            .collect();
+
+        if dots.is_empty() {
+            return None;
+        }
+
+        self.layout
+            .shift_dots(&mut recorder.layout_edit, &dots, delta)
+            .map(|_| dots.len())
     }
 
     /// Returns the apex belonging to a given pin, if there is any.

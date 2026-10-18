@@ -307,6 +307,41 @@ impl<R: AccessRules> Layout<R> {
         self.drawing.move_dot_infringably(recorder, dot, to)
     }
 
+    /// Translates a fixed compound (e.g. a pad's footprint or a via) by
+    /// `delta`, re-solving the outward bows of bands attached to it,
+    /// and returns the moved member dots on success. Compounds with
+    /// member bends and moves that infringe are rejected, leaving the
+    /// layout unchanged.
+    pub fn shift_compound(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        compound: GenericIndex<CompoundWeight>,
+        delta: (f64, f64),
+    ) -> Option<Vec<FixedDotIndex>> {
+        self.drawing.shift_compound(recorder, compound, delta)
+    }
+
+    /// The compound's member dots when every member follows a
+    /// translation (all dots and segs), `None` otherwise.
+    pub fn shiftable_member_dots(
+        &self,
+        compound: GenericIndex<CompoundWeight>,
+    ) -> Option<Vec<FixedDotIndex>> {
+        self.drawing.shiftable_member_dots(compound)
+    }
+
+    /// Translates `dots` by `delta`, re-solving the outward bows of
+    /// bands terminating at them. Returns `None`, leaving the layout
+    /// unchanged, when the shifted geometry infringes.
+    pub fn shift_dots(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        dots: &[FixedDotIndex],
+        delta: (f64, f64),
+    ) -> Option<()> {
+        self.drawing.shift_dots(recorder, dots, delta)
+    }
+
     /// Re-solves the bow on `around` and every bow wrapped around it
     /// outward, e.g. after one of the bend's joints was moved.
     pub fn update_this_and_outward_bows(
