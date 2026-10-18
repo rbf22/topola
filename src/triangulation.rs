@@ -51,10 +51,7 @@ impl<
     /// Bulk loading deduplicates same-position vertices just like
     /// sequential insertion does: node indices whose vertices were
     /// deduplicated are resolved to the shared vertex afterwards.
-    pub fn bulk_load(
-        trianvertex_to_handle: M,
-        vertices: Vec<VW>,
-    ) -> Result<Self, InsertionError>
+    pub fn bulk_load(trianvertex_to_handle: M, vertices: Vec<VW>) -> Result<Self, InsertionError>
     where
         VW: Clone,
     {

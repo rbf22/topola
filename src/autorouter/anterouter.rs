@@ -102,10 +102,10 @@ impl Anterouter {
             let endpoint_index = [endpoint_indices.0, endpoint_indices.1][endpoint];
             let endpoint_dot = [endpoint_dots.0, endpoint_dots.1][endpoint];
 
-            if let Some(terminating_dot) = self
-                .plan
-                .static_terminating_dot_map
-                .get(&(ratline, endpoint_dot, layer))
+            if let Some(terminating_dot) =
+                self.plan
+                    .static_terminating_dot_map
+                    .get(&(ratline, endpoint_dot, layer))
             {
                 terminating_dot_map.insert((ratline, endpoint_dot), *terminating_dot);
             } else if self

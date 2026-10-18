@@ -160,8 +160,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         predicate: &'a impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> Option<Infringement> {
         crate::metrics::incr(&crate::metrics::METRICS.infringement_queries);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
 
         // Infringements with loose dots as infringers are always filtered
         // out below, so the query can be skipped entirely.
@@ -258,9 +257,8 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
 
         it.filter_map(move |primitive_node| {
             crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
-            let _timer = crate::metrics::Timer::start(
-                &crate::metrics::METRICS.infringement_candidate_nanos,
-            );
+            let _timer =
+                crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_candidate_nanos);
             let infringee_primitive = primitive_node.primitive_ref(self);
             let infringee_conditions = infringee_primitive.conditions();
 
@@ -318,8 +316,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         predicate: &impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> Option<Collision> {
         crate::metrics::incr(&crate::metrics::METRICS.collision_queries);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
         let collider_primitive = collider.primitive_ref(self);
         let collider_shape = collider_primitive.shape();
         let collider_layer = collider_primitive.layer();
@@ -386,8 +383,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         predicate: &impl Fn(&Self, PrimitiveIndex) -> bool,
     ) -> Option<Infringement> {
         crate::metrics::incr(&crate::metrics::METRICS.infringement_queries);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
 
         self.infringements_of_shape(shape, layer, maybe_net, predicate)
             .next()
@@ -484,8 +480,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         require_different_net: bool,
     ) -> Option<Collision> {
         crate::metrics::incr(&crate::metrics::METRICS.collision_queries);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
 
         self.recording_geometry_with_rtree()
             .rtree()
@@ -503,8 +498,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 // NOTE: Collisions can happen between two same-net loose
                 // segs, so these cases in particular are not filtered out
                 // here, unlike what is done in infringement code.
-                let connectable = match (maybe_net, collidee.primitive_ref(self).maybe_net())
-                {
+                let connectable = match (maybe_net, collidee.primitive_ref(self).maybe_net()) {
                     (Some(net1), Some(net2)) => net1 == net2,
                     _ => true,
                 };
@@ -515,8 +509,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                     )
             })
             .filter(|&collidee| {
-                !require_different_net
-                    || maybe_net != collidee.primitive_ref(self).maybe_net()
+                !require_different_net || maybe_net != collidee.primitive_ref(self).maybe_net()
             })
             .find_map(|collidee| {
                 let collidee_primitive = collidee.primitive_ref(self);
@@ -527,9 +520,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
 
                 let collidee_shape = collidee_primitive.shape();
 
-                shape
-                    .intersects(&collidee_shape)
-                    .then_some(Collision(shape, collidee_shape, collidee))
+                shape.intersects(&collidee_shape).then_some(Collision(
+                    shape,
+                    collidee_shape,
+                    collidee,
+                ))
             })
     }
 }

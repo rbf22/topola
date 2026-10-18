@@ -223,8 +223,7 @@ fn try_stub(
     length: f64,
     width: f64,
 ) -> Option<((), FixedDotIndex)> {
-    let stub_pos = pos
-        + Point::new(direction.cos(), direction.sin()) * length;
+    let stub_pos = pos + Point::new(direction.cos(), direction.sin()) * length;
 
     let primitive = pad.primitive_ref(autorouter.board().layout().drawing());
     let layer = primitive.layer();

@@ -6,12 +6,7 @@ use contracts_try::{debug_ensures, debug_requires};
 use thiserror::Error;
 
 use crate::{
-    drawing::{
-        band::BandTermsegIndex,
-        dot::FixedDotIndex,
-        graph::GetMaybeNet,
-        rules::AccessRules,
-    },
+    drawing::{band::BandTermsegIndex, dot::FixedDotIndex, graph::GetMaybeNet, rules::AccessRules},
     geometry::GetLayer,
     layout::{Layout, LayoutEdit},
 };

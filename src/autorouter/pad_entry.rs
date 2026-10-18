@@ -24,13 +24,11 @@ use crate::{
     board::{edit::BoardDataEdit, AccessMesadata},
     drawing::{
         band::{BandTermsegIndex, BandUid},
-        Cane,
         dot::{DotIndex, FixedDotIndex, LooseDotIndex},
         gear::GearIndex,
-        primitive::{
-            GetCore, GetJoints, GetWeight, LoneLooseSegRef, LooseBendRef, SeqLooseSegRef,
-        },
+        primitive::{GetCore, GetJoints, GetWeight, LoneLooseSegRef, LooseBendRef, SeqLooseSegRef},
         seg::{LooseSegIndex, SeqLooseSegIndex},
+        Cane,
     },
     geometry::{
         edit::{ApplyGeometryEdit, Edit},
@@ -112,8 +110,7 @@ pub fn improve_pad_entries<M: AccessMesadata>(
     }
 
     for end in ends_by_pad.values().flatten() {
-        let Some(angle) = pad_entry_angle(autorouter.board.layout(), end.pad, end.approach)
-        else {
+        let Some(angle) = pad_entry_angle(autorouter.board.layout(), end.pad, end.approach) else {
             continue;
         };
         stats.polygonal_ends += 1;
@@ -143,8 +140,7 @@ pub fn improve_pad_entries<M: AccessMesadata>(
             continue;
         }
 
-        let Some(min_gap) = min_entry_separation(autorouter.board.layout(), *pad, ends)
-        else {
+        let Some(min_gap) = min_entry_separation(autorouter.board.layout(), *pad, ends) else {
             continue;
         };
 
@@ -176,8 +172,7 @@ pub fn improve_pad_entries<M: AccessMesadata>(
                 principal_layer,
                 end,
                 |layout, new_termseg| {
-                    let Some(new_approach) =
-                        termseg_approach_pos(layout, end.pad, new_termseg)
+                    let Some(new_approach) = termseg_approach_pos(layout, end.pad, new_termseg)
                     else {
                         return false;
                     };
@@ -324,8 +319,8 @@ fn pad_entry_angle_from(
 
     let trace = pad_pos - from;
     let edge_dir = edge.end_point() - edge.start_point();
-    let cos = (dot(trace, edge_dir).abs() / (sq_norm(trace) * sq_norm(edge_dir)).sqrt())
-        .clamp(0.0, 1.0);
+    let cos =
+        (dot(trace, edge_dir).abs() / (sq_norm(trace) * sq_norm(edge_dir)).sqrt()).clamp(0.0, 1.0);
 
     Some(cos.acos())
 }
@@ -448,12 +443,9 @@ fn flip_band_end<M: AccessMesadata>(
         .drawing()
         .find_loose_band_uid(new_termseg.into())
         .expect("the redrawn band should resolve its uid");
-    autorouter.board.update_band_uid(
-        board_data_edit,
-        end.pad,
-        end.other_pad,
-        new_band,
-    );
+    autorouter
+        .board
+        .update_band_uid(board_data_edit, end.pad, end.other_pad, new_band);
     autorouter
         .ratsnests
         .on_principal_layer_mut(principal_layer)

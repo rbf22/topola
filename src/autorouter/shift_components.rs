@@ -61,11 +61,10 @@ impl ShiftComponentsExecutionStepper {
         let mut skipped = vec![];
 
         for shift in &self.shifts {
-            match autorouter.board.shift_component(
-                &mut board_edit,
-                &shift.refdes,
-                shift.delta,
-            ) {
+            match autorouter
+                .board
+                .shift_component(&mut board_edit, &shift.refdes, shift.delta)
+            {
                 Some(moved) => {
                     applied += 1;
                     log::debug!(

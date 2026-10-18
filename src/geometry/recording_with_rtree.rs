@@ -165,11 +165,7 @@ impl<
     ) -> GenericIndex<CW> {
         let compound = self.geometry_with_rtree.add_compound(weight.clone());
         // See `add_dot` about recycled indices.
-        recorder
-            .compounds
-            .entry(compound)
-            .or_insert((None, None))
-            .1 = Some((vec![], weight));
+        recorder.compounds.entry(compound).or_insert((None, None)).1 = Some((vec![], weight));
         compound
     }
 
@@ -265,8 +261,7 @@ impl<
         to: Point,
     ) {
         crate::metrics::incr(&crate::metrics::METRICS.move_dot_updates);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.move_dot_update_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.move_dot_update_nanos);
         let old_weight = self.geometry_with_rtree.geometry().dot_weight(dot);
         self.geometry_with_rtree.move_dot(dot, to);
         let new_weight = self.geometry_with_rtree.geometry().dot_weight(dot);
@@ -287,8 +282,7 @@ impl<
         F: FnOnce(&mut GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>, BI),
     {
         crate::metrics::incr(&crate::metrics::METRICS.bend_modifies);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.bend_modify_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.bend_modify_nanos);
         let geometry = self.geometry_with_rtree.geometry();
         let old_joints = geometry.bend_joints(bend);
         let old_core = geometry.core(bend);

@@ -240,7 +240,6 @@ impl<
         Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_bend_bbox(bend)));
         self.geometry.remove_primitive(bend.into());
 
-
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {
             self.rtree.insert(self.make_bend_bbox(next));
@@ -322,7 +321,6 @@ impl<
         f(&mut self.geometry, bend);
 
         self.rtree.insert(self.make_bend_bbox(bend));
-
 
         let mut outwards = self.geometry.outwards(bend);
         while let Some(next) = outwards.walk_next(&self.geometry) {

@@ -275,9 +275,7 @@ where
                     if node_slot(&self.estimated_costs, navnode)
                         .is_some_and(|score| score <= estimate_score)
                     {
-                        crate::metrics::incr(
-                            &crate::metrics::METRICS.stale_frontier_pops,
-                        );
+                        crate::metrics::incr(&crate::metrics::METRICS.stale_frontier_pops);
                         return Ok(ControlFlow::Continue(self.state));
                     }
                     set_node_slot(&mut self.estimated_costs, navnode, estimate_score);
@@ -389,8 +387,7 @@ where
 
                     // No need to add neighbors that we have already reached through a
                     // shorter path than now.
-                    if node_slot(&self.scores, next).is_some_and(|score| score <= next_score)
-                    {
+                    if node_slot(&self.scores, next).is_some_and(|score| score <= next_score) {
                         self.state = ThetastarState::Probing(visited_navnode);
                         return Ok(ControlFlow::Continue(self.state));
                     }

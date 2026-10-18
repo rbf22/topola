@@ -113,8 +113,7 @@ impl<R: AccessRules> Draw for Layout<R> {
         let bitangent = {
             crate::metrics::incr(&crate::metrics::METRICS.guide_calls);
             let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.guide_nanos);
-            self.drawing()
-                .guide_for_head_into_dot(&head, into, width)
+            self.drawing().guide_for_head_into_dot(&head, into, width)
         }
         .map_err(Into::<DrawException>::into)?;
 
@@ -199,9 +198,9 @@ impl<R: AccessRules> Draw for Layout<R> {
         sense: RotationSense,
         width: f64,
     ) -> Result<CaneHead, DrawException> {
-        let tangent = self
-            .drawing()
-            .guide_for_head_around_dot(&head, around.into(), sense, width)?;
+        let tangent =
+            self.drawing()
+                .guide_for_head_around_dot(&head, around.into(), sense, width)?;
         let offset =
             self.drawing()
                 .offset_for_guide_for_head_around_dot(&head, around.into(), width);
