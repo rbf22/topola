@@ -46,6 +46,13 @@ pub struct MultilayerAutorouteReconfigurator {
     /// any further reconfiguration once early finishing is requested.
     finished: bool,
     reconfiguration_count: usize,
+    /// Furthest ratline index reached by any planar configuration —
+    /// the frontier layer rotations are meant to advance.
+    furthest_index: usize,
+    /// Planar reconfigurations since the frontier last advanced. Once
+    /// it stalls, escalate: pop a layer-rotated configuration instead
+    /// of letting orderings permute forever under the same congestion.
+    stalls: usize,
 }
 
 impl MultilayerAutorouteReconfigurator {
@@ -89,6 +96,8 @@ impl MultilayerAutorouteReconfigurator {
             options,
             finished: false,
             reconfiguration_count: 0,
+            furthest_index: 0,
+            stalls: 0,
         })
     }
 
@@ -168,11 +177,35 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                 )))
             }
             Ok(ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(status))) => {
+                // The planar frontier is the index of the ratline that
+                // failed this round; ordering retries that never get
+                // past it mean the contention is layer-local — the
+                // congestion may dissolve entirely on another layer.
+                let reached = status.costs.lengths.len();
                 self.reconfigurer.process_planar_result(
                     autorouter,
                     Ok(status),
                     self.stepper.planar().blockers(),
                 );
+                if reached > self.furthest_index {
+                    self.furthest_index = reached;
+                    self.stalls = 0;
+                } else {
+                    self.stalls += 1;
+                }
+                // A few ordering rounds give negotiated congestion its
+                // chance; after that, rotating a contested ratline to a
+                // freer layer is the broader search move.
+                const STALL_LIMIT: usize = 4;
+                if self.stalls >= STALL_LIMIT && !self.finished {
+                    self.stalls = 0;
+                    match self.reconfigure(autorouter)? {
+                        // No rotated configurations queued — keep
+                        // stepping rather than ending the command.
+                        ControlFlow::Break(None) => {}
+                        ret => return Ok(ret),
+                    }
+                }
                 Ok(ControlFlow::Continue(
                     ReconfiguratorStatus::Reconfigured(()),
                 ))

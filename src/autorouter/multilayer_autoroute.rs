@@ -260,6 +260,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         // `add_via` may recycle as a compound — dereferencing it
         // panics in `Geometry::primitive_weight`.
         let mut relayered = vec![];
+        let mut wrapped_count = 0usize;
         for ratline in &changed {
             // The gears the old edit created — and that its reversal
             // therefore removes — must be free of foreign band
@@ -297,6 +298,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
             if wrapped {
                 // Keep the old fanout and the old layer: its gears are
                 // load-bearing for another band.
+                wrapped_count += 1;
                 layer_fixes.push((*ratline, self.plan.layer_map[ratline]));
                 continue;
             }
@@ -404,11 +406,19 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         }
 
         self.plan = new_configuration.plan;
+        let refanout_failures = layer_fixes.len() - wrapped_count;
         // Ratlines whose re-fanout failed keep their old layer, so the
         // recorded plan matches the vias actually on the board.
         for (ratline, layer) in layer_fixes {
             self.plan.layer_map.insert(ratline, layer);
         }
+        log::debug!(
+            "multilayer reconfigure: {} changed, {} relayered, {} kept wrapped, {} re-fanout failed",
+            changed.len(),
+            relayered.len(),
+            wrapped_count,
+            refanout_failures
+        );
         Ok(())
     }
 }

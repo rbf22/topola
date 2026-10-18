@@ -685,3 +685,54 @@ Caveats for upstreaming:
 - Verification at HEAD: 49 lib tests, 28 unilayer and 3 multilayer
   integration tests all pass; `test_astable_multivibrator` is
   historically flaky (~3 min runtime) and passed on rerun.
+
+## Multilayer layer-rotation starvation — diagnosed and fixed
+
+User observation: moving candE from 2 to 4 copper layers gained almost
+nothing (~10%, 48→53 routed on `--nets GND`), suspiciously little for
+the added freedom. Investigation results:
+
+**Machinery works.** `.ses` output already carries wires on all four
+layers (F.Cu ~9.6K, In1.Cu ~1.1K, In2.Cu ~1.0K, B.Cu ~0.5K segments)
+and fanout vias land. `Unreachable*` endpoint skips were ruled out for
+the GND plateau — zero skip lines under `RUST_LOG`.
+
+**Bug: the rotation trigger never fired.** The outer multilayer
+reconfigurator's `TimeVsProgressAccumulatorTimeout` banks
+`progress_bonus` seconds per *newly-reached ratline index*. With the
+CLI's `progress_bonus: 0.5`, reaching index ~200 banks ~105 s — the
+first layer rotation could not fire inside any realistic run.
+`process_planar_result` dutifully pushed rotated configurations into
+the A* on every planar reconfiguration; nothing ever popped them.
+Zero "multilayer reconfigure" events in a 30 s instrumented run.
+
+**Fix (this commit):**
+
+- Stall-triggered escalation in `MultilayerAutorouteReconfigurator`:
+  track the furthest ratline index reached (`costs.lengths.len()` of
+  each planar status); after 4 planar reconfigurations without
+  advancing it, pop a rotated-layer configuration. Empty A* no longer
+  breaks the command — it falls through to normal stepping.
+- CLI outer timeout `progress_bonus` 0.5 → 0.05 (budget ≈ 15 s at
+  index 200 — the timeout remains as a backstop, not the driver).
+
+Verified: 4 reconfigure events in a 90 s `--nets GND` run, each
+relayering a ratline successfully (`1 changed, 1 relayered, 0
+re-fanout failed`). Routed count held at 53 in that window — rotation
+now engages but gains remain marginal on candE.
+
+**Architectural ceiling (the real answer to "why didn't layers
+help"):** `Navmesh::new_from_prenavmesh` asserts
+`origin.layer() == destination.layer()` — every ratline routes
+*entirely* on a single layer. Multilayer mode assigns a layer per
+ratline plus fanout vias at the endpoints; the search space contains
+no mid-route vias, so a connection cannot weave between layers to slip
+through a corridor that is congested on all layers at different
+points. On candE — 2185 prerouted wires and 361 vias filling all four
+layers — the residual 2449 ratlines need a complete single-layer
+corridor each, and the binding constraint is usually the layer-fixed
+pad escape. Per-ratline relayering therefore buys ~10%, not 2×.
+
+True 4-layer freedom requires vias as search edges (a 3D navmesh) —
+that is the ng-router problem space, i.e. Phase E2's deferred work,
+now with a concrete motivation.

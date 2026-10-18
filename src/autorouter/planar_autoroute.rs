@@ -235,6 +235,10 @@ impl PlanarAutorouteExecutionStepper {
                         // reconfiguration and aborts the command.
                         // An empty edit slot keeps `layout_edits`
                         // index-aligned with the ratline list.
+                        log::debug!(
+                            "ratline {:?} endpoint unreachable in navmesh — skipping",
+                            self.configuration.ratlines[self.curr_ratline_index]
+                        );
                         self.dissolve_route_stepper_and_push_edits();
                         self.curr_ratline_index += 1;
                         continue;

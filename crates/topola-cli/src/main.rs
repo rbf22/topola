@@ -349,8 +349,11 @@ fn make_command(
                 },
                 planar: planar_options,
                 timeout: TimeoutOptions {
+                    // Bonus applies per newly-reached ratline index —
+                    // 0.5s each banks ~2min of budget by mid-list on
+                    // big boards, starving layer rotation entirely.
                     initial: 5.0,
-                    progress_bonus: 0.5,
+                    progress_bonus: 0.05,
                 },
                 layer_seed: 0,
             },
