@@ -19,10 +19,10 @@
 
 use std::ops::ControlFlow;
 
-use geo::Point;
+use geo::{Line, Point};
 
 use crate::{
-    autorouter::{ratline::RatlineUid, Autorouter},
+    autorouter::{ratline::RatlineUid, selection::PinSelection, Autorouter},
     board::{
         edit::{BoardDataEdit, BoardEdit},
         AccessMesadata,
@@ -32,6 +32,8 @@ use crate::{
         graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
         loose::{GetPrevNextLoose, LooseIndex},
         primitive::MakePrimitiveShape,
+        rules::{AccessRules, Conditions},
+        Drawing,
     },
     geometry::{edit::Edit, primitive::PrimitiveShape, shape::AccessShape, GetLayer},
     graph::MakeRef,
@@ -59,6 +61,161 @@ pub struct ChannelProbe {
     pub terminal_blocker: Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>,
 }
 
+/// A primitive blocking a probe's demand corridor, with the smallest
+/// displacement along the corridor's normal that would clear it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelBlocker {
+    /// The blocking primitive.
+    pub obstacle: PrimitiveIndex,
+    /// Smallest displacement clearing the corridor, as `(dx, dy)`.
+    pub shift: (f64, f64),
+}
+
+/// Projects `(x, y)` onto the unit vector `n` relative to `origin`.
+fn project(origin: Point, n: (f64, f64), x: f64, y: f64) -> f64 {
+    (x - origin.x()) * n.0 + (y - origin.y()) * n.1
+}
+
+/// Interval of a shape's bounding box along the unit vector `dir`,
+/// relative to `origin`.
+fn extent_along(origin: Point, dir: (f64, f64), shape: &PrimitiveShape) -> (f64, f64) {
+    let lo = shape.bbox_without_margin().lower();
+    let hi = shape.bbox_without_margin().upper();
+    [
+        (lo[0], lo[1]),
+        (hi[0], lo[1]),
+        (hi[0], hi[1]),
+        (lo[0], hi[1]),
+    ]
+    .into_iter()
+    .fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo_s, hi_s), (x, y)| {
+            (
+                lo_s.min(project(origin, dir, x, y)),
+                hi_s.max(project(origin, dir, x, y)),
+            )
+        },
+    )
+}
+
+/// The smallest displacement along unit vector `n` that moves `shape`'s
+/// bounding box outside `[-half_width, half_width]` around `origin`, on
+/// the side the shape's center already occupies. Returns `None` when the
+/// box already clears.
+fn clearing_shift(
+    origin: Point,
+    n: (f64, f64),
+    half_width: f64,
+    center: Point,
+    shape: &PrimitiveShape,
+) -> Option<(f64, f64)> {
+    let (s_min, s_max) = extent_along(origin, n, shape);
+    let magnitude = if project(origin, n, center.x(), center.y()) >= 0.0 {
+        half_width - s_min
+    } else {
+        s_max + half_width
+    };
+    if magnitude <= 0.0 {
+        return None;
+    }
+    let sign = if project(origin, n, center.x(), center.y()) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    Some((n.0 * sign * magnitude, n.1 * sign * magnitude))
+}
+
+impl ChannelProbe {
+    /// The channel's blockers: primitives lying inside the probe's
+    /// demand corridor at real clearance, each with the smallest
+    /// displacement that moves it outside. A failed probe reports its
+    /// terminal blocker instead, pushed away from where the band wanted
+    /// to be. Same-net primitives are connectable, never blockers.
+    ///
+    /// `drawing` must be the board the probe ran on, with real rules
+    /// restored — probing relaxes clearances, so call this after the
+    /// relaxation has been reverted.
+    pub fn blockers<CW, Cel, R>(
+        &self,
+        drawing: &Drawing<CW, Cel, R>,
+        band_half_width: f64,
+    ) -> Vec<ChannelBlocker>
+    where
+        CW: Clone,
+        Cel: Copy,
+        R: AccessRules,
+    {
+        let mut blockers = vec![];
+        let mut push = |obstacle: PrimitiveIndex, shift: (f64, f64)| {
+            if self.net.is_some() && obstacle.primitive_ref(drawing).maybe_net() == self.net {
+                return;
+            }
+            blockers.push(ChannelBlocker { obstacle, shift });
+        };
+
+        if self.path.is_empty() {
+            // Relaxed route failed: the terminal infringement names the
+            // last obstacle. Push it away from where the band wanted to
+            // be, by enough to separate the clearance-inflated ghosts.
+            if let Some((infringer, infringee, obstacle)) = self.terminal_blocker {
+                let delta = infringee.center() - infringer.center();
+                let len = (delta.x() * delta.x() + delta.y() * delta.y()).sqrt();
+                if len > 0.0 {
+                    let dir = (delta.x() / len, delta.y() / len);
+                    let (o_lo, _) = extent_along(infringer.center(), dir, &infringee);
+                    let (_, g_hi) = extent_along(infringer.center(), dir, &infringer);
+                    let needed = g_hi - o_lo;
+                    if needed > 0.0 {
+                        push(obstacle, (dir.0 * needed, dir.1 * needed));
+                    }
+                }
+            }
+        } else {
+            let rules = drawing.rules();
+            let probe_net = self.net.unwrap_or(0);
+            for window in self.path.windows(2) {
+                let (a, layer_a) = window[0];
+                let (b, layer_b) = window[1];
+                let delta = b - a;
+                let len = (delta.x() * delta.x() + delta.y() * delta.y()).sqrt();
+                if len == 0.0 || layer_a != layer_b {
+                    continue; // Degenerate or a layer transition (via).
+                }
+                let n = (-delta.y() / len, delta.x() / len);
+                let corridor_width = band_half_width * 2.0 + 2.0 * rules.largest_clearance(None);
+
+                for obstacle in drawing.cut(Line::new(a, b), corridor_width, layer_a) {
+                    let blocker_net = obstacle.primitive_ref(drawing).maybe_net().unwrap_or(0);
+                    let layer = Some(layer_a);
+                    let clearance = rules
+                        .clearance(
+                            &Conditions {
+                                net: probe_net,
+                                maybe_region: None,
+                                maybe_layer: layer,
+                            },
+                            &Conditions {
+                                net: blocker_net,
+                                maybe_region: None,
+                                maybe_layer: layer,
+                            },
+                        )
+                        .unwrap_or(0.0);
+                    let half_width = band_half_width + clearance;
+                    let blocker_primitive = obstacle.primitive_ref(drawing);
+                    let shape = blocker_primitive.shape();
+                    if let Some(shift) = clearing_shift(a, n, half_width, shape.center(), &shape) {
+                        push(obstacle, shift);
+                    }
+                }
+            }
+        }
+        blockers
+    }
+}
+
 impl<M: AccessMesadata + Clone> Autorouter<M> {
     /// Probes every unrouted ratline with `relax_rules` applied to the
     /// board's rules (typically `override_clearances(0.0)`), returning a
@@ -68,17 +225,42 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         router_options: RouterOptions,
         relax_rules: impl FnOnce(&mut M),
     ) -> Vec<ChannelProbe> {
+        let unrouted = self.unrouted_ratlines();
+        self.probe_ratlines(&unrouted, router_options, relax_rules)
+    }
+
+    /// Probes only the ratlines covered by `selection`, under relaxed
+    /// rules — e.g. to seed congestion for a subset run without
+    /// penalizing corridors demanded only by unselected ratlines.
+    /// The board is unchanged afterwards.
+    pub fn probe_selection(
+        &mut self,
+        selection: &PinSelection,
+        router_options: RouterOptions,
+        relax_rules: impl FnOnce(&mut M),
+    ) -> Vec<ChannelProbe> {
+        let ratlines: Vec<RatlineUid> = self.selected_ratlines(selection, 0).into_iter().collect();
+        self.probe_ratlines(&ratlines, router_options, relax_rules)
+    }
+
+    /// Probes the given ratlines with `relax_rules` applied to the
+    /// board's rules, returning a [`ChannelProbe`] per ratline in the
+    /// order given. The board is unchanged afterwards.
+    pub fn probe_ratlines(
+        &mut self,
+        ratlines: &[RatlineUid],
+        router_options: RouterOptions,
+        relax_rules: impl FnOnce(&mut M),
+    ) -> Vec<ChannelProbe> {
         let saved_rules = self.board.layout().drawing().rules().clone();
         relax_rules(self.board.layout_mut().rules_mut());
 
-        let unrouted = self.unrouted_ratlines();
-
-        let mut probes = Vec::with_capacity(unrouted.len());
+        let mut probes = Vec::with_capacity(ratlines.len());
         // The board is reverted between probes, so one set of prenavmesh
         // bases serves every ratline.
         let mut prenavmesh_bases = PrenavmeshBases::default();
 
-        for uid in unrouted {
+        for &uid in ratlines {
             probes.push(self.probe_one(uid, router_options, &mut prenavmesh_bases));
         }
 
@@ -162,10 +344,40 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         M: Send + Sync,
     {
         let unrouted = self.unrouted_ratlines();
-        let chunk_size = unrouted.len().div_ceil(jobs.max(1)).max(1);
+        self.probe_ratlines_par(&unrouted, router_options, relax_rules, jobs)
+    }
+
+    /// Parallel variant of [`Self::probe_selection`].
+    pub fn probe_selection_par(
+        &self,
+        selection: &PinSelection,
+        router_options: RouterOptions,
+        relax_rules: &(impl Fn(&mut M) + Sync),
+        jobs: usize,
+    ) -> Vec<ChannelProbe>
+    where
+        M: Send + Sync,
+    {
+        let ratlines: Vec<RatlineUid> = self.selected_ratlines(selection, 0).into_iter().collect();
+        self.probe_ratlines_par(&ratlines, router_options, relax_rules, jobs)
+    }
+
+    /// Parallel variant of [`Self::probe_ratlines`]: the given ratlines
+    /// are partitioned across `jobs` cloned workers.
+    pub fn probe_ratlines_par(
+        &self,
+        ratlines: &[RatlineUid],
+        router_options: RouterOptions,
+        relax_rules: &(impl Fn(&mut M) + Sync),
+        jobs: usize,
+    ) -> Vec<ChannelProbe>
+    where
+        M: Send + Sync,
+    {
+        let chunk_size = ratlines.len().div_ceil(jobs.max(1)).max(1);
 
         std::thread::scope(|scope| {
-            let handles: Vec<_> = unrouted
+            let handles: Vec<_> = ratlines
                 .chunks(chunk_size)
                 .map(|chunk| {
                     scope.spawn(|| {
@@ -336,5 +548,60 @@ mod tests {
             3,
         );
         assert_eq!(sequential, parallel);
+    }
+
+    /// `ChannelProbe::blockers` reports corridor blockers at real
+    /// clearance, and `seed_congestion` keeps only fixed primitives —
+    /// loose indices are recycled as bands come and go, so seeding them
+    /// could misattribute the count.
+    #[test]
+    fn probe_blockers_seed_fixed_congestion_only() {
+        let file = File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+        let mut autorouter = Autorouter::new(
+            SpecctraDesign::load(BufReader::new(file))
+                .unwrap()
+                .make_board(&mut BoardEdit::new()),
+        )
+        .unwrap();
+
+        let options = RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: false,
+            routed_band_width: 100.0,
+        };
+        let probes = autorouter.probe_channels(options, |rules| rules.override_clearances(0.0));
+
+        let blockers: Vec<PrimitiveIndex> = {
+            let drawing = autorouter.board().layout().drawing();
+            probes
+                .iter()
+                .flat_map(|probe| probe.blockers(drawing, 50.0))
+                .map(|blocker| blocker.obstacle)
+                .collect()
+        };
+        let fixed_blockers = blockers
+            .iter()
+            .filter(|index| {
+                matches!(
+                    index,
+                    PrimitiveIndex::FixedDot(_)
+                        | PrimitiveIndex::FixedSeg(_)
+                        | PrimitiveIndex::FixedBend(_)
+                )
+            })
+            .count();
+
+        autorouter.seed_congestion(blockers);
+
+        assert_eq!(
+            autorouter.congestion_seed().values().sum::<usize>(),
+            fixed_blockers,
+        );
+        assert!(autorouter.congestion_seed().keys().all(|index| matches!(
+            index,
+            PrimitiveIndex::FixedDot(_)
+                | PrimitiveIndex::FixedSeg(_)
+                | PrimitiveIndex::FixedBend(_)
+        )));
     }
 }

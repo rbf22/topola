@@ -350,8 +350,22 @@ precheck inside the candidate loop was tried and reverted — it added
         unchanged both ways) — a scheduling signal available when ties
         occur. Reactive blocker precedence remains in
         `PlanarReconfigurer`.
-- [ ] G3. Wire relaxed-probe failure info into `--suggest-shifts` (already
-        partially done) and into reconfiguration heuristics.
+- [x] G3. Relaxed-probe data wired into reconfiguration heuristics.
+        `ChannelProbe::blockers()` (moved from `suggest.rs` into the
+        library) extracts per-probe obstacle/corridor info;
+        `--suggest-shifts` consumes the same path. `--preprobe` runs
+        relaxed-clearance probes on the pristine board before routing —
+        selection-aware (`probe_selection*` probes only the ratlines the
+        run will actually route, so unselected demand doesn't seed
+        congestion), parallel under `--jobs`, and identical semantics in
+        `run_parallel_jobs` (probe once, seed every worker). Found
+        blockers feed `Autorouter::seed_congestion`, which initializes
+        `NegotiatedCongestionPlanarAutorouteReconfigurer::congestion` —
+        so contested obstacles carry penalties from the very first
+        configuration instead of only after negotiated failures.
+        Selection-aware probing on candE: 107 probes (not all 2449),
+        ~2s, 45 blockers; peak unchanged at 38/107 — mechanism sound,
+        neutral on this board.
 
 ---
 

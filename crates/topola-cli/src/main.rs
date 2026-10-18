@@ -24,7 +24,7 @@ use topola::autorouter::PresortBy;
 use topola::board::edit::BoardEdit;
 use topola::board::AccessMesadata;
 use topola::board::Board;
-use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef};
+use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex};
 
 use topola::router::RouterOptions;
 use topola::specctra::design::SpecctraDesign;
@@ -95,19 +95,29 @@ fn main() -> Result<(), std::io::Error> {
             apply_shift_report(&mut board, report_filename)?;
         }
 
-        let history = if let Some(commands_filename) = &args.commands {
+        let (history, selection) = if let Some(commands_filename) = &args.commands {
             let command_file = File::open(commands_filename)?;
             let commands_bufread = BufReader::new(command_file);
-            serde_json::from_reader(commands_bufread)?
+            (serde_json::from_reader(commands_bufread)?, None)
         } else {
             let mut history = History::new();
-            let selection = make_selection(&board, &args);
-            let command = make_command(&args, selection, make_planar_options(&args));
+            let selection = make_selection(&board, &args.nets, &args.exclude_nets, args.multilayer);
+            let command = make_command(&args, selection.clone(), make_planar_options(&args));
             history.do_(command, None);
-            history
+            (history, Some(selection))
         };
 
         let mut invoker = Invoker::new(Autorouter::new(board).unwrap());
+
+        if args.preprobe {
+            let blockers = preprobe_blockers(
+                invoker.autorouter_mut(),
+                selection.as_ref(),
+                make_planar_options(&args).router,
+                args.jobs.unwrap_or(1) as usize,
+            );
+            invoker.autorouter_mut().seed_congestion(blockers);
+        }
 
         let (done, undone) = history.dissolve();
         for entry in done {
@@ -249,9 +259,14 @@ fn main() -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
-    if !args.nets.is_empty() {
-        let nets: BTreeSet<String> = args.nets.iter().cloned().collect();
+fn make_selection(
+    board: &Board<SpecctraMesadata>,
+    nets: &[String],
+    exclude_nets: &[String],
+    multilayer: bool,
+) -> PinSelection {
+    if !nets.is_empty() {
+        let nets: BTreeSet<String> = nets.iter().cloned().collect();
         for net in &nets {
             if board.mesadata().netname_net(net).is_none() {
                 eprintln!("[topola] warning: net '{}' not found", net);
@@ -264,8 +279,8 @@ fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
             nets.len()
         );
         selection
-    } else if !args.exclude_nets.is_empty() {
-        let nets: BTreeSet<String> = args.exclude_nets.iter().cloned().collect();
+    } else if !exclude_nets.is_empty() {
+        let nets: BTreeSet<String> = exclude_nets.iter().cloned().collect();
         let selection = PinSelection::new_select_all_except_nets(&board, &nets);
         eprintln!(
             "[topola] selected {} pins excluding {} nets",
@@ -273,7 +288,7 @@ fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
             nets.len()
         );
         selection
-    } else if args.multilayer {
+    } else if multilayer {
         // Multilayer routing can reach pads on any layer, so select
         // all pins, not just the principal layer's.
         let selection = PinSelection::new_select_all(&board);
@@ -344,6 +359,47 @@ fn make_command(
 }
 
 /// Counts (routed, total) ratlines on the principal-layer ratsnest.
+/// Runs relaxed-clearance channel probes on a clone of `autorouter`
+/// (leaving the routed board untouched) and returns the corridor
+/// blockers found, as a flat list to feed `Autorouter::seed_congestion`.
+fn preprobe_blockers(
+    autorouter: &Autorouter<SpecctraMesadata>,
+    selection: Option<&PinSelection>,
+    router_options: RouterOptions,
+    jobs: usize,
+) -> Vec<PrimitiveIndex> {
+    let mut probe_autorouter = autorouter.clone();
+    // When a selection is given, probe only its ratlines so demand that
+    // won't be routed doesn't seed congestion.
+    let relax = |rules: &mut SpecctraMesadata| rules.override_clearances(0.0);
+    let probes = if jobs > 1 {
+        match selection {
+            Some(selection) => {
+                probe_autorouter.probe_selection_par(selection, router_options, &relax, jobs)
+            }
+            None => probe_autorouter.probe_channels_par(router_options, &relax, jobs),
+        }
+    } else {
+        match selection {
+            Some(selection) => probe_autorouter.probe_selection(selection, router_options, relax),
+            None => probe_autorouter.probe_channels(router_options, relax),
+        }
+    };
+    let band_half_width = router_options.routed_band_width / 2.0;
+    let drawing = probe_autorouter.board().layout().drawing();
+    let blockers: Vec<PrimitiveIndex> = probes
+        .iter()
+        .flat_map(|probe| probe.blockers(drawing, band_half_width))
+        .map(|blocker| blocker.obstacle)
+        .collect();
+    eprintln!(
+        "[topola] preprobe: {} channel probes found {} blockers",
+        probes.len(),
+        blockers.len()
+    );
+    blockers
+}
+
 fn routed_counts(autorouter: &Autorouter<SpecctraMesadata>) -> (usize, usize) {
     let ratsnest = autorouter.ratsnests().on_principal_layer(0);
     let total = ratsnest.graph().edge_indices().count();
@@ -369,6 +425,29 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
     let stop = Arc::new(AtomicBool::new(false));
     let template = make_planar_options(args);
 
+    // Probe the pristine board once up front; every worker seeds its
+    // congestion map from the shared blockers.
+    let preprobe_seed = if args.preprobe {
+        let design_file = File::open(&args.input)?;
+        let design = SpecctraDesign::load(BufReader::new(design_file))
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        let mut board = design.make_board(&mut BoardEdit::new());
+        if let Some(report_filename) = &args.apply_shifts {
+            apply_shift_report(&mut board, report_filename)?;
+        }
+        let selection = make_selection(&board, &args.nets, &args.exclude_nets, args.multilayer);
+        let autorouter =
+            Autorouter::new(board).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        Some(preprobe_blockers(
+            &autorouter,
+            Some(&selection),
+            template.router,
+            jobs,
+        ))
+    } else {
+        None
+    };
+
     eprintln!(
         "[topola] running {} parallel routing attempts (best of {} kept)",
         jobs, jobs
@@ -383,6 +462,7 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
         let multilayer = args.multilayer;
         let max_seconds = args.max_seconds;
         let stop = Arc::clone(&stop);
+        let preprobe_seed = preprobe_seed.clone();
         let mut planar_options = template;
         planar_options.shuffle_seed = i as u64;
 
@@ -396,17 +476,7 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                     apply_shift_report(&mut board, report_filename).map_err(|e| e.to_string())?;
                 }
 
-                let selection = if !nets.is_empty() {
-                    let net_set: BTreeSet<String> = nets.iter().cloned().collect();
-                    PinSelection::new_select_nets(&board, &net_set)
-                } else if !exclude_nets.is_empty() {
-                    let net_set: BTreeSet<String> = exclude_nets.iter().cloned().collect();
-                    PinSelection::new_select_all_except_nets(&board, &net_set)
-                } else if multilayer {
-                    PinSelection::new_select_all(&board)
-                } else {
-                    PinSelection::new_select_layer(&board, 0)
-                };
+                let selection = make_selection(&board, &nets, &exclude_nets, multilayer);
                 let command = if multilayer {
                     Command::MultilayerAutoroute(
                         selection,
@@ -428,6 +498,11 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
 
                 let mut invoker =
                     Invoker::new(Autorouter::new(board).map_err(|e| format!("{:?}", e))?);
+                if let Some(seed) = &preprobe_seed {
+                    invoker
+                        .autorouter_mut()
+                        .seed_congestion(seed.iter().copied());
+                }
                 let mut execute = invoker
                     .execute_stepper(command)
                     .map_err(|e| format!("{:?}", e))?;

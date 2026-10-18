@@ -19,7 +19,10 @@ use crate::{
         planar_reconfigurator::PlanarAutorouteReconfigurator, ratsnests::Ratsnests,
     },
     board::{AccessMesadata, Board},
-    drawing::{band::BandTermsegIndex, graph::MakePrimitiveRef},
+    drawing::{
+        band::BandTermsegIndex,
+        graph::{MakePrimitiveRef, PrimitiveIndex},
+    },
     geometry::GetLayer,
     graph::MakeRef,
     layout::{via::ViaWeight, LayoutEdit, LayoutException},
@@ -149,12 +152,40 @@ pub enum AutorouterError {
 pub struct Autorouter<M> {
     pub(super) board: Board<M>,
     pub(super) ratsnests: Ratsnests,
+    /// Congestion counts pre-seeded before routing — e.g. from relaxed
+    /// channel probes (see [`Autorouter::probe_channels`] and
+    /// `ChannelProbe::blockers`). The negotiated-congestion reconfigurer
+    /// folds these into its live counts, giving repeatedly blocked
+    /// primitives a head start on their path penalty instead of learning
+    /// them from failures alone.
+    pub(super) congestion_seed: BTreeMap<PrimitiveIndex, usize>,
 }
 
 impl<M: AccessMesadata> Autorouter<M> {
     pub fn new(board: Board<M>) -> Result<Self, InsertionError> {
         let ratsnests = Ratsnests::new(&board)?;
-        Ok(Self { board, ratsnests })
+        Ok(Self {
+            board,
+            ratsnests,
+            congestion_seed: BTreeMap::new(),
+        })
+    }
+
+    /// Bumps the seeded congestion count of each given primitive. Only
+    /// fixed primitives are counted: loose indices are recycled as
+    /// bands are undone and redrawn, so a loose key could outlive the
+    /// geometry it named and misattribute the count.
+    pub fn seed_congestion(&mut self, obstacles: impl IntoIterator<Item = PrimitiveIndex>) {
+        for obstacle in obstacles {
+            if matches!(
+                obstacle,
+                PrimitiveIndex::FixedDot(_)
+                    | PrimitiveIndex::FixedSeg(_)
+                    | PrimitiveIndex::FixedBend(_)
+            ) {
+                *self.congestion_seed.entry(obstacle).or_insert(0) += 1;
+            }
+        }
     }
 
     pub fn board_mut(&mut self) -> &mut Board<M> {

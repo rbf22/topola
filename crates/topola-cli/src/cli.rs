@@ -84,6 +84,11 @@ pub struct Cli {
     pub corridor_presort: bool,
     #[arg(
         long,
+        help = "Probe every unrouted ratline under relaxed clearances before routing and seed obstacle-congestion penalties from the blockers found (G3)"
+    )]
+    pub preprobe: bool,
+    #[arg(
+        long,
         help = "Lay escape stubs from surrounded pads through the widest local gap before routing (BGA escape)"
     )]
     pub escape_stubs: bool,

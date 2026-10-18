@@ -423,7 +423,10 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             sccs,
             precedence: vec![],
             dead_precedence: BTreeSet::new(),
-            congestion: BTreeMap::new(),
+            // Starts from any congestion pre-seeded on the autorouter
+            // (e.g. relaxed channel probes run before routing); live
+            // failure records accumulate on top.
+            congestion: autorouter.congestion_seed.clone(),
             emitted,
             last_recorded: None,
             last_blockers: vec![],
