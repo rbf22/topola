@@ -22,19 +22,22 @@ use crate::{
             PlanarAutorouteReconfigurator, PlanarAutorouteReconfiguratorStatus,
         },
         ratline::RatlineUid,
+        ratsnest::RatvertexNodeIndex,
         Autorouter, AutorouterError, PlanarAutorouteOptions,
     },
     board::edit::BoardEdit,
     drawing::{
         bend::BendIndex,
-        dot::DotIndex,
+        dot::{DotIndex, FixedDotIndex},
         gear::{GearIndex, WalkOutwards},
-        graph::PrimitiveIndex,
-        primitive::GetLimbs,
+        graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
+        primitive::{GetLimbs, MakePrimitiveShape},
         seg::SegIndex,
     },
-    geometry::{edit::Edit, primitive::PrimitiveShape},
+    geometry::{edit::Edit, primitive::PrimitiveShape, shape::AccessShape, GetLayer},
     graph::MakeRef,
+    layout::via::ViaWeight,
+    math::Circle,
     router::{navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper},
     stepper::{
         Abort, EstimateProgress, LinearScale, ReconfiguratorStatus, Reconfigure, Step,
@@ -62,6 +65,21 @@ pub struct MultilayerAutorouteOptions {
     pub layer_seed: u64,
 }
 
+/// Bookkeeping for one mid-route via weave, kept so the weave can be
+/// fully undone when either half cannot complete.
+struct WeaveRecord {
+    continuation: RatlineUid,
+    via_vertex: petgraph::stable_graph::NodeIndex<usize>,
+    via_dot_source: FixedDotIndex,
+    via_dot_target: FixedDotIndex,
+    target_layer: usize,
+    /// The parent's destination-endpoint remapping before the weave
+    /// retargeted it at the via — `None` when it terminated directly
+    /// on its endpoint pad.
+    parent_destination_entry: Option<FixedDotIndex>,
+    destination_dot: FixedDotIndex,
+}
+
 #[derive(Getters)]
 pub struct MultilayerAutorouteExecutionStepper {
     planar: PlanarAutorouteReconfigurator,
@@ -77,6 +95,21 @@ pub struct MultilayerAutorouteExecutionStepper {
     /// The layer plan the current vias were placed for.
     #[getter(skip)]
     plan: AnterouterPlan,
+    /// Ratlines involved in a mid-route via weave, as either half.
+    /// They are anchored to their layers: rotating one would reverse
+    /// the weave via or rewrite the terminating-dot link that chains
+    /// the halves, dangling a board reference either way.
+    #[getter(skip)]
+    woven: BTreeSet<RatlineUid>,
+    /// Bookkeeping for each live weave, keyed by the parent ratline,
+    /// so a weave whose halves cannot complete can be fully undone.
+    #[getter(skip)]
+    weaves: BTreeMap<RatlineUid, WeaveRecord>,
+    /// Parents whose weave was undone: the via site sampling is
+    /// deterministic, so a second weave would place the same via and
+    /// fail identically — they go straight to layer rotation.
+    #[getter(skip)]
+    weave_exhausted: BTreeSet<RatlineUid>,
     #[getter(skip)]
     options: MultilayerAutorouteOptions,
 }
@@ -160,6 +193,9 @@ impl MultilayerAutorouteExecutionStepper {
             anteroute_edit,
             anteroute_edits,
             plan: configuration.plan,
+            woven: BTreeSet::new(),
+            weaves: BTreeMap::new(),
+            weave_exhausted: BTreeSet::new(),
             options: options.clone(),
         })
     }
@@ -168,6 +204,396 @@ impl MultilayerAutorouteExecutionStepper {
     /// [`PlanarAutorouteReconfigurator::finish_early`].
     pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
         self.planar.finish_early(autorouter);
+    }
+
+    /// Decomposes `ratline` at a mid-route via: places a via at a
+    /// sampled position between the ratline's current terminating
+    /// dots, retargets the ratline's destination endpoint at the via's
+    /// dot on its current layer, and enqueues a continuation ratline
+    /// running from the via's dot on another layer to the original
+    /// destination (fanned out to that layer like any other endpoint).
+    ///
+    /// This is the mid-route layer hop: a connection whose corridor is
+    /// blocked on every layer it is tried on can still complete by
+    /// ducking to a freer layer partway. Returns `true` when a via was
+    /// placed and the continuation was enqueued.
+    pub fn weave_ratline(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        ratline: RatlineUid,
+    ) -> Result<bool, AutorouterError> {
+        if self.woven.contains(&ratline) || self.weave_exhausted.contains(&ratline) {
+            return Ok(false);
+        }
+
+        let source_layer = self.plan.layer_map[&ratline];
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+        if layer_count < 2 {
+            return Ok(false);
+        }
+
+        let Some(index) = self
+            .planar
+            .configuration()
+            .ratlines
+            .iter()
+            .position(|uid| *uid == ratline)
+        else {
+            return Ok(false);
+        };
+
+        let (term_source, term_destination) = self
+            .planar
+            .configuration()
+            .ratline_terminating_dots(autorouter, index);
+        let pos_of = |dot: FixedDotIndex| {
+            dot.primitive_ref(autorouter.board().layout().drawing())
+                .shape()
+                .center()
+        };
+        let pos_source = pos_of(term_source);
+        let pos_destination = pos_of(term_destination);
+
+        // Via sites hug the source end of the failed corridor: the
+        // parent's first half must stay short to survive the
+        // congestion that stalled it, while the continuation takes
+        // the long hop on the freer layer.
+        let delta = pos_destination - pos_source;
+        let span = delta.x().hypot(delta.y()).max(1.0);
+        let perp = geo::Point::new(-delta.y(), delta.x()) * (150.0 / span);
+        let candidates = [
+            pos_source + delta * (1.0 / 8.0),
+            pos_source + delta * (1.0 / 4.0),
+            pos_source + delta * (1.0 / 8.0) + perp,
+            pos_source + delta * (1.0 / 8.0) - perp,
+            pos_source + delta * (3.0 / 8.0),
+            pos_source + delta * (1.0 / 4.0) + perp,
+            pos_source + delta * (1.0 / 4.0) - perp,
+            pos_source + delta * 0.5,
+        ];
+
+        let maybe_net = term_source
+            .primitive_ref(autorouter.board().layout().drawing())
+            .maybe_net();
+
+        let mut weave_edit = BoardEdit::new();
+        let mut placed_via = None;
+        'sites: for pos in candidates {
+            for offset in 1..layer_count {
+                let target_layer = (source_layer + offset) % layer_count;
+                if let Ok((_via, dots)) = autorouter.board.add_via(
+                    &mut weave_edit,
+                    ViaWeight {
+                        from_layer: source_layer.min(target_layer),
+                        to_layer: source_layer.max(target_layer),
+                        circle: Circle { pos, r: 100.0 },
+                        maybe_net,
+                    },
+                    None,
+                ) {
+                    placed_via = Some((pos, dots, target_layer));
+                    break 'sites;
+                }
+            }
+        }
+        let Some((via_pos, via_dots, target_layer)) = placed_via else {
+            // The failed attempts each recorded their own reversal;
+            // keep the edit so undo history stays faithful.
+            self.anteroute_edit.merge(weave_edit);
+            return Ok(false);
+        };
+
+        let dot_on_layer = |layer: usize| {
+            via_dots.iter().copied().find(|dot| {
+                dot.primitive_ref(autorouter.board().layout().drawing())
+                    .layer()
+                    == layer
+            })
+        };
+        let via_dot_source =
+            dot_on_layer(source_layer).expect("via spans the source layer by construction");
+        let via_dot_target =
+            dot_on_layer(target_layer).expect("via spans the target layer by construction");
+
+        let destination_vertex = ratline.ref_(autorouter).endpoint_indices().1;
+        let destination_dot = ratline.ref_(autorouter).endpoint_dots().1;
+
+        // The continuation ratline: via's far-side dot → the original
+        // destination. Only the parent's ratsnest holds the edge —
+        // ratline lookups are per-principal-layer anyway.
+        let (via_vertex, continuation_edge) = autorouter
+            .ratsnests
+            .on_principal_layer_mut(ratline.principal_layer)
+            .add_continuation(
+                RatvertexNodeIndex::FixedDot(via_dot_target),
+                via_pos,
+                destination_vertex,
+            );
+        let continuation = RatlineUid {
+            principal_layer: ratline.principal_layer,
+            index: continuation_edge,
+        };
+
+        self.plan.layer_map.insert(continuation, target_layer);
+        // The via-side endpoint terminates on itself — only the
+        // destination pad gets a fanout via to the target layer.
+        self.plan
+            .static_terminating_dot_map
+            .insert((continuation, via_dot_target, target_layer), via_dot_target);
+
+        let mut anterouter = Anterouter::new(self.plan.clone());
+        let mut new_entries = BTreeMap::new();
+        if anterouter
+            .anteroute_ratline(
+                autorouter,
+                &mut weave_edit,
+                continuation,
+                target_layer,
+                &self.options.anterouter,
+                &mut new_entries,
+            )
+            .is_err()
+        {
+            autorouter.board.apply_edit(&weave_edit.reverse());
+            self.anteroute_edit.merge(weave_edit.clone());
+            self.anteroute_edit.merge(weave_edit.reverse());
+            autorouter
+                .ratsnests
+                .on_principal_layer_mut(ratline.principal_layer)
+                .remove_continuation(via_vertex, continuation_edge);
+            self.plan.layer_map.remove(&continuation);
+            self.plan.static_terminating_dot_map.remove(&(
+                continuation,
+                via_dot_target,
+                target_layer,
+            ));
+            return Ok(false);
+        }
+
+        // Commit the weave edit under the continuation: it owns the
+        // via and its destination fanout, so a later reversal of the
+        // parent's fanout never touches them.
+        // The parent's destination endpoint now terminates at the
+        // via's source-layer dot; the continuation's entries carry its
+        // destination fanout. Its prior remapping is kept so unweaving
+        // restores exactly what was there.
+        let parent_destination_entry = self
+            .planar
+            .configuration()
+            .terminating_dot_map
+            .get(&(ratline, destination_dot))
+            .copied();
+        new_entries.insert((ratline, destination_dot), via_dot_source);
+        self.planar.remap_terminating_dots(&new_entries);
+
+        self.anteroute_edit.merge(weave_edit.clone());
+        self.anteroute_edits.insert(continuation, weave_edit);
+        self.woven.insert(ratline);
+        self.woven.insert(continuation);
+        self.weaves.insert(
+            ratline,
+            WeaveRecord {
+                continuation,
+                via_vertex,
+                via_dot_source,
+                via_dot_target,
+                target_layer,
+                parent_destination_entry,
+                destination_dot,
+            },
+        );
+        // The continuation must survive orderings emitted by the
+        // reconfigurers' stored preconfigurations, not just the live
+        // list spliced below.
+        self.planar.insert_ratline_after(continuation, ratline);
+
+        // Restart at the parent with the continuation queued right
+        // after it, so the second half is routed while the first
+        // half's corridor is still warm. No bands are ripped: the
+        // parent's last attempt failed and nothing else moved.
+        let mut order = self.planar.configuration().ratlines.clone();
+        order.insert(index + 1, continuation);
+        self.planar
+            .begin_surgical_reconfiguration(autorouter, &[])?;
+        self.planar.commit_surgical_reconfiguration(
+            autorouter,
+            PlanarAutorouteConfiguration {
+                ratlines: order,
+                rip_up: vec![],
+                ..self.planar.configuration().clone()
+            },
+        )?;
+
+        log::debug!(
+            "via weave: ratline {:?} split at ({:.0}, {:.0}), \
+             continuation on layer {}",
+            ratline.index,
+            via_pos.x(),
+            via_pos.y(),
+            target_layer,
+        );
+        Ok(true)
+    }
+
+    /// Installs `plan`, then re-injects the weave-registered layer
+    /// assignments and static terminating dots. Popped search
+    /// configurations carry plan snapshots that predate any weaves —
+    /// adopting one wholesale would strand continuations without a
+    /// layer or terminating dot.
+    fn adopt_plan_preserving_woven(&mut self, plan: AnterouterPlan) {
+        let old_plan = std::mem::replace(&mut self.plan, plan);
+        for ratline in &self.woven {
+            if let Some(layer) = old_plan.layer_map.get(ratline) {
+                self.plan.layer_map.insert(*ratline, *layer);
+            }
+            for (key, dot) in old_plan.static_terminating_dot_map.iter() {
+                if key.0 == *ratline {
+                    self.plan.static_terminating_dot_map.insert(*key, *dot);
+                }
+            }
+        }
+    }
+
+    /// Returns the weave parent of `ratline`: itself when it is a
+    /// woven parent, or its parent when it is a weave continuation.
+    pub fn weave_parent_of(&self, ratline: RatlineUid) -> Option<RatlineUid> {
+        if self.weaves.contains_key(&ratline) {
+            return Some(ratline);
+        }
+        self.weaves
+            .iter()
+            .find(|(_, record)| record.continuation == ratline)
+            .map(|(parent, _)| *parent)
+    }
+
+    /// Weave parents whose chain is broken — either half's band is
+    /// absent. Checked at escalation time: a weave's re-attempt
+    /// completes before the next escalation, so an absent band means
+    /// that half genuinely failed rather than still being in flight.
+    pub fn broken_weaves(&self, autorouter: &Autorouter<impl AccessMesadata>) -> Vec<RatlineUid> {
+        let terminating = |ratline: RatlineUid, endpoint: FixedDotIndex| {
+            self.planar
+                .configuration()
+                .terminating_dot_map
+                .get(&(ratline, endpoint))
+                .copied()
+                .unwrap_or(endpoint)
+        };
+        self.weaves
+            .iter()
+            .filter(|(parent, record)| {
+                let (parent_origin, _) = parent.ref_(autorouter).endpoint_dots();
+                let (_, child_destination) = record.continuation.ref_(autorouter).endpoint_dots();
+                let parent_half = (terminating(**parent, parent_origin), record.via_dot_source);
+                let child_half = (
+                    record.via_dot_target,
+                    terminating(record.continuation, child_destination),
+                );
+                autorouter
+                    .board
+                    .band_between_nodes(parent_half.0, parent_half.1)
+                    .is_none()
+                    || autorouter
+                        .board
+                        .band_between_nodes(child_half.0, child_half.1)
+                        .is_none()
+            })
+            .map(|(parent, _)| *parent)
+            .collect()
+    }
+
+    /// Undoes a weave whose halves could not complete: rips whichever
+    /// half-bands exist, removes the via and continuation edge, and
+    /// restores the parent's pre-weave terminating-dot remap so the
+    /// ratline regains its rotation freedom.
+    pub fn unweave_ratline(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        parent: RatlineUid,
+    ) -> Result<(), AutorouterError> {
+        let Some(record) = self.weaves.remove(&parent) else {
+            return Ok(());
+        };
+        let child = record.continuation;
+
+        // Rip whichever half-bands exist and fold their edit slots
+        // into the pending edit. The parent's band, if it routed,
+        // terminates at the via dot that is about to be removed.
+        self.planar
+            .begin_surgical_reconfiguration(autorouter, &[parent, child])?;
+
+        // The weave's via and the continuation's fanout stay on the
+        // board as dead-end same-net copper. Other bands may have
+        // bent around the via dots, holding them as bend cores —
+        // removing the dots would orphan those bends.
+        self.anteroute_edits.remove(&child);
+
+        autorouter
+            .ratsnests
+            .on_principal_layer_mut(parent.principal_layer)
+            .remove_continuation(record.via_vertex, child.index);
+        self.plan.layer_map.remove(&child);
+        self.plan.static_terminating_dot_map.remove(&(
+            child,
+            record.via_dot_target,
+            record.target_layer,
+        ));
+        self.woven.remove(&parent);
+        self.woven.remove(&child);
+        // The site sampling is deterministic — a second weave of this
+        // ratline would place the same via and fail identically.
+        self.weave_exhausted.insert(parent);
+
+        // Stored preconfigurations drop the continuation and its
+        // via-dot remaps so emitted orderings never resurrect them.
+        self.planar.remove_ratline(child);
+        self.planar.remove_terminating_dots(&[child]);
+        match record.parent_destination_entry {
+            Some(dot) => self.planar.remap_terminating_dots(
+                &[((parent, record.destination_dot), dot)]
+                    .into_iter()
+                    .collect(),
+            ),
+            None => self
+                .planar
+                .remove_terminating_dot_entries(&[(parent, record.destination_dot)]),
+        }
+
+        // The live configuration carries the same revert: the
+        // continuation leaves the order and the parent's destination
+        // endpoint returns to its pre-weave terminating dot.
+        let mut new_configuration = PlanarAutorouteConfiguration {
+            ratlines: self
+                .planar
+                .configuration()
+                .ratlines
+                .iter()
+                .copied()
+                .filter(|uid| *uid != child)
+                .collect(),
+            rip_up: vec![],
+            ..self.planar.configuration().clone()
+        };
+        new_configuration
+            .terminating_dot_map
+            .retain(|(ratline, _), _| *ratline != child);
+        match record.parent_destination_entry {
+            Some(dot) => {
+                new_configuration
+                    .terminating_dot_map
+                    .insert((parent, record.destination_dot), dot);
+            }
+            None => {
+                new_configuration
+                    .terminating_dot_map
+                    .remove(&(parent, record.destination_dot));
+            }
+        }
+        self.planar
+            .commit_surgical_reconfiguration(autorouter, new_configuration)?;
+
+        log::debug!("unweave: ratline {:?} restored", parent.index);
+        Ok(())
     }
 }
 
@@ -213,16 +639,21 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         // Surgical re-layering: only the ratlines whose layer
         // assignment changed need their bands ripped and their fanout
         // vias swapped; every other routed band survives.
-        let changed: Vec<RatlineUid> = new_configuration
+        // Woven ratlines are anchored: rotating one would either
+        // reverse the weave via (dangling the continuation's endpoint)
+        // or re-anteroute the parent's destination endpoint (severing
+        // the terminating-dot link into the via). They keep their
+        // layers; the recorded plan is restored below.
+        let (anchored, changed): (Vec<RatlineUid>, Vec<RatlineUid>) = new_configuration
             .plan
             .layer_map
             .iter()
             .filter(|(ratline, layer)| self.plan.layer_map.get(*ratline) != Some(*layer))
             .map(|(ratline, _)| *ratline)
-            .collect();
+            .partition(|ratline| self.woven.contains(ratline));
 
         if changed.is_empty() {
-            self.plan = new_configuration.plan;
+            self.adopt_plan_preserving_woven(new_configuration.plan);
             return Ok(());
         }
         crate::metrics::incr(&crate::metrics::METRICS.multilayer_surgical_reconfigures);
@@ -254,6 +685,11 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         let mut anterouter = Anterouter::new(new_configuration.plan.clone());
         let mut new_entries = BTreeMap::new();
         let mut layer_fixes = vec![];
+        // Anchored (woven) ratlines keep their old layers — restored
+        // into the new plan by the layer_fixes pass below.
+        for ratline in &anchored {
+            layer_fixes.push((*ratline, self.plan.layer_map[ratline]));
+        }
         // Ratlines whose old fanout vias are removed below. Their
         // terminating-dot map entries must be purged: a retained
         // `FixedDotIndex` points at a freed node slot that a later
@@ -405,7 +841,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
             )?;
         }
 
-        self.plan = new_configuration.plan;
+        self.adopt_plan_preserving_woven(new_configuration.plan);
         let refanout_failures = layer_fixes.len() - wrapped_count;
         // Ratlines whose re-fanout failed keep their old layer, so the
         // recorded plan matches the vias actually on the board.

@@ -157,6 +157,31 @@ impl PlanarAutorouteReconfigurator {
         self.reconfigurer.remove_terminating_dots(ratlines);
     }
 
+    /// Registers a mid-run-created ratline — a via-weave
+    /// continuation — in the reconfigurer's stored preconfigurations
+    /// so subsequently emitted orderings keep it. The stepper's live
+    /// configuration is updated separately by the caller's surgical
+    /// commit.
+    pub fn insert_ratline_after(&mut self, ratline: RatlineUid, after: RatlineUid) {
+        self.reconfigurer.insert_ratline_after(ratline, after);
+    }
+
+    /// Drops a mid-run-created ratline from the reconfigurer's stored
+    /// preconfigurations — the mirror of [`Self::insert_ratline_after`],
+    /// for unweaving.
+    pub fn remove_ratline(&mut self, ratline: RatlineUid) {
+        self.reconfigurer.remove_ratline(ratline);
+    }
+
+    /// Removes specific terminating-dot remapping keys from both the
+    /// stepper's live configuration and the reconfigurer's stored
+    /// preconfigurations — for unweaving a single endpoint's remap
+    /// without dropping the ratline's other entries.
+    pub fn remove_terminating_dot_entries(&mut self, keys: &[(RatlineUid, FixedDotIndex)]) {
+        self.stepper.remove_terminating_dot_entries(keys);
+        self.reconfigurer.remove_terminating_dot_entries(keys);
+    }
+
     /// The live configuration of the inner stepper — the ratline order
     /// and terminating-dot map routing is currently working against.
     pub fn configuration(&self) -> &PlanarAutorouteConfiguration {

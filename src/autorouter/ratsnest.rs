@@ -9,7 +9,11 @@ use std::{
 
 use enum_dispatch::enum_dispatch;
 use geo::Point;
-use petgraph::{data::Element, graph::EdgeIndex, prelude::StableUnGraph};
+use petgraph::{
+    data::Element,
+    graph::{EdgeIndex, NodeIndex},
+    prelude::StableUnGraph,
+};
 use spade::{handles::FixedVertexHandle, HasPosition, InsertionError, Point2};
 use specctra_core::mesadata::AccessMesadata;
 
@@ -245,5 +249,28 @@ impl Ratsnest {
 
     pub fn graph(&self) -> &StableUnGraph<RatvertexWeight, RatlineWeight, usize> {
         &self.graph
+    }
+
+    /// Adds a ratvertex for `vertex` at `pos` plus an edge from it to
+    /// `target`, returning both new indices. Mid-route via weaving uses
+    /// this to continue a ratline from a via's far-side dot.
+    pub fn add_continuation(
+        &mut self,
+        vertex: RatvertexNodeIndex,
+        pos: Point,
+        target: NodeIndex<usize>,
+    ) -> (NodeIndex<usize>, EdgeIndex<usize>) {
+        let node = self.graph.add_node(RatvertexWeight { vertex, pos });
+        (
+            node,
+            self.graph.add_edge(node, target, RatlineWeight::default()),
+        )
+    }
+
+    /// Removes a [`Self::add_continuation`] edge and ratvertex — for
+    /// rolling back a failed weave before it is committed.
+    pub fn remove_continuation(&mut self, vertex: NodeIndex<usize>, edge: EdgeIndex<usize>) {
+        self.graph.remove_edge(edge);
+        self.graph.remove_node(vertex);
     }
 }

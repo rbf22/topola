@@ -182,6 +182,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                 // past it mean the contention is layer-local — the
                 // congestion may dissolve entirely on another layer.
                 let reached = status.costs.lengths.len();
+                let stalled_ratline = status.configuration.ratlines.get(reached).copied();
                 self.reconfigurer.process_planar_result(
                     autorouter,
                     Ok(status),
@@ -194,16 +195,36 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                     self.stalls += 1;
                 }
                 // A few ordering rounds give negotiated congestion its
-                // chance; after that, rotating a contested ratline to a
-                // freer layer is the broader search move.
+                // chance; after that, broader moves are tried:
+                // 1. A mid-route via weave on the stalled ratline —
+                //    the connection hops layers partway through rather
+                //    than needing a whole corridor on one layer.
+                // 2. A layer rotation popped from the search queue.
                 const STALL_LIMIT: usize = 4;
                 if self.stalls >= STALL_LIMIT && !self.finished {
                     self.stalls = 0;
-                    match self.reconfigure(autorouter)? {
-                        // No rotated configurations queued — keep
-                        // stepping rather than ending the command.
-                        ControlFlow::Break(None) => {}
-                        ret => return Ok(ret),
+                    // Undo weaves whose chain is broken — either half
+                    // unrouted — so their parents regain rotation
+                    // freedom instead of staying anchored to a
+                    // connection that cannot complete.
+                    let broken = self.stepper.broken_weaves(autorouter);
+                    if !broken.is_empty() {
+                        for parent in broken {
+                            self.stepper.unweave_ratline(autorouter, parent)?;
+                        }
+                    } else {
+                        let wove = stalled_ratline
+                            .map(|ratline| self.stepper.weave_ratline(autorouter, ratline))
+                            .transpose()?
+                            .unwrap_or(false);
+                        if !wove {
+                            match self.reconfigure(autorouter)? {
+                                // No rotated configurations queued — keep
+                                // stepping rather than ending the command.
+                                ControlFlow::Break(None) => {}
+                                ret => return Ok(ret),
+                            }
+                        }
                     }
                 }
                 Ok(ControlFlow::Continue(

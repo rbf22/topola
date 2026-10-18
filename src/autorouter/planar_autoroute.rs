@@ -457,7 +457,11 @@ impl PlanarAutorouteExecutionStepper {
                 .ratlines
                 .iter()
                 .position(|uid| *uid == attempted)
-                .unwrap()
+                // Unweaving can remove the attempted ratline itself
+                // (a weave continuation); resume at the position it
+                // occupied, which now holds the next ratline.
+                .unwrap_or(self.curr_ratline_index)
+                .min(self.configuration.ratlines.len())
         } else {
             // The queue was exhausted: the requeued ratlines sit at the
             // end of the new ordering.
@@ -506,6 +510,15 @@ impl PlanarAutorouteExecutionStepper {
         self.configuration
             .terminating_dot_map
             .retain(|(ratline, _), _| !ratlines.contains(ratline));
+    }
+
+    /// Removes specific terminating-dot remapping keys from the live
+    /// configuration — for unweaving a single endpoint's remap without
+    /// dropping the ratline's other entries.
+    pub fn remove_terminating_dot_entries(&mut self, keys: &[(RatlineUid, FixedDotIndex)]) {
+        self.configuration
+            .terminating_dot_map
+            .retain(|key, _| !keys.contains(key));
     }
 }
 

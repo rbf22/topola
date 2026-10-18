@@ -736,3 +736,106 @@ pad escape. Per-ratline relayering therefore buys ~10%, not 2×.
 True 4-layer freedom requires vias as search edges (a 3D navmesh) —
 that is the ng-router problem space, i.e. Phase E2's deferred work,
 now with a concrete motivation.
+
+## Mid-route via weaving — implemented (first 3D step)
+
+Rather than rewriting the router core around a fused layered
+navmesh, the first increment of true 3D routing is **via weaving**:
+on a persistent planar stall, the stalled ratline is decomposed at a
+fresh via into two dot-to-dot sub-routes on different layers —
+parent → via on its layer, continuation → original destination on
+another layer. Both halves reuse the existing planar A* machinery;
+the via connects the chain in the ratsnest and in union-find
+connectivity.
+
+### Mechanism
+
+- `Ratsnest::add_continuation(vertex, pos, target)` inserts a
+  synthetic ratvertex + ratline edge at runtime; the continuation is
+  a first-class `RatlineUid` spliced right after its parent in the
+  ordering (`insert_ratline_after` in the reconfigurers' stored
+  preconfigurations + the live configuration).
+- Via sites are sampled **near the source end** of the failed
+  corridor (1/8 → 1/2 span plus perpendicular jogs): the parent's
+  first half must stay short to survive the congestion that stalled
+  it; the continuation takes the long hop on the freer layer.
+  `Board::add_via` is the feasibility oracle — it checks point and
+  infringement constraints and self-cleans partial placements.
+- The parent's destination endpoint is remapped
+  (`terminating_dot_map`) at the via's source-layer dot; the
+  continuation's entries carry its own destination fanout. A static
+  map entry terminates its via-side endpoint on itself.
+- Woven ratlines are **anchored** (`woven` set): relayering either
+  half would reverse the weave via or rewrite the chaining remap —
+  they are excluded from layer-rotation `changed` sets, and
+  `adopt_plan_preserving_woven` re-injects their `layer_map`/static
+  entries after a stale SearchNode plan snapshot is installed.
+
+### Unweave — broken chains must be reversible
+
+A weave that cannot complete either half would otherwise anchor the
+net to a permanently broken chain, consuming the rotation option
+that might have saved it. Every weave records a `WeaveRecord`
+(parent → continuation, via vertex, via dots, the parent's pre-weave
+destination remap). At each stall escalation, `broken_weaves`
+checks every live weave for a missing half-band and
+`unweave_ratline` rolls them back:
+
+- both half-bands are ripped via the ordinary surgical rip-up,
+- the continuation edge leaves the ratsnest, orderings, edit slots,
+  and all terminating-dot maps (live configuration + both stored
+  preconfigurations),
+- the parent's destination remap is restored to its captured prior
+  value,
+- the via and the continuation's destination fanout **stay on the
+  board** as dead-end same-net copper — measured necessity: an
+  unrelated band may wrap the via dot as a bend core, and removing
+  the dot orphaned such bends (`geometry.rs` `core()` panic on a
+  seg of an untouched ratline). The residue is cosmetically untidy
+  but electrically harmless.
+- `weave_exhausted` marks unweaved parents: site sampling is
+  deterministic, so a second weave would repeat the same failure —
+  they go straight to rotation. This also bounds total weaves (≤ 1
+  per ratline) for memory.
+
+`install_configuration` now tolerates the *attempted* ratline being
+absent from the new ordering (the continuation itself was removed)
+instead of unwrapping into a panic.
+
+### Pre-existing bugs the weave surfaced (fixed)
+
+- **Fallback preconfiguration stale maps**: the negotiated-congestion
+  reconfigurer's `SccPermutations` fallback keeps its own
+  `preconfiguration` clone; `remap_terminating_dots`/
+  `remove_terminating_dots` never synced it, so fallback emissions
+  resurrected terminating dots of already-removed vias — the
+  documented "stale primitive index" flake class, now deterministic
+  under weave traffic. Both paths now sync the fallback too.
+- **Non-SCC ratlines dropped from emitted orderings**: SCC
+  permutation output filtered `preconfiguration.ratlines` through
+  SCC membership; the synthetic continuation has no SCC and was
+  silently omitted. Emitted orderings now retain non-SCC ratlines.
+
+### Results
+
+- `test_astable_multivibrator` passes with the full
+  weave → unweave → rotation cycle exercised; 49 lib + 28 unilayer
+  + 3 multilayer tests green.
+- On candE the mechanism fired end-to-end (via placed, continuation
+  enqueued, no stale-index panics); measurable routing gains not yet
+  demonstrated — the stalls it fires on are dominated by sealed pad
+  escapes, where no mid-route site helps and rotation is the right
+  recovery anyway.
+
+### Known limitations / next steps
+
+- Via sites are sampled blind (fixed fractions of the corridor);
+  a frontier-aware placement — using the failed route's search tree
+  to pick the deepest reachable point — would hit cases where the
+  corridor is open early but blocked later.
+- The via geometry of unweaved attempts remains as same-net copper;
+  a cleanup pass that removes only vias with no band *and* no
+  dependent bend cores could tidy the residue.
+- True fused-layer navmesh (vias as free-space search edges, Phase
+  E2) remains the structurally complete answer; the weave is a
+  ratline-level approximation layered on the existing engine.

@@ -185,6 +185,7 @@ pub fn assert_that_all_ratlines_besides_gnd_are_autorouted(
     let conncomps = ConnectedComponents::new(autorouter.board());
     assert!(autorouter.board().layout().drawing().layer_count() >= 1);
 
+    let mut unconnected = Vec::new();
     for principal_layer in 0..autorouter.board().layout().drawing().layer_count() {
         for ratline in autorouter
             .ratsnests()
@@ -219,12 +220,22 @@ pub fn assert_that_all_ratlines_besides_gnd_are_autorouted(
                 let origin = conncomps.unionfind().find(origin_dot.index());
                 let destination = conncomps.unionfind().find(destination_dot.index());
 
-                if netname != "GND" {
-                    assert_eq!(origin, destination);
+                if netname != "GND" && origin != destination {
+                    eprintln!(
+                        "UNCONNECTED ratline={:?} net={} origin_dot={:?} dest_dot={:?}",
+                        ratline.index, netname, origin_dot, destination_dot
+                    );
+                    unconnected.push(ratline);
                 }
             }
         }
     }
+
+    assert!(
+        unconnected.is_empty(),
+        "{} unconnected ratline(s)",
+        unconnected.len()
+    );
 }
 
 /*pub fn assert_number_of_conncomps(

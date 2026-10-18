@@ -100,10 +100,20 @@ impl PlanarAutorouteReconfigurer {
                 .preconfiguration
                 .terminating_dot_map
                 .extend(entries.iter()),
-            Self::NegotiatedCongestion(reconfigurer) => reconfigurer
-                .preconfiguration
-                .terminating_dot_map
-                .extend(entries.iter()),
+            Self::NegotiatedCongestion(reconfigurer) => {
+                // The fallback enumerates orderings with its own
+                // stored snapshot — sync it too, or a fallback emission
+                // resurrects remappings whose fanout vias are gone.
+                reconfigurer
+                    .preconfiguration
+                    .terminating_dot_map
+                    .extend(entries.iter());
+                reconfigurer
+                    .fallback
+                    .preconfiguration
+                    .terminating_dot_map
+                    .extend(entries.iter());
+            }
         }
     }
 
@@ -118,10 +128,93 @@ impl PlanarAutorouteReconfigurer {
                 .preconfiguration
                 .terminating_dot_map
                 .retain(|(ratline, _), _| !ratlines.contains(ratline)),
-            Self::NegotiatedCongestion(reconfigurer) => reconfigurer
+            Self::NegotiatedCongestion(reconfigurer) => {
+                reconfigurer
+                    .preconfiguration
+                    .terminating_dot_map
+                    .retain(|(ratline, _), _| !ratlines.contains(ratline));
+                reconfigurer
+                    .fallback
+                    .preconfiguration
+                    .terminating_dot_map
+                    .retain(|(ratline, _), _| !ratlines.contains(ratline));
+            }
+        }
+    }
+
+    /// Removes specific terminating-dot remapping keys from the stored
+    /// preconfigurations — for unweaving a single endpoint's remap
+    /// without dropping the ratline's other entries.
+    pub fn remove_terminating_dot_entries(&mut self, keys: &[(RatlineUid, FixedDotIndex)]) {
+        match self {
+            Self::SccPermutations(reconfigurer) => reconfigurer
                 .preconfiguration
                 .terminating_dot_map
-                .retain(|(ratline, _), _| !ratlines.contains(ratline)),
+                .retain(|key, _| !keys.contains(key)),
+            Self::NegotiatedCongestion(reconfigurer) => {
+                reconfigurer
+                    .preconfiguration
+                    .terminating_dot_map
+                    .retain(|key, _| !keys.contains(key));
+                reconfigurer
+                    .fallback
+                    .preconfiguration
+                    .terminating_dot_map
+                    .retain(|key, _| !keys.contains(key));
+            }
+        }
+    }
+
+    /// Drops a mid-run-created ratline — a via-weave continuation —
+    /// from the stored preconfigurations, the mirror of
+    /// [`Self::insert_ratline_after`], so emitted orderings can no
+    /// longer reference it.
+    pub fn remove_ratline(&mut self, ratline: RatlineUid) {
+        match self {
+            Self::SccPermutations(reconfigurer) => reconfigurer
+                .preconfiguration
+                .ratlines
+                .retain(|uid| *uid != ratline),
+            Self::NegotiatedCongestion(reconfigurer) => {
+                reconfigurer
+                    .preconfiguration
+                    .ratlines
+                    .retain(|uid| *uid != ratline);
+                reconfigurer
+                    .fallback
+                    .preconfiguration
+                    .ratlines
+                    .retain(|uid| *uid != ratline);
+            }
+        }
+    }
+
+    /// Registers a ratline created mid-run — a via-weave continuation —
+    /// into the stored preconfigurations, right after `after`, so that
+    /// emitted orderings keep it and positional lookups that index the
+    /// stored list by the live configuration's position stay aligned.
+    pub fn insert_ratline_after(&mut self, ratline: RatlineUid, after: RatlineUid) {
+        fn insert(ratlines: &mut Vec<RatlineUid>, ratline: RatlineUid, after: RatlineUid) {
+            let pos = ratlines
+                .iter()
+                .position(|uid| *uid == after)
+                .map(|index| index + 1)
+                .unwrap_or(ratlines.len());
+            ratlines.insert(pos, ratline);
+        }
+
+        match self {
+            Self::SccPermutations(reconfigurer) => {
+                insert(&mut reconfigurer.preconfiguration.ratlines, ratline, after)
+            }
+            Self::NegotiatedCongestion(reconfigurer) => {
+                insert(&mut reconfigurer.preconfiguration.ratlines, ratline, after);
+                insert(
+                    &mut reconfigurer.fallback.preconfiguration.ratlines,
+                    ratline,
+                    after,
+                );
+            }
         }
     }
 }
@@ -308,7 +401,10 @@ impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReco
         autorouter: &Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Option<PlanarAutorouteConfiguration> {
-        let scc_index = self
+        // A weave continuation belongs to no SCC — there is no
+        // permutation to explore around it; reinstall the stored
+        // ordering, which does carry it.
+        let Some(scc_index) = self
             .configuration_search
             .curr_node()
             .permutation()
@@ -317,7 +413,9 @@ impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReco
                 scc.scc_ref(autorouter)
                     .contains(self.preconfiguration.ratlines[*stepper.curr_ratline_index()])
             })
-            .unwrap();
+        else {
+            return Some(self.preconfiguration.clone());
+        };
 
         let next_search_node = self
             .configuration_search
@@ -346,6 +444,14 @@ impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReco
                 ) {
                     ratlines.push(*ratline);
                 }
+            }
+        }
+
+        // Ratlines belonging to no SCC — mid-run weave continuations —
+        // survive every emitted ordering appended at the end.
+        for ratline in self.preconfiguration.ratlines.iter() {
+            if !ratlines.contains(ratline) {
+                ratlines.push(*ratline);
             }
         }
 
@@ -687,6 +793,14 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                 if scc.scc_ref(autorouter).contains(*ratline) {
                     ratlines.push(*ratline);
                 }
+            }
+        }
+
+        // Ratlines belonging to no SCC — mid-run weave continuations —
+        // survive every emitted ordering appended at the end.
+        for ratline in self.preconfiguration.ratlines.iter() {
+            if !ratlines.contains(ratline) {
+                ratlines.push(*ratline);
             }
         }
 
