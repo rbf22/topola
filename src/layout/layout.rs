@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-use contracts_try::debug_ensures;
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
 use geo::{Point, Polygon};
@@ -165,60 +164,69 @@ impl<R: AccessRules> Layout<R> {
         self.drawing.remove_termseg(recorder, termseg)
     }
 
-    #[debug_ensures(ret.is_ok() -> self.drawing.node_count() == old(self.drawing.node_count()) + weight.to_layer - weight.from_layer + 2)]
-    #[debug_ensures(ret.is_err() -> self.drawing.node_count() == old(self.drawing.node_count()))]
     pub fn add_via(
         &mut self,
         recorder: &mut LayoutEdit,
         weight: ViaWeight,
     ) -> Result<(GenericIndex<ViaWeight>, Vec<FixedDotIndex>), LayoutException> {
-        let compound = self.drawing.add_compound(recorder, weight.into());
-        let via = GenericIndex::<ViaWeight>::new(compound.index());
-        let mut dots = vec![];
+        let __old_node_count = self.drawing.node_count();
+        let __ret =
+            (|| -> Result<(GenericIndex<ViaWeight>, Vec<FixedDotIndex>), LayoutException> {
+                let compound = self.drawing.add_compound(recorder, weight.into());
+                let via = GenericIndex::<ViaWeight>::new(compound.index());
+                let mut dots = vec![];
 
-        for layer in weight.from_layer..=weight.to_layer {
-            match self.drawing.add_fixed_dot(
-                recorder,
-                FixedDotWeight(GeneralDotWeight {
-                    circle: weight.circle,
-                    layer,
-                    maybe_net: weight.maybe_net,
-                }),
-            ) {
-                Ok(dot) => {
-                    dots.push(dot);
-
-                    let maybe_enclosing_poly = self
-                        .polys_enclosing_point_on_layer(weight.circle.pos, layer)
-                        .next();
-
-                    if let Some(enclosing_poly) = maybe_enclosing_poly {
-                        // If a via is inside poly, it may not necessarily
-                        // trigger an infringement on its primitives. To take
-                        // this situation into account, we also check if the
-                        // via's center is inside the poly's polygon.
-                        self.remove_via(recorder, via, dots);
-                        return Err(LayoutException::HasPointInPoly(HasPointInPoly(
-                            enclosing_poly.ref_(self).shape(),
-                            weight.circle.pos,
-                        )));
-                    }
-
-                    self.drawing.add_to_compound(
+                for layer in weight.from_layer..=weight.to_layer {
+                    match self.drawing.add_fixed_dot(
                         recorder,
-                        dot,
-                        CompoundEntryLabel::Normal,
-                        compound,
-                    );
-                }
-                Err(err) => {
-                    self.remove_via(recorder, via, dots);
-                    return Err(err.into());
-                }
-            }
-        }
+                        FixedDotWeight(GeneralDotWeight {
+                            circle: weight.circle,
+                            layer,
+                            maybe_net: weight.maybe_net,
+                        }),
+                    ) {
+                        Ok(dot) => {
+                            dots.push(dot);
 
-        Ok((GenericIndex::<ViaWeight>::new(compound.index()), dots))
+                            let maybe_enclosing_poly = self
+                                .polys_enclosing_point_on_layer(weight.circle.pos, layer)
+                                .next();
+
+                            if let Some(enclosing_poly) = maybe_enclosing_poly {
+                                // If a via is inside poly, it may not necessarily
+                                // trigger an infringement on its primitives. To take
+                                // this situation into account, we also check if the
+                                // via's center is inside the poly's polygon.
+                                self.remove_via(recorder, via, dots);
+                                return Err(LayoutException::HasPointInPoly(HasPointInPoly(
+                                    enclosing_poly.ref_(self).shape(),
+                                    weight.circle.pos,
+                                )));
+                            }
+
+                            self.drawing.add_to_compound(
+                                recorder,
+                                dot,
+                                CompoundEntryLabel::Normal,
+                                compound,
+                            );
+                        }
+                        Err(err) => {
+                            self.remove_via(recorder, via, dots);
+                            return Err(err.into());
+                        }
+                    }
+                }
+
+                Ok((GenericIndex::<ViaWeight>::new(compound.index()), dots))
+            })();
+        debug_assert!(
+            !__ret.is_ok()
+                || self.drawing.node_count()
+                    == __old_node_count + weight.to_layer - weight.from_layer + 2
+        );
+        debug_assert!(!__ret.is_err() || self.drawing.node_count() == __old_node_count);
+        __ret
     }
 
     pub fn remove_via(

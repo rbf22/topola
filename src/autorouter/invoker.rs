@@ -7,7 +7,6 @@
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
-use contracts_try::debug_requires;
 use derive_getters::{Dissolve, Getters};
 use enum_dispatch::enum_dispatch;
 use geo::geometry::LineString;
@@ -208,18 +207,18 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
     /// Pass given command to be executed.
     ///
     /// Function used to set given [`Command`] to ongoing state, dispatch and execute it.
-    #[debug_requires(self.ongoing_command.is_none())]
     pub fn execute_stepper(
         &mut self,
         command: Command,
     ) -> Result<ExecutionStepper<M>, InvokerError> {
+        debug_assert!(self.ongoing_command.is_none());
         let execute = self.dispatch_command(&command)?;
         self.ongoing_command = Some(command);
         Ok(execute)
     }
 
-    #[debug_requires(self.ongoing_command.is_none())]
     fn dispatch_command(&mut self, command: &Command) -> Result<ExecutionStepper<M>, InvokerError> {
+        debug_assert!(self.ongoing_command.is_none());
         Ok(match command {
             Command::Autoroute(selection, options) => ExecutionStepper::PlanarAutoroute(
                 self.autorouter.planar_autoroute(selection, *options)?,
@@ -269,9 +268,9 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
         })
     }
 
-    #[debug_requires(self.ongoing_command.is_none())]
     /// Undo last command.
     pub fn undo(&mut self) -> Result<(), InvokerError> {
+        debug_assert!(self.ongoing_command.is_none());
         let last_done = self.history.last_done()?;
 
         if let Some(edit) = last_done.edit() {
@@ -293,9 +292,9 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
         Ok(self.history.redo()?)
     }
 
-    #[debug_requires(self.ongoing_command.is_none())]
     /// Replay last command.
     pub fn replay(&mut self, history: History) {
+        debug_assert!(self.ongoing_command.is_none());
         let (done, undone) = history.dissolve();
 
         for entry in done {

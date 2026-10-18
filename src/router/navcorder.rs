@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-use contracts_try::{debug_ensures, debug_requires};
 use thiserror::Error;
 
 use crate::{
@@ -86,59 +85,67 @@ impl<R: AccessRules> Navcorder for Layout<R> {
         Ok(self.finish_in_dot(&mut navcord.recorder, navcord.head, target, navcord.width)?)
     }
 
-    #[debug_requires(path[0] == navcord.path[0])]
-    #[debug_ensures(ret.is_ok() -> navcord.path.len() == path.len())]
     fn rework_path(
         &mut self,
         navmesh: &Navmesh,
         navcord: &mut Navcord,
         path: &[NavnodeIndex],
     ) -> Result<(), NavcorderException> {
-        crate::metrics::incr(&crate::metrics::METRICS.rework_path_calls);
-        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.rework_path_nanos);
+        debug_assert!(path[0] == navcord.path[0]);
+        let __ret = (|| -> Result<(), NavcorderException> {
+            crate::metrics::incr(&crate::metrics::METRICS.rework_path_calls);
+            let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.rework_path_nanos);
 
-        let prefix_length = navcord
-            .path
-            .iter()
-            .zip(path)
-            .take_while(|(v1, v2)| v1 == v2)
-            .count();
+            let prefix_length = navcord
+                .path
+                .iter()
+                .zip(path)
+                .take_while(|(v1, v2)| v1 == v2)
+                .count();
 
-        let length = navcord.path.len();
-        crate::metrics::add(
-            &crate::metrics::METRICS.rework_steps_undone,
-            length - prefix_length,
-        );
-        crate::metrics::add(
-            &crate::metrics::METRICS.rework_steps_redrawn,
-            path.len() - prefix_length,
-        );
-        self.undo_path(navcord, length - prefix_length);
-        // XXX: If this fails now, there may be a race condition.
-        self.path(navmesh, navcord, &path[prefix_length..])
+            let length = navcord.path.len();
+            crate::metrics::add(
+                &crate::metrics::METRICS.rework_steps_undone,
+                length - prefix_length,
+            );
+            crate::metrics::add(
+                &crate::metrics::METRICS.rework_steps_redrawn,
+                path.len() - prefix_length,
+            );
+            self.undo_path(navcord, length - prefix_length);
+            // XXX: If this fails now, there may be a race condition.
+            self.path(navmesh, navcord, &path[prefix_length..])
+        })();
+        debug_assert!(!__ret.is_ok() || navcord.path.len() == path.len());
+        __ret
     }
 
-    #[debug_ensures(ret.is_ok() -> navcord.path.len() == old(navcord.path.len() + path.len()))]
     fn path(
         &mut self,
         navmesh: &Navmesh,
         navcord: &mut Navcord,
         path: &[NavnodeIndex],
     ) -> Result<(), NavcorderException> {
-        for (i, vertex) in path.iter().enumerate() {
-            if let Err(err) = navcord.step_to(self, navmesh, *vertex) {
-                self.undo_path(navcord, i);
-                return Err(err);
+        let __old_len = navcord.path.len() + path.len();
+        let __ret = (|| -> Result<(), NavcorderException> {
+            for (i, vertex) in path.iter().enumerate() {
+                if let Err(err) = navcord.step_to(self, navmesh, *vertex) {
+                    self.undo_path(navcord, i);
+                    return Err(err);
+                }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })();
+        debug_assert!(!__ret.is_ok() || navcord.path.len() == __old_len);
+        __ret
     }
 
-    #[debug_ensures(navcord.path.len() == old(navcord.path.len() - step_count))]
     fn undo_path(&mut self, navcord: &mut Navcord, step_count: usize) {
+        let __old_len = navcord.path.len() - step_count;
         for _ in 0..step_count {
             let _ = navcord.step_back(self);
         }
+        debug_assert!(navcord.path.len() == __old_len);
     }
 }

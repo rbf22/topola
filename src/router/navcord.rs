@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 
-use contracts_try::debug_ensures;
 use geo::{
     algorithm::line_measures::{Distance, Euclidean},
     Line, Point,
@@ -629,20 +628,21 @@ impl Navcord {
     /// navnode `to`.
     ///
     /// Returns the length of the created track.
-    #[debug_ensures(ret.is_ok() -> self.path.len() == old(self.path.len() + 1))]
-    #[debug_ensures(ret.is_err() -> self.path.len() == old(self.path.len()))]
     pub fn step_to<R: AccessRules>(
         &mut self,
         layout: &mut Layout<R>,
         navmesh: &Navmesh,
         to: NavnodeIndex,
     ) -> Result<f64, NavcorderException> {
+        let __old_len = self.path.len();
         let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.step_to_nanos);
         let result = self.step_to_intern(layout, navmesh, to);
         match result {
             Ok(_) => crate::metrics::incr(&crate::metrics::METRICS.step_to_ok),
             Err(_) => crate::metrics::incr(&crate::metrics::METRICS.step_to_err),
         }
+        debug_assert!(!result.is_ok() || self.path.len() == __old_len + 1);
+        debug_assert!(!result.is_err() || self.path.len() == __old_len);
         result
     }
 
@@ -1059,14 +1059,16 @@ impl Navcord {
     }
 
     /// Retreat the navcord and the currently routed band by one step.
-    #[debug_ensures(self.path.len() == old(self.path.len() - 1))]
     pub fn step_back<R: AccessRules>(
         &mut self,
         layout: &mut Layout<R>,
     ) -> Result<(), NavcorderException> {
+        let __old_len = self.path.len() - 1;
         crate::metrics::incr(&crate::metrics::METRICS.step_backs);
         let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.step_back_nanos);
-        self.step_back_intern(layout)
+        let __ret = self.step_back_intern(layout);
+        debug_assert!(self.path.len() == __old_len);
+        __ret
     }
 
     fn step_back_intern<R: AccessRules>(

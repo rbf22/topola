@@ -44,13 +44,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["disable_contracts"]
-disable_contracts = ["contracts-try/disable_contracts"]
+default = []
 metrics = []
 
 [dependencies]
 bimap.workspace = true
-contracts-try = "0.7"
 derive-getters.workspace = true
 enum_dispatch = "0.3"
 geo.workspace = true
@@ -89,8 +87,7 @@ opt-level = 2
 
 # Routing code is numerics-heavy; running it unoptimized makes the
 # integration suite take ~10 minutes. opt-level 2 keeps
-# debug-assertions (and therefore contracts) while giving near-release
-# runtimes.
+# debug-assertions while giving near-release runtimes.
 [profile.test]
 opt-level = 2
 

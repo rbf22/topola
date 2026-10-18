@@ -13,8 +13,7 @@ name = "topola"
 path = "src/main.rs"
 
 [features]
-default = ["disable_contracts"]
-disable_contracts = ["topola/disable_contracts"]
+default = []
 metrics = ["topola/metrics"]
 
 [dependencies]

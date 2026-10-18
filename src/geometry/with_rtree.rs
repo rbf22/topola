@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-use contracts_try::debug_invariant;
 use derive_getters::Getters;
 use geo::Point;
 use petgraph::visit::Walker;
@@ -92,8 +91,6 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
     }
 }
 
-#[debug_invariant(self.test_envelopes())]
-#[debug_invariant(self.geometry.node_count() == self.rtree.size())]
 impl<
         PW: GetWidth + GetLayer + TryInto<DW> + TryInto<SW> + TryInto<BW> + Retag<Index = PI> + Copy,
         DW: AccessDotWeight + Into<PW> + GetLayer,

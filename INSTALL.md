@@ -95,49 +95,11 @@ To execute these, run
 
     cargo test
 
-### Contracts
+### Internal invariants
 
-(The feature described in this section is currently used only for debugging and
-is enabled only when using nightly Rust. If you are not interested in debugging,
-you can skip this section altogether.)
-
-When trying to locate the source of a bug, it may be helpful to enable
-[contracts](https://en.wikipedia.org/wiki/Design_by_contract) (yes, this
-Wikipedia article needs improvement), which are nothing else but somewhat
-enchanced assertions.
-
-Regrettably, the [contracts](https://docs.rs/contracts/latest/contracts/)
-library which we have been using enforces post-conditions using closures.
-Borrow semantics of these closures cause compile errors for some function
-signatures, which is a deal-breaking limitation. Hence, to bypass this problem,
-we maintain our own fork of this library to use `try` blocks instead. Our
-fork's [repository](https://codeberg.org/topola/contracts-try) is available
-on Codeberg.
-
-However, `try` blocks are not present in stable Rust yet, so to be able to
-proceed you need to set up your toolchain to use a nightly version of Rust.
-
-#### Nightly Rust
-
-To use nightly Rust, run the following command:
-
-    rustup override set nightly
-
-You can go back to stable with
-
-    rustup override unset
-
-#### Enabling contracts
-
-To enable contracts, simply add a `--no-default-features` switch. This switches
-off a default feature called `disable_contracts` that was expanding every
-contract to a no-op during Rust's macro expansion. For instance, to build tests
-with contracts, simply run
-
-    cargo test --no-default-features
-
-Of course, you can enable contracts for any build target. For example, the
-following command will build the Topola's command-line application with debug
-profile and contracts enabled:
-
-    cargo build -p topola-cli --no-default-features
+When trying to locate the source of a bug, it may be helpful to know that
+Topola's geometry mutation routines carry `debug_assert!` checks on their
+node-count and bookkeeping invariants. They are active automatically in
+any build with debug assertions enabled — including `cargo test` — and
+compile away entirely in release builds, so no feature flags or nightly
+toolchain are needed.

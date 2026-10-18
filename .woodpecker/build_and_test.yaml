@@ -6,13 +6,10 @@ matrix:
   include:
     - CHANNEL: stable
       PROFILE: release
-      FEATURES: disable_contracts
     - CHANNEL: stable
       PROFILE: dev
-      FEATURES: disable_contracts
     - CHANNEL: nightly
       PROFILE: dev
-      FEATURES:
 
 steps:
   build_cli:
@@ -22,7 +19,7 @@ steps:
       CARGO_TERM_COLOR: always
     commands:
       - rustup default "$CHANNEL"
-      - cargo build -j4 --profile "$PROFILE" -p topola-cli --no-default-features --features "$FEATURES" --
+      - cargo build -j4 --profile "$PROFILE" -p topola-cli --
     when:
       event: [pull_request, push, tag]
 
@@ -37,7 +34,7 @@ steps:
       - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
       - cargo binstall --no-confirm cargo-nextest
       - rustup default "$CHANNEL"
-      - cargo nextest run -j4 --cargo-profile "$PROFILE" --hide-progress-bar --success-output final --no-default-features --features "$FEATURES"
+      - cargo nextest run -j4 --cargo-profile "$PROFILE" --hide-progress-bar --success-output final
     when:
       event: [pull_request, push, tag]
       # Only run tests for stable channel to avoid straining Codeberg's CI.
