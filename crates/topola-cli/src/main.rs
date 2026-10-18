@@ -289,9 +289,11 @@ fn make_selection(
         );
         selection
     } else if multilayer {
-        // Multilayer routing can reach pads on any layer, so select
-        // all pins, not just the principal layer's.
-        let selection = PinSelection::new_select_all(&board);
+        // Multilayer routing can reach pads on any layer — including
+        // compound pads and unnamed net-bearing primitives that carry
+        // no pin selector. "All except no nets" selects them through
+        // the net-membership path in `PinSelection::contains_node`.
+        let selection = PinSelection::new_select_all_except_nets(&board, &BTreeSet::new());
         eprintln!(
             "[topola] selected {} pins across all layers",
             selection.selectors().count()

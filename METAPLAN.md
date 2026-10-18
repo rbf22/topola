@@ -598,3 +598,43 @@ On candE this is a no-op (107 ratlines either way — every pin-named
 endpoint already resolves to a layer-0 dot); on astable it selects
 26 pins vs 6. Ratlines whose endpoints lack pin names remain
 reachable only via `--nets`.
+
+## Routed-fraction ceiling on candE — selection coverage (fixed)
+
+The 38/107 plateau was **not** a geometric ceiling: `selected_ratlines`
+filters each ratline edge through `PinSelection::contains_node`, which
+only resolved net membership on `Primitive` nodes. Compound (poly-pad)
+ratvertices — most of candE's SMD endpoints — never produced a pin
+selector, so their ratlines were silently excluded from every selection,
+including `new_select_all`. Every flag-level lever measured the same
+plateau for that reason: `--preprobe`, `--apply-shifts`, `--escape-stubs`,
+`--multilayer` (90 s) and `--jobs 4` (60 s) all peaked at 38/2449.
+
+Fixes:
+
+- `contains_node` now resolves `maybe_net` on `NodeIndex::Compound` too,
+  so net selections (and "all except no nets") cover pad endpoints.
+- `--multilayer` selects via `new_select_all_except_nets(board, {})` —
+  every net-bearing node on every layer, not just named pins.
+- `MultilayerAutorouteExecutionStepper::new` drops ratlines whose fanout
+  via cannot be placed on either the assigned or the preferred layer
+  instead of `.expect`-panicking; failed attempts restore
+  `terminating_dot_map` to a per-attempt snapshot (partial writes would
+  otherwise retain dead `FixedDotIndex`es → recycled-compound panics).
+- `PlanarAutorouteExecutionStepper::start_routing_ratline` skips
+  `UnreachableOrigin`/`UnreachableDestination` ratlines with an empty
+  aligned edit slot instead of erroring — previously one sealed endpoint
+  aborted the whole command via the reconfigure retry loop.
+
+Measured on candE (`--multilayer --nets GND`, 25 s, debug build):
+107→237 ratlines attempted on the GND net alone; 53 of 2449 ratlines
+routed at timeout vs the previous 38 best. GND unrouted fell 237→184.
+
+Caveat: expanding the `--multilayer` attempt set to the whole board is
+heavier — a full-board run probes far more candidates. Use `--nets` to
+scope when memory/time is tight. One flaky `primitive_weight` panic
+(stale index recycled to compound) was observed mid-run on astable but
+did not reproduce on rerun — the known residual stale-verdict class
+(documented under "Stale primitive index panic") likely retains edge
+cases; the per-attempt `terminating_dot_map` snapshot above closes one
+new instance of it.

@@ -92,9 +92,15 @@ impl MultilayerAutorouteExecutionStepper {
         let mut anteroute_edits = BTreeMap::new();
         let mut terminating_dot_map = BTreeMap::new();
 
+        let mut unplaceable = BTreeSet::new();
         for (ratline, layer) in configuration.plan.layer_map.clone() {
             let mut ratline_edit = BoardEdit::new();
-            if anterouter
+            // `anteroute_ratline` writes terminating-dot entries during
+            // placement, so a failed attempt can leave entries pointing
+            // at vias the reversal just removed — restore the map along
+            // with the board edit.
+            let entries_before = terminating_dot_map.clone();
+            let placed = anterouter
                 .anteroute_ratline(
                     autorouter,
                     &mut ratline_edit,
@@ -103,17 +109,16 @@ impl MultilayerAutorouteExecutionStepper {
                     &options.anterouter,
                     &mut terminating_dot_map,
                 )
-                .is_err()
-            {
-                // Seeded layer assignments may ask for a layer the
-                // pads cannot reach. Reverse any partial placement and
-                // fall back to the preferred layer.
-                autorouter.board.apply_edit(&ratline_edit.reverse());
-                anteroute_edit.merge(ratline_edit.clone());
-                anteroute_edit.merge(ratline_edit.reverse());
-                ratline_edit = BoardEdit::new();
-                anterouter
-                    .anteroute_ratline(
+                .map_err(|_| {
+                    // Seeded layer assignments may ask for a layer the
+                    // pads cannot reach. Reverse any partial placement and
+                    // fall back to the preferred layer.
+                    autorouter.board.apply_edit(&ratline_edit.reverse());
+                    anteroute_edit.merge(ratline_edit.clone());
+                    anteroute_edit.merge(ratline_edit.reverse());
+                    ratline_edit = BoardEdit::new();
+                    terminating_dot_map = entries_before.clone();
+                    anterouter.anteroute_ratline(
                         autorouter,
                         &mut ratline_edit,
                         ratline,
@@ -121,7 +126,17 @@ impl MultilayerAutorouteExecutionStepper {
                         &options.anterouter,
                         &mut terminating_dot_map,
                     )
-                    .expect("fanout via placement failed");
+                });
+            if matches!(placed, Err(Err(()))) {
+                // No room for a fanout via on either layer — drop the
+                // ratline from this configuration's work list instead of
+                // panicking the whole run.
+                autorouter.board.apply_edit(&ratline_edit.reverse());
+                anteroute_edit.merge(ratline_edit.clone());
+                anteroute_edit.merge(ratline_edit.reverse());
+                terminating_dot_map = entries_before;
+                unplaceable.insert(ratline);
+                continue;
             }
             anteroute_edit.merge(ratline_edit.clone());
             anteroute_edits.insert(ratline, ratline_edit);
@@ -132,7 +147,13 @@ impl MultilayerAutorouteExecutionStepper {
                 autorouter,
                 PlanarAutoroutePreconfigurerInput {
                     terminating_dot_map,
-                    ratlines: configuration.planar.ratlines,
+                    ratlines: configuration
+                        .planar
+                        .ratlines
+                        .iter()
+                        .copied()
+                        .filter(|ratline| !unplaceable.contains(ratline))
+                        .collect(),
                 },
                 options.planar,
             )?,

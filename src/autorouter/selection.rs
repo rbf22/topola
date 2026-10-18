@@ -219,16 +219,27 @@ impl PinSelection {
         // on anonymous primitives, such as the wire-end dots that become
         // ratline endpoints on partially routed boards.
         if !self.net_names.is_empty() || self.nets_excluded {
-            if let NodeIndex::Primitive(primitive) = node {
-                let on_listed_net = primitive
+            // Compound nodes (poly pads) carry a net too — without this
+            // arm their ratlines drop out of every net selection and of
+            // select-all-except-nothing, which is how multilayer selects
+            // the whole board.
+            let on_listed_net = match node {
+                NodeIndex::Primitive(primitive) => primitive
                     .primitive_ref(board.layout().drawing())
                     .maybe_net()
                     .and_then(|net| board.mesadata().net_netname(net))
-                    .is_some_and(|netname| self.net_names.contains(netname));
+                    .is_some_and(|netname| self.net_names.contains(netname)),
+                NodeIndex::Compound(compound) => board
+                    .layout()
+                    .drawing()
+                    .compound_weight(compound)
+                    .maybe_net()
+                    .and_then(|net| board.mesadata().net_netname(net))
+                    .is_some_and(|netname| self.net_names.contains(netname)),
+            };
 
-                if on_listed_net != self.nets_excluded {
-                    return true;
-                }
+            if on_listed_net != self.nets_excluded {
+                return true;
             }
         }
 
@@ -448,7 +459,10 @@ mod tests {
     use std::{fs::File, io::BufReader};
 
     use super::*;
-    use crate::{board::edit::BoardEdit, specctra::design::SpecctraDesign};
+    use crate::{
+        board::edit::BoardEdit, specctra::design::SpecctraDesign,
+        triangulation::GetTrianvertexNodeIndex,
+    };
 
     #[test]
     fn select_all_covers_every_layer() {
@@ -470,5 +484,51 @@ mod tests {
         for sel in layer0.selectors() {
             assert!(all.pins.contains(sel));
         }
+    }
+
+    /// `--multilayer` selects via "all except no nets": every net-bearing
+    /// node — including compound pad endpoints that carry no pin selector —
+    /// must be covered, else their ratlines never reach the attempt list.
+    #[test]
+    fn select_all_except_nothing_covers_every_ratline_endpoint() {
+        use crate::autorouter::Autorouter;
+
+        let file =
+            File::open("tests/multilayer/astable_multivibrator/astable_multivibrator.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(file)).unwrap();
+        let autorouter = Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap();
+
+        let selection =
+            PinSelection::new_select_all_except_nets(&autorouter.board(), &BTreeSet::new());
+        let ratsnest = autorouter.ratsnests().on_principal_layer(0);
+
+        let mut covered = 0usize;
+        let mut total = 0usize;
+        for edge in ratsnest.graph().edge_indices() {
+            let (source, target) = ratsnest.graph().edge_endpoints(edge).unwrap();
+            let source_ok = selection.contains_node(
+                &autorouter.board(),
+                ratsnest
+                    .graph()
+                    .node_weight(source)
+                    .unwrap()
+                    .node_index()
+                    .into(),
+            );
+            let target_ok = selection.contains_node(
+                &autorouter.board(),
+                ratsnest
+                    .graph()
+                    .node_weight(target)
+                    .unwrap()
+                    .node_index()
+                    .into(),
+            );
+            total += 1;
+            if source_ok && target_ok {
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, total, "every ratline must be fully selected");
     }
 }

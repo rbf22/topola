@@ -20,7 +20,7 @@ use crate::{
     layout::LayoutEdit,
     router::{
         navcord::{Navcord, NavcordSearchState},
-        navmesh::Navmesh,
+        navmesh::{Navmesh, NavmeshError},
         prenavmesh::PrenavmeshBases,
         thetastar::ThetastarStepper,
         RouteStepper, Router,
@@ -218,24 +218,45 @@ impl PlanarAutorouteExecutionStepper {
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
     ) -> Result<(), AutorouterError> {
-        let (origin, destination) = self
-            .configuration
-            .ratline_terminating_dots(autorouter, self.curr_ratline_index);
-        let (navmesh, search_state) =
-            self.make_navmesh(autorouter.board.layout(), origin, destination)?;
+        while self.curr_ratline_index < self.configuration.ratlines.len() {
+            let (origin, destination) = self
+                .configuration
+                .ratline_terminating_dots(autorouter, self.curr_ratline_index);
+            let (navmesh, search_state) =
+                match self.make_navmesh(autorouter.board.layout(), origin, destination) {
+                    Ok(ok) => ok,
+                    Err(AutorouterError::Navmesh(
+                        NavmeshError::UnreachableOrigin | NavmeshError::UnreachableDestination,
+                    )) => {
+                        // The endpoint is sealed off — e.g. a pad
+                        // ringed by foreign geometry. Leave the ratline
+                        // unrouted and move on: erroring here retries
+                        // the same ratline at the head of every
+                        // reconfiguration and aborts the command.
+                        // An empty edit slot keeps `layout_edits`
+                        // index-aligned with the ratline list.
+                        self.dissolve_route_stepper_and_push_edits();
+                        self.curr_ratline_index += 1;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
 
-        let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
-        let mut route = RouteStepper::new_from_navmesh(
-            &mut router,
-            LayoutEdit::new(),
-            navmesh,
-            self.options.router.routed_band_width,
-        );
-        if let Some(state) = search_state {
-            route.restore_search_state(state);
+            let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
+            let mut route = RouteStepper::new_from_navmesh(
+                &mut router,
+                LayoutEdit::new(),
+                navmesh,
+                self.options.router.routed_band_width,
+            );
+            if let Some(state) = search_state {
+                route.restore_search_state(state);
+            }
+            route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
+            self.route = Some(route);
+
+            return Ok(());
         }
-        route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
-        self.route = Some(route);
 
         Ok(())
     }
