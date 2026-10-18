@@ -164,12 +164,20 @@ Unit coverage for the virtual navcord: 8 tests in `router::navcord::tests`
       `Autorouter`, which carry `PrenavmeshBases`) no longer
       deep-copies a graph plus a whole triangulation per handout.
 
-      Next targets implied: (a) `infringe` candidate reduction —
-      tighter R-tree envelopes or per-bend region pruning inside
-      `overlapee_limbs`; (b) navmesh reuse across attempts — the
-      vertex/constrained bases already share, but quadrinavedge
-      rebuild (5.7%) could be keyed looser if navnodes prove
-      independent of mutable loose geometry; (c) memoize
+      Next targets implied: (a) ~~`infringe` candidate reduction~~ —
+      **tried and reverted**: a per-candidate bbox-distance-vs-clearance
+      prune ahead of `inflate`+`intersects` rejected only 43K of 45.2M
+      candidates (0.1%); candidates surviving the largest-clearance
+      envelope genuinely sit within pairwise clearance, so the cost is
+      real geometry work plus rstar traversal, not over-selection.
+      The remaining lever is fewer *queries*: `visit_navnode`
+      (4.6M on candE) forces a navcord `rework_path` per A* expansion,
+      each redrawn step re-running infringement checks — decoupling
+      g-score expansion from geometry materialization would collapse
+      whole classes of these queries; (b) navmesh reuse across
+      attempts — vertex/constrained bases already share, but
+      quadrinavedge rebuild (5.7%) could be keyed looser if navnodes
+      prove independent of mutable loose geometry; (c) memoize
       `fixed_fingerprint`/`loose_snapshot` per `Drawing::generation`
       when consecutive `navmesh_in` calls see an unmutated board.
 
