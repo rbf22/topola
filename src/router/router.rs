@@ -100,7 +100,7 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
                     .finish(navmesh, self.navcord, self.destination)
                     .map_err(|_| ())?,
             );
-            self.navcord.path.push(navnode);
+            self.navcord.push_path(navnode);
 
             Ok(self.navcord.maybe_final_termseg)
         } else {
@@ -123,26 +123,27 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         if let Some(entry) = self
             .navcord
             .probe_memo
-            .get(self.navcord.path.as_slice())
+            .get(&self.navcord.path_id())
             .and_then(|by_path| by_path.get(&memo_key))
+            .cloned()
         {
             crate::metrics::incr(&crate::metrics::METRICS.probes_memoized);
-            self.probe_ghosts = entry.ghosts.clone();
-            self.probe_obstacles = entry.obstacles.clone();
+            self.probe_ghosts = entry.ghosts;
+            self.probe_obstacles = entry.obstacles;
 
-            return match &entry.verdict {
+            return match entry.verdict {
                 ProbeVerdict::Drawn { length, replay } => {
                     // Replay the successful probe's virtual step so that
                     // `.step_back(..)` undoes it, exactly as it would
                     // undo a freshly evaluated probe.
-                    match replay.clone() {
+                    match replay {
                         GhostReplay::Wrap(cane) => {
                             self.navcord.canes.push(PathCane::Virtual(cane))
                         }
                         GhostReplay::Finish => self.navcord.virtual_finish = true,
                     }
-                    self.navcord.path.push(probed_navnode);
-                    ControlFlow::Break(Some(*length))
+                    self.navcord.push_path(probed_navnode);
+                    ControlFlow::Break(Some(length))
                 }
                 ProbeVerdict::Backtrackable => ControlFlow::Continue(()),
                 ProbeVerdict::Terminal => ControlFlow::Break(None),
@@ -173,7 +174,7 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         };
         self.navcord
             .probe_memo
-            .entry(self.navcord.path.clone().into_boxed_slice())
+            .entry(self.navcord.path_id())
             .or_default()
             .insert(
                 memo_key,

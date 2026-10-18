@@ -212,21 +212,30 @@ exact-snapshot validation in B4 (see progress log).
 
 The structural fix for "every edge probe draws geometry".
 
-- [ ] D1. Give navedges a cheap analytic cost (chord/tangent estimate —
-        same quantities `estimate_cost_to_goal` already computes) and run
-        Theta* without drawing.
-- [ ] D2. Validate lazily: when the search settles on a candidate path,
-        draw it for real. On infringement, record which navedge failed
-        (obstacle info is already captured via `ghosts`/`obstacles`),
-        penalize or remove that edge, and resume/re-run the search.
+**Largely obsoleted by the virtual-navcord work** — `ghost_step_to`
+already evaluates every probe as pure geometry with no board mutation,
+and `materialize` draws only the committed path (D1+D2 effectively
+done). What remained was per-probe bookkeeping cost:
+
+- [x] D-memo. Interned navcord path prefixes: probe_memo/step_memo
+        keyed by O(1) path ids instead of O(depth) boxed-slice
+        hashing/cloning per probe; plus a bbox early-out over virtual
+        canes in `ghost_step_to`'s self-intersection scan. candE 50s
+        window: within noise (~2%), but strictly less work per probe.
 - [ ] D3. Keep incremental search state across re-searches (retain frontier
         and scores; re-insert only affected frontier entries — D*-lite
         style) so each failed candidate doesn't restart from scratch.
-- [ ] D4. Fall back to eager drawing when lazy validation exceeds N
-        consecutive failures on one ratline (dense boards may thrash).
 
-Expected effect: draws go from O(edge probes) to O(candidate paths).
-Biggest win but largest design change — needs Phase A numbers to justify.
+candE profile (50s window, `--multilayer`): step_to 24s of ~50s;
+inside it `infringe` 4.75M calls/14.2s with **70M candidates @ ~4.3s**,
+`collide` 390k/1.5s, rework_path replays 6M/0.9s. probe_memo hit 19%,
+step_memo hit 58%. Remaining levers: fewer *probes* (ordering — Phase
+G) and fewer *candidates per query* (R-tree envelope is inflated by
+the board's largest net clearance — see `largest_clearance`; a
+per-(net-pair) tighter envelope would shrink the candidate set but the
+pairwise margin is only known after fetching the candidate). A bbox
+precheck inside the candidate loop was tried and reverted — it added
+~15ns/candidate and rejected too few to pay.
 
 ## Phase E — Evaluate the `ng` (PieNavmesh) router
 

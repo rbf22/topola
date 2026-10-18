@@ -26,7 +26,7 @@ use crate::{
     },
     geometry::{
         primitive::{AccessPrimitiveShape, BendShape, PrimitiveShape, SegShape},
-        shape::MeasureLength,
+        shape::{AccessShape, MeasureLength},
     },
     graph::MakeRef,
     layout::{Layout, LayoutEdit},
@@ -186,23 +186,31 @@ pub struct Navcord {
     /// all of its canes.
     band_net: Option<usize>,
     band_layer: usize,
-    /// Memoized probe verdicts keyed by the navcord path state, initial
-    /// parent navnode, and probed navnode. Nested so that lookups can
-    /// borrow the live path instead of cloning it per probe.
-    pub probe_memo: HashMap<
-        Box<[NavnodeIndex]>,
-        HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>,
-    >,
+    /// Memoized probe verdicts keyed by the navcord path state
+    /// (interned prefix id, see `.path_ids`), initial parent navnode,
+    /// and probed navnode.
+    pub probe_memo:
+        HashMap<u64, HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>>,
     /// Memoized `.step_to(..)` verdicts keyed by the navcord state —
-    /// the path plus the number of leading materialized canes — and
-    /// the target navnode. `.rework_path(..)` redraws paths over and
-    /// over, so this saves re-evaluating their geometry each time.
-    /// Nested so that lookups can borrow the live path instead of
-    /// cloning it per step.
+    /// the interned path prefix id plus the number of leading
+    /// materialized canes — and the target navnode.
+    /// `.rework_path(..)` redraws paths over and over, so this saves
+    /// re-evaluating their geometry each time.
     step_memo: HashMap<
-        Box<[NavnodeIndex]>,
+        u64,
         HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>,
     >,
+    /// Interned ids of each prefix of `.path`, parallel to it:
+    /// `path_ids[i]` uniquely identifies the sequence `path[..=i]`.
+    /// Memo tables are keyed by these ids, keeping lookups O(1)
+    /// instead of hashing the whole path per probe.
+    path_ids: Vec<u64>,
+    /// Maps `(parent_prefix_id, navnode)` to the prefix's interned id,
+    /// ensuring equal prefixes share an id and distinct prefixes never
+    /// do. Shared prefixes also store once here instead of a boxed
+    /// path slice per memo entry.
+    path_interner: HashMap<(u64, NavnodeIndex), u64>,
+    next_path_id: u64,
 }
 
 impl Navcord {
@@ -227,7 +235,37 @@ impl Navcord {
             band_layer: layer,
             probe_memo: HashMap::new(),
             step_memo: HashMap::new(),
+            path_ids: vec![0],
+            path_interner: HashMap::new(),
+            next_path_id: 1,
         }
+    }
+
+    /// The interned id of the current path — the key memo tables are
+    /// looked up under.
+    pub fn path_id(&self) -> u64 {
+        *self.path_ids.last().unwrap()
+    }
+
+    /// Push `to` onto the path, interning the new prefix.
+    pub(crate) fn push_path(&mut self, to: NavnodeIndex) {
+        let parent_id = *self.path_ids.last().unwrap();
+        let next_id = &mut self.next_path_id;
+        let id = *self
+            .path_interner
+            .entry((parent_id, to))
+            .or_insert_with(|| {
+                *next_id += 1;
+                *next_id
+            });
+        self.path_ids.push(id);
+        self.path.push(to);
+    }
+
+    /// Pop the last navnode off the path and its interned prefix id.
+    fn pop_path(&mut self) {
+        self.path_ids.pop();
+        self.path.pop();
     }
 
     /// The virtual canes currently on the path.
@@ -498,7 +536,7 @@ impl Navcord {
             .count();
         if let Some(entry) = self
             .step_memo
-            .get(self.path.as_slice())
+            .get(&self.path_id())
             .and_then(|by_path| by_path.get(&(materialized, to)))
         {
             crate::metrics::incr(&crate::metrics::METRICS.step_memo_hits);
@@ -510,7 +548,7 @@ impl Navcord {
                         }
                         GhostReplay::Finish => self.virtual_finish = true,
                     }
-                    self.path.push(to);
+                    self.push_path(to);
                     Ok(length)
                 }
                 Err(err) => Err(err),
@@ -527,7 +565,7 @@ impl Navcord {
         // without bound; beyond the cap verdicts are just re-evaluated.
         if self.step_memo.len() < 2_000_000 {
             self.step_memo
-                .entry(self.path.clone().into_boxed_slice())
+                .entry(self.path_id())
                 .or_default()
                 .insert((materialized, to), verdict.clone());
         }
@@ -543,7 +581,7 @@ impl Navcord {
                 // the navnode `to` onto the currently attempted path to start
                 // from it on the next `.step_to(...)` call or retreat from it
                 // later using `.step_back(...)`.
-                self.path.push(to);
+                self.push_path(to);
                 Ok(length)
             }
             Err(err) => Err(err),
@@ -717,10 +755,19 @@ impl Navcord {
         // seg, so filtered out of the collision query above — can
         // collide with it; this is what prevents the band from
         // self-intersecting. They are checked exactly like real same-net
-        // loose seg collidees.
+        // loose seg collidees. The bounding-box precheck skips the
+        // polygon-level intersection test for canes nowhere near the
+        // new seg — on deep paths nearly all of them.
         if !require_different_net {
+            // Inflated slightly so bboxes merely touching edge-on —
+            // zero-area overlap the bbox check would miss — still fall
+            // through to the exact test.
+            let seg_bbox = seg_shape.bbox(1.0);
             for cane in self.virtual_canes() {
                 let virtual_seg = cane.seg_shape(self.width);
+                if !virtual_seg.intersects_with_bbox(&seg_bbox) {
+                    continue;
+                }
                 if seg_shape.intersects(&virtual_seg) {
                     return fail(Collision(seg_shape, virtual_seg, cane.gear.into()).into());
                 }
@@ -927,7 +974,7 @@ impl Navcord {
         // Now that the last head of the currently routed band was deleted, pop
         // the last navnode from the currently attempted path so that it is up
         // to date.
-        self.path.pop();
+        self.pop_path();
         Ok(())
     }
 }
