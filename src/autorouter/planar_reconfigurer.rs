@@ -78,6 +78,16 @@ impl PlanarAutorouteReconfigurer {
         }
     }
 
+    /// Blocking ratlines recorded for the most recent failure, in
+    /// their original routing order. Empty for reconfigurers that do
+    /// not track blockers.
+    pub fn blockers(&self) -> &[RatlineUid] {
+        match self {
+            Self::SccPermutations(_) => &[],
+            Self::NegotiatedCongestion(reconfigurer) => &reconfigurer.last_blockers,
+        }
+    }
+
     /// Extends the stored preconfiguration's terminating-dot
     /// remappings, so subsequently emitted configurations keep them.
     /// Multilayer re-layering calls this after swapping fanout vias;
@@ -311,6 +321,11 @@ pub struct NegotiatedCongestionPlanarAutorouteReconfigurer {
     /// The last `(ratline index, obstacles)` recorded, to avoid
     /// recounting when `reconfigure` loops back without new data.
     last_recorded: Option<(usize, Vec<PrimitiveIndex>)>,
+    /// Blocking ratlines of the most recently recorded failure, in
+    /// their original routing order. Surfaced for the multilayer
+    /// reconfigurer, which rotates blockers' layers as well as the
+    /// failed ratline's.
+    last_blockers: Vec<RatlineUid>,
     options: PlanarAutorouteOptions,
 }
 
@@ -339,6 +354,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             congestion: BTreeMap::new(),
             emitted,
             last_recorded: None,
+            last_blockers: vec![],
             options: *options,
         }
     }
@@ -450,6 +466,8 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             .filter(|ratline| blocker_set.contains(ratline))
             .copied()
             .collect();
+
+        self.last_blockers = blockers.clone();
 
         if self
             .last_recorded

@@ -21,10 +21,14 @@ use crate::{
 
 #[enum_dispatch]
 pub trait MakeNextMultilayerAutorouteConfiguration {
+    /// `blockers` are the ratlines whose bands blocked the failed
+    /// ratline's last attempt, in original routing order — candidates
+    /// for layer rotation alongside the failed ratline itself.
     fn process_planar_result(
         &mut self,
         autorouter: &Autorouter<impl AccessMesadata>,
         planar_result: Result<PlanarAutorouteConfigurationStatus, AutorouterError>,
+        blockers: &[RatlineUid],
     );
 
     fn next_configuration(
@@ -109,22 +113,35 @@ impl MakeNextMultilayerAutorouteConfiguration
         &mut self,
         autorouter: &Autorouter<impl AccessMesadata>,
         planar_result: Result<PlanarAutorouteConfigurationStatus, AutorouterError>,
+        blockers: &[RatlineUid],
     ) {
         let Ok(planar_status) = planar_result else {
             return;
         };
 
-        self.configuration_search.push((
-            0.1,
-            (planar_status.configuration.ratlines.len() - planar_status.costs.lengths.len()) as f64,
-            self.configuration_search
-                .curr_node()
-                .clone()
-                .revise_ratline(
-                    planar_status.configuration.ratlines[planar_status.costs.lengths.len()],
-                    autorouter.board().layout().drawing().layer_count(),
-                ),
-        ));
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+        let estimate =
+            (planar_status.configuration.ratlines.len() - planar_status.costs.lengths.len()) as f64;
+
+        // The failed ratline rotates first; each blocking ratline is a
+        // candidate too — moving a blocker off the contested layer can
+        // resolve the conflict without moving the failed ratline.
+        for ratline in planar_status
+            .configuration
+            .ratlines
+            .get(planar_status.costs.lengths.len())
+            .into_iter()
+            .chain(blockers.iter().take(8))
+        {
+            self.configuration_search.push((
+                0.1,
+                estimate,
+                self.configuration_search
+                    .curr_node()
+                    .clone()
+                    .revise_ratline(*ratline, layer_count),
+            ));
+        }
     }
 
     fn next_configuration(

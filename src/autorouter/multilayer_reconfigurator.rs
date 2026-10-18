@@ -162,8 +162,11 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                 )))
             }
             Ok(ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(status))) => {
-                self.reconfigurer
-                    .process_planar_result(autorouter, Ok(status));
+                self.reconfigurer.process_planar_result(
+                    autorouter,
+                    Ok(status),
+                    self.stepper.planar().blockers(),
+                );
                 Ok(ControlFlow::Continue(
                     ReconfiguratorStatus::Reconfigured(()),
                 ))
@@ -179,8 +182,11 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                     self.finish_early(autorouter);
                     return self.step(autorouter);
                 }
-                self.reconfigurer
-                    .process_planar_result(autorouter, Err(err.clone()));
+                self.reconfigurer.process_planar_result(
+                    autorouter,
+                    Err(err.clone()),
+                    self.stepper.planar().blockers(),
+                );
                 self.reconfigure(autorouter)
             }
         }

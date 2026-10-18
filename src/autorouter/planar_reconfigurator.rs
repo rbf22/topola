@@ -158,6 +158,12 @@ impl PlanarAutorouteReconfigurator {
         *self.stepper.curr_ratline_index()
     }
 
+    /// Blocking ratlines recorded for the most recent routing
+    /// failure, in their original routing order.
+    pub fn blockers(&self) -> &[RatlineUid] {
+        self.reconfigurer.blockers()
+    }
+
     /// Finishes routing early, keeping already routed bands. The next
     /// `step()` produces the accumulated edit without triggering another
     /// reconfiguration.
