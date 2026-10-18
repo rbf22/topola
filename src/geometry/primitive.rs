@@ -6,7 +6,7 @@ use std::f64::consts::TAU;
 
 use enum_dispatch::enum_dispatch;
 use geo::algorithm::line_measures::{Distance, Euclidean};
-use geo::{point, polygon, Contains, Intersects, Line, Point, Polygon, Rotate};
+use geo::{point, polygon, Contains, Intersects, Line, Point, Polygon};
 use rstar::{RTreeObject, AABB};
 
 use crate::{
@@ -154,7 +154,11 @@ impl SegShape {
         let tangent_vector_norm = Euclidean::distance(&tangent_vector, &point! {x: 0.0, y: 0.0});
         let unit_tangent_vector = tangent_vector / tangent_vector_norm;
 
-        let normal = unit_tangent_vector.rotate_around_point(-90., point! {x: 0.0, y: 0.0});
+        // Rotating (x, y) by -90 degrees yields (y, -x).
+        let normal = point! {
+            x: unit_tangent_vector.y(),
+            y: -unit_tangent_vector.x(),
+        };
 
         [
             self.from - normal * (self.width / 2.),
@@ -185,7 +189,11 @@ impl SegShape {
             let tangent_vector = seg.to - seg.from;
             let length = Euclidean::distance(&seg.to, &seg.from);
             let unit_tangent_vector = tangent_vector / length;
-            let normal = unit_tangent_vector.rotate_around_point(-90., point! {x: 0.0, y: 0.0});
+            // Rotating (x, y) by -90 degrees yields (y, -x).
+            let normal = point! {
+                x: unit_tangent_vector.y(),
+                y: -unit_tangent_vector.x(),
+            };
             (unit_tangent_vector, normal, length / 2.0)
         };
 

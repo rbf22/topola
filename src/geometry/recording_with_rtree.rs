@@ -77,16 +77,21 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_inserts);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.insert_nanos);
         let dot = self.geometry_with_rtree.add_dot(weight);
-        recorder.dots.insert(
-            Into::<PI>::into(dot)
-                .try_into()
-                .unwrap_or_else(|_| unreachable!()),
-            (
-                None,
-                Some(weight.into().try_into().unwrap_or_else(|_| unreachable!())),
-            ),
-        );
+        // The allocator may recycle an index freed by an earlier removal
+        // recorded in this same edit; `or_insert` then preserves the old
+        // weight so that applying the reversed edit restores it.
+        recorder
+            .dots
+            .entry(
+                Into::<PI>::into(dot)
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+            )
+            .or_insert((None, None))
+            .1 = Some(weight.into().try_into().unwrap_or_else(|_| unreachable!()));
         dot
     }
 
@@ -100,19 +105,22 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_inserts);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.insert_nanos);
         let seg = self.geometry_with_rtree.add_seg(from, to, weight);
-        recorder.segs.insert(
-            Into::<PI>::into(seg)
-                .try_into()
-                .unwrap_or_else(|_| unreachable!()),
-            (
-                None,
-                Some((
-                    (from, to),
-                    weight.into().try_into().unwrap_or_else(|_| unreachable!()),
-                )),
-            ),
-        );
+        // See `add_dot` about recycled indices.
+        recorder
+            .segs
+            .entry(
+                Into::<PI>::into(seg)
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+            )
+            .or_insert((None, None))
+            .1 = Some((
+            (from, to),
+            weight.into().try_into().unwrap_or_else(|_| unreachable!()),
+        ));
         seg
     }
 
@@ -127,19 +135,22 @@ impl<
     where
         GenericIndex<W>: Into<PI>,
     {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_inserts);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.insert_nanos);
         let bend = self.geometry_with_rtree.add_bend(from, to, core, weight);
-        recorder.bends.insert(
-            Into::<PI>::into(bend)
-                .try_into()
-                .unwrap_or_else(|_| unreachable!()),
-            (
-                None,
-                Some((
-                    (from, to, core, None),
-                    weight.into().try_into().unwrap_or_else(|_| unreachable!()),
-                )),
-            ),
-        );
+        // See `add_dot` about recycled indices.
+        recorder
+            .bends
+            .entry(
+                Into::<PI>::into(bend)
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+            )
+            .or_insert((None, None))
+            .1 = Some((
+            (from, to, core, None),
+            weight.into().try_into().unwrap_or_else(|_| unreachable!()),
+        ));
         bend
     }
 
@@ -149,9 +160,12 @@ impl<
         weight: CW,
     ) -> GenericIndex<CW> {
         let compound = self.geometry_with_rtree.add_compound(weight.clone());
+        // See `add_dot` about recycled indices.
         recorder
             .compounds
-            .insert(compound, (None, Some((vec![], weight))));
+            .entry(compound)
+            .or_insert((None, None))
+            .1 = Some((vec![], weight));
         compound
     }
 
@@ -185,6 +199,8 @@ impl<
         recorder: &mut GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
         dot: DI,
     ) -> Result<(), ()> {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_removes);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.remove_nanos);
         let weight = self.geometry_with_rtree.geometry().dot_weight(dot);
         self.geometry_with_rtree.remove_dot(dot);
         edit_remove_from_map(&mut recorder.dots, dot, weight);
@@ -196,6 +212,8 @@ impl<
         recorder: &mut GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
         seg: SI,
     ) {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_removes);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.remove_nanos);
         let geometry = self.geometry_with_rtree.geometry();
         let weight = geometry.seg_weight(seg);
         let joints = geometry.seg_joints(seg);
@@ -208,6 +226,8 @@ impl<
         recorder: &mut GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
         bend: BI,
     ) {
+        crate::metrics::incr(&crate::metrics::METRICS.geometry_removes);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.remove_nanos);
         let geometry = self.geometry_with_rtree.geometry();
         let weight = geometry.bend_weight(bend);
         let joints = geometry.bend_joints(bend);
@@ -240,6 +260,9 @@ impl<
         dot: DI,
         to: Point,
     ) {
+        crate::metrics::incr(&crate::metrics::METRICS.move_dot_updates);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.move_dot_update_nanos);
         let old_weight = self.geometry_with_rtree.geometry().dot_weight(dot);
         self.geometry_with_rtree.move_dot(dot, to);
         let new_weight = self.geometry_with_rtree.geometry().dot_weight(dot);
@@ -259,6 +282,9 @@ impl<
     ) where
         F: FnOnce(&mut GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>, BI),
     {
+        crate::metrics::incr(&crate::metrics::METRICS.bend_modifies);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.bend_modify_nanos);
         let geometry = self.geometry_with_rtree.geometry();
         let old_joints = geometry.bend_joints(bend);
         let old_core = geometry.core(bend);
@@ -338,17 +364,24 @@ fn edit_remove_from_map<I: Eq + Ord, T>(
     index: I,
     data: T,
 ) {
-    let to_be_inserted = (Some(data), None);
     match map.entry(index) {
         BTreeMapEntry::Occupied(mut occ) => {
-            if let (None, Some(_)) = occ.get() {
-                occ.remove();
-            } else {
-                *occ.get_mut() = to_be_inserted;
+            match occ.get() {
+                // Added then removed in the same edit: a no-op overall.
+                (None, Some(_)) => {
+                    occ.remove();
+                }
+                // Modified then removed, or removed then re-added at the
+                // same recycled index: keep the original old data so that
+                // the reversed edit restores what was there before the
+                // edit.
+                (Some(_), _) | (None, None) => {
+                    occ.get_mut().1 = None;
+                }
             }
         }
         BTreeMapEntry::Vacant(vac) => {
-            vac.insert(to_be_inserted);
+            vac.insert((Some(data), None));
         }
     }
 }

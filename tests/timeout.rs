@@ -21,6 +21,8 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
             principal_layer: 0,
             presort_by: PresortBy::RatlineIntersectionCountAndLength,
             permutate: true,
+            reconfigure_by: Default::default(),
+            congestion_penalty: 500.0,
             router: RouterOptions {
                 wrap_around_bands: true,
                 squeeze_through_under_bends: false,
@@ -31,6 +33,8 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
                 progress_bonus: 0.005,
             },
             max_reconfigurations: None,
+            improve_pad_entry: false,
+            pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
         },
     )
 }

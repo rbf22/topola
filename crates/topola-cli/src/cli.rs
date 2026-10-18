@@ -62,8 +62,7 @@ pub struct Cli {
     pub suggest_shifts: Option<std::path::PathBuf>,
     #[arg(
         long,
-        value_name = "WIDTH",
-        help = "Half-width of the wish channel used for shift suggestions (defaults to routed band half-width plus largest clearance)"
+        help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
-    pub channel_width: Option<f64>,
+    pub pad_entry: bool,
 }

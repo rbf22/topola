@@ -307,7 +307,11 @@ impl<CW, Cel, R> GetLimbs for LooseDotRef<'_, CW, Cel, R> {
     }
 
     fn bends(&self) -> Vec<BendIndex> {
-        vec![self.bend().into()]
+        self.drawing
+            .geometry()
+            .joined_bends(self.index.into())
+            .map(|ni| LooseBendIndex::new(ni.index()).into())
+            .collect()
     }
 }
 

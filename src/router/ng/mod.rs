@@ -611,6 +611,7 @@ fn cane_around<R: AccessRules>(
             }
         }
     }?;
+    let (ret, _squeezed) = ret;
     // record the length of the current seg, and the old bend, if any
     *route_length += ret
         .cane

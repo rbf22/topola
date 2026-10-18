@@ -4,7 +4,7 @@
 
 use geo::Line;
 use petgraph::visit::Walker;
-use specctra_core::rules::GetConditions;
+use specctra_core::rules::{Conditions, GetConditions};
 
 use crate::{
     drawing::{
@@ -26,7 +26,7 @@ use super::{
     gear::WalkOutwards,
     graph::PrimitiveIndex,
     loose::{GetPrevNextLoose, LooseIndex},
-    primitive::GetJoints,
+    primitive::{GetJoints, GetLimbs},
     rules::AccessRules,
     Drawing,
 };
@@ -159,6 +159,16 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         infringer: PrimitiveIndex,
         predicate: &'a impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> Option<Infringement> {
+        crate::metrics::incr(&crate::metrics::METRICS.infringement_queries);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
+
+        // Infringements with loose dots as infringers are always filtered
+        // out below, so the query can be skipped entirely.
+        if matches!(infringer, PrimitiveIndex::LooseDot(..)) {
+            return None;
+        }
+
         self.infringements_except(infringer, predicate).next()
     }
 
@@ -167,7 +177,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         infringer: PrimitiveIndex,
         predicate: &'a impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> impl Iterator<Item = Infringement> + 'a {
-        self.infringements_among(
+        self.overlapees_among(
             infringer,
             self.locate_possible_infringees(infringer)
                 .filter_map(move |infringee_node| {
@@ -177,6 +187,15 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                         None
                     }
                 })
+                // The following filters reject candidates cheaply before
+                // they are evaluated geometrically in `.overlapees_among(..)`.
+                // Their order must match the post-evaluation filters that
+                // were applied in `.infringements_among(..)`.
+                //
+                // Infringement with loose dots resulted in false positives for
+                // line-of-sight paths.
+                .filter(|&infringee| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
+                .filter(move |&infringee| !self.are_connectable(infringer, infringee))
                 .filter(move |infringee| predicate(&self, infringer, *infringee)),
         )
     }
@@ -194,6 +213,20 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                     && !matches!(infringement.2, PrimitiveIndex::LooseDot(..))
             })
             .filter(move |infringement| !self.are_connectable(infringer, infringement.2))
+    }
+
+    /// The limbs of all primitives that overlap `node`. These are exempted
+    /// from infringement checks while a cane is drawn around `node`, so
+    /// they are collected once here instead of being recomputed for every
+    /// candidate.
+    pub(crate) fn overlapee_limbs(&self, node: PrimitiveIndex) -> Vec<PrimitiveIndex> {
+        self.overlapees(node)
+            .flat_map(|overlapee| {
+                PrimitiveIndex::from(overlapee.2)
+                    .primitive_ref(self)
+                    .limbs()
+            })
+            .collect()
     }
 
     pub fn overlapees<'a>(
@@ -224,6 +257,10 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         let intersector_shape = intersector_primitive.shape();
 
         it.filter_map(move |primitive_node| {
+            crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
+            let _timer = crate::metrics::Timer::start(
+                &crate::metrics::METRICS.infringement_candidate_nanos,
+            );
             let infringee_primitive = primitive_node.primitive_ref(self);
             let infringee_conditions = infringee_primitive.conditions();
 
@@ -280,6 +317,9 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         collider: PrimitiveIndex,
         predicate: &impl Fn(&Self, PrimitiveIndex, PrimitiveIndex) -> bool,
     ) -> Option<Collision> {
+        crate::metrics::incr(&crate::metrics::METRICS.collision_queries);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
         let collider_primitive = collider.primitive_ref(self);
         let collider_shape = collider_primitive.shape();
         let collider_layer = collider_primitive.layer();
@@ -332,5 +372,151 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         } else {
             true
         }
+    }
+
+    /// Shape-based variant of `.find_infringement_except(..)` for
+    /// hypothetical primitives that are not inserted into the board. The
+    /// predicate is given only the candidate infringee, since the
+    /// infringer has no index.
+    pub(crate) fn find_infringement_of_shape(
+        &self,
+        shape: PrimitiveShape,
+        layer: usize,
+        maybe_net: Option<usize>,
+        predicate: &impl Fn(&Self, PrimitiveIndex) -> bool,
+    ) -> Option<Infringement> {
+        crate::metrics::incr(&crate::metrics::METRICS.infringement_queries);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_nanos);
+
+        let limiting_shape = shape.inflate(
+            maybe_net
+                .map(|net| self.rules().largest_clearance(Some(net)))
+                .unwrap_or(0.0),
+        );
+
+        let intersector_conditions = maybe_net.map(|net| Conditions {
+            net,
+            maybe_region: Some("A".into()),
+            maybe_layer: Some(layer),
+        });
+
+        self.recording_geometry_with_rtree()
+            .rtree()
+            .locate_in_envelope_intersecting(&limiting_shape.envelope_3d(0.0, layer))
+            .filter_map(|wrapper| {
+                if let GenericNode::Primitive(primitive_node) = wrapper.data {
+                    Some(primitive_node)
+                } else {
+                    None
+                }
+            })
+            // The following filters reject candidates cheaply before they
+            // are evaluated geometrically. Their order matches the
+            // corresponding filters in `.infringements_except(..)`.
+            .filter(|&infringee| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
+            .filter(|&infringee| {
+                match (maybe_net, infringee.primitive_ref(self).maybe_net()) {
+                    (Some(net1), Some(net2)) => net1 != net2,
+                    _ => false,
+                }
+            })
+            .filter(|infringee| predicate(self, *infringee))
+            .find_map(|infringee| {
+                crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
+                let _timer = crate::metrics::Timer::start(
+                    &crate::metrics::METRICS.infringement_candidate_nanos,
+                );
+                let infringee_primitive = infringee.primitive_ref(self);
+                let infringee_conditions = infringee_primitive.conditions();
+
+                let epsilon = 1.0;
+                let inflated_infringer_shape =
+                    shape.inflate(match (&intersector_conditions, infringee_conditions) {
+                        (None, _) | (_, None) => return None,
+                        (Some(lhs), Some(rhs)) => {
+                            let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
+                                return None;
+                            };
+
+                            // Note the epsilon comparison.
+                            // XXX: Epsilon is probably too large. But what
+                            // should it be exactly then?
+                            (clearance - epsilon).clamp(0.0, f64::INFINITY)
+                        }
+                    });
+
+                let infringee_shape = infringee_primitive.shape();
+
+                inflated_infringer_shape
+                    .intersects(&infringee_shape)
+                    .then_some(Infringement(
+                        inflated_infringer_shape,
+                        infringee_shape,
+                        infringee,
+                    ))
+            })
+    }
+
+    /// Shape-based variant of `.detect_collision_except(..)` for a
+    /// hypothetical `SeqLooseSeg` collider. `require_different_net`
+    /// replicates the terminality check in `.add_seg(..)`: when at least
+    /// one of the seg's joints is a fixed dot, only different-net
+    /// collidees can be reported.
+    pub(crate) fn detect_collision_of_shape(
+        &self,
+        shape: PrimitiveShape,
+        layer: usize,
+        maybe_net: Option<usize>,
+        require_different_net: bool,
+    ) -> Option<Collision> {
+        crate::metrics::incr(&crate::metrics::METRICS.collision_queries);
+        let _timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.collision_nanos);
+
+        self.recording_geometry_with_rtree()
+            .rtree()
+            .locate_in_envelope_intersecting(&shape.full_height_envelope_3d(0.0, 2))
+            .filter_map(|wrapper| {
+                if let GenericNode::Primitive(collidee) = wrapper.data {
+                    Some(collidee)
+                } else {
+                    None
+                }
+            })
+            // `collider != collidee` always holds for a hypothetical
+            // collider.
+            .filter(|&collidee| {
+                // NOTE: Collisions can happen between two same-net loose
+                // segs, so these cases in particular are not filtered out
+                // here, unlike what is done in infringement code.
+                let connectable = match (maybe_net, collidee.primitive_ref(self).maybe_net())
+                {
+                    (Some(net1), Some(net2)) => net1 == net2,
+                    _ => true,
+                };
+                !connectable
+                    || matches!(
+                        collidee,
+                        PrimitiveIndex::LoneLooseSeg(..) | PrimitiveIndex::SeqLooseSeg(..)
+                    )
+            })
+            .filter(|&collidee| {
+                !require_different_net
+                    || maybe_net != collidee.primitive_ref(self).maybe_net()
+            })
+            .find_map(|collidee| {
+                let collidee_primitive = collidee.primitive_ref(self);
+
+                if layer != collidee_primitive.layer() {
+                    return None;
+                }
+
+                let collidee_shape = collidee_primitive.shape();
+
+                shape
+                    .intersects(&collidee_shape)
+                    .then_some(Collision(shape, collidee_shape, collidee))
+            })
     }
 }

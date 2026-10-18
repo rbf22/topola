@@ -4,6 +4,7 @@
 
 use std::{
     cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
     iter::{Skip, Take},
 };
 
@@ -15,11 +16,18 @@ use specctra_core::mesadata::AccessMesadata;
 use crate::{
     astar::Astar,
     autorouter::{
+        invoker::GetDebugOverlayData,
         planar_autoroute::{PlanarAutorouteConfiguration, PlanarAutorouteExecutionStepper},
         planar_preconfigurer::SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer,
+        ratline::RatlineUid,
         scc::Scc,
-        Autorouter, PlanarAutorouteOptions,
+        Autorouter, PlanarAutorouteOptions, ReconfigureBy,
     },
+    drawing::{
+        graph::PrimitiveIndex,
+        loose::{GetPrevNextLoose, LooseIndex},
+    },
+    graph::MakeRef,
 };
 
 #[enum_dispatch]
@@ -35,6 +43,7 @@ pub trait MakeNextPlanarAutorouteConfiguration {
 pub enum PlanarAutorouteReconfigurer {
     //RatlineCuts(RatlineCutsPlanarAutorouteReconfigurer),
     SccPermutations(SccPermutationsPlanarAutorouteReconfigurer),
+    NegotiatedCongestion(NegotiatedCongestionPlanarAutorouteReconfigurer),
 }
 
 impl PlanarAutorouteReconfigurer {
@@ -44,14 +53,26 @@ impl PlanarAutorouteReconfigurer {
         presorter: SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer,
         options: &PlanarAutorouteOptions,
     ) -> Self {
-        PlanarAutorouteReconfigurer::SccPermutations(
-            SccPermutationsPlanarAutorouteReconfigurer::new(
-                autorouter,
-                preconfiguration,
-                presorter,
-                options,
+        match options.reconfigure_by {
+            ReconfigureBy::SccPermutations => PlanarAutorouteReconfigurer::SccPermutations(
+                SccPermutationsPlanarAutorouteReconfigurer::new(
+                    autorouter,
+                    preconfiguration,
+                    presorter,
+                    options,
+                ),
             ),
-        )
+            ReconfigureBy::NegotiatedCongestion => {
+                PlanarAutorouteReconfigurer::NegotiatedCongestion(
+                    NegotiatedCongestionPlanarAutorouteReconfigurer::new(
+                        autorouter,
+                        preconfiguration,
+                        presorter,
+                        options,
+                    ),
+                )
+            }
+        }
     }
 }
 
@@ -226,5 +247,329 @@ impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReco
             ratlines,
             ..self.preconfiguration.clone()
         })
+    }
+}
+
+/// Blocker-directed reconfigurer: a negotiated-congestion loop adapted
+/// to the sequential router.
+///
+/// Two mechanisms are fed by the same recorded history:
+///
+/// 1. When a ratline fails because a band routed earlier blocks its
+///    corridor, the failed ratline's SCC is ordered before the blocking
+///    band's SCC in the next configuration. The failed net then claims
+///    the channel first, and the blocking band is ripped up and
+///    rerouted afterwards, negotiating around it. This is a directed
+///    version of the ordering permutations: instead of enumerating the
+///    whole permutation space, we jump straight to an ordering that
+///    resolves the recorded conflict.
+///
+/// 2. Every primitive that blocks a route attempt accumulates a
+///    congestion count. Counts on fixed primitives (pads, keepouts —
+///    obstacles no reordering can remove) are emitted as
+///    [`PlanarAutorouteConfiguration::obstacle_penalties`], inflating
+///    the path cost of wrapping them so that retries prefer alternate
+///    corridors.
+pub struct NegotiatedCongestionPlanarAutorouteReconfigurer {
+    fallback: SccPermutationsPlanarAutorouteReconfigurer,
+    preconfiguration: PlanarAutorouteConfiguration,
+    sccs: Vec<Scc>,
+    /// "Earlier SCC must precede later SCC" precedence constraints, in
+    /// the order they were learned.
+    precedence: Vec<(Scc, Scc)>,
+    /// Precedence constraints that produced cycles; never re-added.
+    dead_precedence: BTreeSet<(Scc, Scc)>,
+    /// Times each primitive blocked a route attempt.
+    congestion: BTreeMap<PrimitiveIndex, usize>,
+    /// Ratline orderings already returned, including the
+    /// preconfiguration.
+    emitted: BTreeSet<Vec<RatlineUid>>,
+    /// The last `(ratline index, obstacles)` recorded, to avoid
+    /// recounting when `reconfigure` loops back without new data.
+    last_recorded: Option<(usize, Vec<PrimitiveIndex>)>,
+    options: PlanarAutorouteOptions,
+}
+
+impl NegotiatedCongestionPlanarAutorouteReconfigurer {
+    pub fn new(
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        preconfiguration: PlanarAutorouteConfiguration,
+        presorter: SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer,
+        options: &PlanarAutorouteOptions,
+    ) -> Self {
+        let sccs = presorter.sccs().clone();
+        let mut emitted = BTreeSet::new();
+        emitted.insert(preconfiguration.ratlines.clone());
+
+        Self {
+            fallback: SccPermutationsPlanarAutorouteReconfigurer::new(
+                autorouter,
+                preconfiguration.clone(),
+                presorter,
+                options,
+            ),
+            preconfiguration,
+            sccs,
+            precedence: vec![],
+            dead_precedence: BTreeSet::new(),
+            congestion: BTreeMap::new(),
+            emitted,
+            last_recorded: None,
+            options: *options,
+        }
+    }
+
+    /// Records the failing ratline's blocking obstacles: bumps each
+    /// obstacle's congestion count and, for obstacles that are
+    /// primitives of a band routed for another ratline, learns a
+    /// precedence constraint ordering the failed ratline's SCC before
+    /// the blocking ratline's SCC.
+    fn record_blockers(
+        &mut self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        stepper: &PlanarAutorouteExecutionStepper,
+    ) {
+        let curr_ratline_index = *stepper.curr_ratline_index();
+        let obstacles: Vec<PrimitiveIndex> = stepper.obstacles().to_vec();
+
+        if self
+            .last_recorded
+            .as_ref()
+            .is_some_and(|last| *last == (curr_ratline_index, obstacles.clone()))
+        {
+            return;
+        }
+        self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
+
+        let Some(failed) = stepper
+            .configuration()
+            .ratlines
+            .get(curr_ratline_index)
+            .copied()
+        else {
+            return;
+        };
+
+        let drawing = autorouter.board().layout().drawing();
+        let ratsnest = autorouter
+            .ratsnests()
+            .on_principal_layer(self.options.principal_layer);
+
+        // Loose primitive -> ratline it was routed for. Bands are
+        // resolved through the board's band registry, which stays
+        // consistent under undo, rather than through the ratlines'
+        // `band_termseg` weights: those go stale when a band is ripped
+        // up during reconfiguration, after which they resolve to
+        // unrelated or malformed loose chains.
+        let mut band_of: BTreeMap<PrimitiveIndex, RatlineUid> = BTreeMap::new();
+        for edge in ratsnest.graph().edge_indices() {
+            let ratline = RatlineUid {
+                principal_layer: self.options.principal_layer,
+                index: edge,
+            };
+            let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+
+            let Some(band) = autorouter.board.band_between_nodes(origin, destination) else {
+                continue;
+            };
+
+            let mut maybe_loose: Option<LooseIndex> = Some(band[false].into());
+            let mut prev = None;
+
+            while let Some(loose) = maybe_loose {
+                band_of.insert(loose.into(), ratline);
+
+                let prev_prev = prev;
+                prev = maybe_loose;
+                maybe_loose = drawing.loose(loose).next_loose(prev_prev);
+            }
+        }
+
+        for obstacle in obstacles {
+            *self.congestion.entry(obstacle).or_insert(0) += 1;
+
+            let Some(blocker) = band_of.get(&obstacle).copied() else {
+                continue;
+            };
+
+            let (Some(failed_scc), Some(blocker_scc)) = (
+                self.scc_of(autorouter, failed),
+                self.scc_of(autorouter, blocker),
+            ) else {
+                continue;
+            };
+
+            // A same-net band cannot infringe, so same-SCC blockers
+            // shouldn't occur; guard anyway.
+            if failed_scc == blocker_scc {
+                continue;
+            }
+
+            let constraint = (failed_scc, blocker_scc);
+            if !self.dead_precedence.contains(&constraint)
+                && !self.precedence.contains(&constraint)
+            {
+                self.precedence.push(constraint);
+            }
+        }
+    }
+
+    fn scc_of(
+        &self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        ratline: RatlineUid,
+    ) -> Option<Scc> {
+        self.sccs
+            .iter()
+            .find(|scc| scc.scc_ref(autorouter).contains(ratline))
+            .cloned()
+    }
+
+    /// The SCC ordering of the stepper's current configuration, so
+    /// directed reorders perturb as few routed bands as possible.
+    fn base_scc_order(
+        &self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        stepper: &PlanarAutorouteExecutionStepper,
+    ) -> Vec<Scc> {
+        let mut order = vec![];
+
+        for ratline in &stepper.configuration().ratlines {
+            if let Some(scc) = self.scc_of(autorouter, *ratline) {
+                if !order.contains(&scc) {
+                    order.push(scc);
+                }
+            }
+        }
+
+        for scc in &self.sccs {
+            if !order.contains(scc) {
+                order.push(scc.clone());
+            }
+        }
+
+        order
+    }
+
+    /// Applies all live precedence constraints to `base` via
+    /// move-before operations. Constraints found to be cyclic are moved
+    /// to `dead_precedence` (newest first). Returns `None` when there
+    /// are no constraints to apply.
+    fn constrained_order(&mut self, base: &[Scc]) -> Option<Vec<Scc>> {
+        if self.precedence.is_empty() {
+            return None;
+        }
+
+        loop {
+            let mut order = base.to_vec();
+
+            for (earlier, later) in self.precedence.iter() {
+                let (Some(pos_earlier), Some(pos_later)) = (
+                    order.iter().position(|scc| scc == earlier),
+                    order.iter().position(|scc| scc == later),
+                ) else {
+                    continue;
+                };
+
+                if pos_earlier > pos_later {
+                    let scc = order.remove(pos_earlier);
+                    let pos_later = order.iter().position(|s| s == later).unwrap();
+                    order.insert(pos_later, scc);
+                }
+            }
+
+            // A constraint still violated must participate in a cycle.
+            // Kill the newest such constraint and rebuild.
+            if let Some(dead) = self
+                .precedence
+                .iter()
+                .rposition(|(earlier, later)| {
+                    order.iter().position(|s| s == earlier)
+                        > order.iter().position(|s| s == later)
+                })
+                .map(|index| self.precedence.remove(index))
+            {
+                self.dead_precedence.insert(dead);
+                continue;
+            }
+
+            return Some(order);
+        }
+    }
+
+    fn ratlines_in_scc_order(
+        &self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        order: &[Scc],
+    ) -> Vec<RatlineUid> {
+        let mut ratlines = vec![];
+
+        for scc in order {
+            for ratline in self.preconfiguration.ratlines.iter() {
+                if scc.scc_ref(autorouter).contains(*ratline) {
+                    ratlines.push(*ratline);
+                }
+            }
+        }
+
+        ratlines
+    }
+
+    /// Congestion costs translated to path penalties. Only fixed
+    /// primitives are penalized: loose indices are recycled as bands
+    /// are undone and redrawn, so penalizing them could hit unrelated
+    /// geometry.
+    fn obstacle_penalties(&self) -> BTreeMap<PrimitiveIndex, f64> {
+        self.congestion
+            .iter()
+            .filter(|(primitive, _)| {
+                matches!(
+                    primitive,
+                    PrimitiveIndex::FixedDot(_)
+                        | PrimitiveIndex::FixedSeg(_)
+                        | PrimitiveIndex::FixedBend(_)
+                )
+            })
+            .map(|(primitive, count)| {
+                (*primitive, *count as f64 * self.options.congestion_penalty)
+            })
+            .collect()
+    }
+}
+
+impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorouteReconfigurer {
+    fn next_configuration(
+        &mut self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        stepper: &PlanarAutorouteExecutionStepper,
+    ) -> Option<PlanarAutorouteConfiguration> {
+        self.record_blockers(autorouter, stepper);
+
+        // Directed attempt: ordering satisfying all learned precedence
+        // constraints, perturbed minimally from the current ordering.
+        if let Some(order) = self.constrained_order(&self.base_scc_order(autorouter, stepper)) {
+            let ratlines = self.ratlines_in_scc_order(autorouter, &order);
+
+            if ratlines != stepper.configuration().ratlines
+                && self.emitted.insert(ratlines.clone())
+            {
+                return Some(PlanarAutorouteConfiguration {
+                    ratlines,
+                    obstacle_penalties: self.obstacle_penalties(),
+                    ..self.preconfiguration.clone()
+                });
+            }
+        }
+
+        // Fallback: enumerate orderings, carrying the accumulated
+        // congestion penalties either way.
+        loop {
+            let mut configuration = self.fallback.next_configuration(autorouter, stepper)?;
+            configuration.obstacle_penalties = self.obstacle_penalties();
+
+            if self.emitted.insert(configuration.ratlines.clone()) {
+                return Some(configuration);
+            }
+        }
     }
 }

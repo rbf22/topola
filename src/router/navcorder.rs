@@ -85,6 +85,9 @@ impl<R: AccessRules> Navcorder for Layout<R> {
         navcord: &mut Navcord,
         path: &[NavnodeIndex],
     ) -> Result<(), NavcorderException> {
+        crate::metrics::incr(&crate::metrics::METRICS.rework_path_calls);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.rework_path_nanos);
+
         let prefix_length = navcord
             .path
             .iter()
@@ -93,6 +96,14 @@ impl<R: AccessRules> Navcorder for Layout<R> {
             .count();
 
         let length = navcord.path.len();
+        crate::metrics::add(
+            &crate::metrics::METRICS.rework_steps_undone,
+            length - prefix_length,
+        );
+        crate::metrics::add(
+            &crate::metrics::METRICS.rework_steps_redrawn,
+            path.len() - prefix_length,
+        );
         self.undo_path(navcord, length - prefix_length);
         // XXX: If this fails now, there may be a race condition.
         self.path(navmesh, navcord, &path[prefix_length..])

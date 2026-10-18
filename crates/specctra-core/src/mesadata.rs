@@ -190,6 +190,18 @@ impl SpecctraMesadata {
         }
     }
 
+    /// Overrides every clearance (structure, class, and per-net) to
+    /// `clearance`. Probe passes use this to measure demand paths under
+    /// relaxed rules; clone the mesadata beforehand to restore it.
+    pub fn override_clearances(&mut self, clearance: f64) {
+        self.structure_rule.clearance = clearance;
+        for rule in self.class_rules.values_mut() {
+            rule.clearance = clearance;
+        }
+        self.net_clearance.fill(clearance);
+        self.largest_clearance = clearance;
+    }
+
     pub fn rule(&self, net: usize) -> &SpecctraRule {
         self.net_netclass
             .get(&net)

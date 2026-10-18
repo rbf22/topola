@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::ops::ControlFlow;
+use std::{collections::BTreeMap, ops::ControlFlow};
 
 use derive_getters::{Dissolve, Getters};
 
@@ -28,6 +28,8 @@ pub struct RouteStepper {
     navcord: Navcord,
     ghosts: Vec<PrimitiveShape>,
     obstacles: Vec<PrimitiveIndex>,
+    #[getter(skip)]
+    obstacle_penalties: BTreeMap<PrimitiveIndex, f64>,
 }
 
 impl RouteStepper {
@@ -65,7 +67,15 @@ impl RouteStepper {
             navcord,
             ghosts,
             obstacles,
+            obstacle_penalties: BTreeMap::new(),
         }
+    }
+
+    /// Sets extra path costs charged for wrapping each primitive
+    /// (negotiated congestion). Penalizing repeatedly blocking
+    /// obstacles steers retries toward alternate corridors.
+    pub fn set_obstacle_penalties(&mut self, penalties: BTreeMap<PrimitiveIndex, f64>) {
+        self.obstacle_penalties = penalties;
     }
 }
 
@@ -79,6 +89,7 @@ impl<R: AccessRules> Step<Router<'_, R>, BandTermsegIndex> for RouteStepper {
         let layout = router.layout_mut();
         let target = self.thetastar.graph().destination();
         let mut strategy = RouterThetastarStrategy::new(layout, &mut self.navcord, target);
+        strategy.obstacle_penalties = Some(&self.obstacle_penalties);
         let result = self.thetastar.step(&mut strategy);
 
         self.ghosts = strategy.probe_ghosts;

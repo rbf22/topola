@@ -48,7 +48,33 @@ pub trait Draw {
         width: f64,
     ) -> Result<BandTermsegIndex, DrawException>;
 
+    /// Wraps a cane around the dot, checking for infringements. On success
+    /// also reports whether the cane had to be squeezed through under bends
+    /// (in which case its geometry cannot be reproduced by a trusted,
+    /// check-free replay).
     fn cane_around_dot(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: FixedDotIndex,
+        sense: RotationSense,
+        width: f64,
+    ) -> Result<(CaneHead, bool), DrawException>;
+
+    /// Same as `.cane_around_dot(..)` for wrapping around a bend.
+    fn cane_around_bend(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: BendIndex,
+        sense: RotationSense,
+        width: f64,
+    ) -> Result<(CaneHead, bool), DrawException>;
+
+    /// Wraps a cane around the dot unconditionally, without performing any
+    /// infringement or collision checks. Must only be used to replay draws
+    /// that were already verified in the same board and navcord state.
+    fn cane_around_dot_trusted(
         &mut self,
         recorder: &mut LayoutEdit,
         head: Head,
@@ -57,7 +83,8 @@ pub trait Draw {
         width: f64,
     ) -> Result<CaneHead, DrawException>;
 
-    fn cane_around_bend(
+    /// Same as `.cane_around_dot_trusted(..)` for wrapping around a bend.
+    fn cane_around_bend_trusted(
         &mut self,
         recorder: &mut LayoutEdit,
         head: Head,
@@ -83,10 +110,13 @@ impl<R: AccessRules> Draw for Layout<R> {
         into: FixedDotIndex,
         width: f64,
     ) -> Result<BandTermsegIndex, DrawException> {
-        let bitangent = self
-            .drawing()
-            .guide_for_head_into_dot(&head, into, width)
-            .map_err(Into::<DrawException>::into)?;
+        let bitangent = {
+            crate::metrics::incr(&crate::metrics::METRICS.guide_calls);
+            let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.guide_nanos);
+            self.drawing()
+                .guide_for_head_into_dot(&head, into, width)
+        }
+        .map_err(Into::<DrawException>::into)?;
 
         let (layer, maybe_net) = {
             let face = head.face().primitive_ref(self.drawing());
@@ -136,10 +166,13 @@ impl<R: AccessRules> Draw for Layout<R> {
         around: FixedDotIndex,
         sense: RotationSense,
         width: f64,
-    ) -> Result<CaneHead, DrawException> {
-        let tangent =
+    ) -> Result<(CaneHead, bool), DrawException> {
+        let tangent = {
+            crate::metrics::incr(&crate::metrics::METRICS.guide_calls);
+            let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.guide_nanos);
             self.drawing()
-                .guide_for_head_around_dot(&head, around.into(), sense, width)?;
+                .guide_for_head_around_dot(&head, around.into(), sense, width)
+        }?;
         let offset =
             self.drawing()
                 .offset_for_guide_for_head_around_dot(&head, around.into(), width);
@@ -158,6 +191,34 @@ impl<R: AccessRules> Draw for Layout<R> {
     }
 
     #[debug_ensures(ret.is_ok() -> self.drawing().node_count() == old(self.drawing().node_count() + 4))]
+    fn cane_around_dot_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: FixedDotIndex,
+        sense: RotationSense,
+        width: f64,
+    ) -> Result<CaneHead, DrawException> {
+        let tangent = self
+            .drawing()
+            .guide_for_head_around_dot(&head, around.into(), sense, width)?;
+        let offset =
+            self.drawing()
+                .offset_for_guide_for_head_around_dot(&head, around.into(), width);
+
+        Ok(self.cane_around_trusted(
+            recorder,
+            head,
+            around.into(),
+            tangent.start_point(),
+            tangent.end_point(),
+            sense,
+            width,
+            offset,
+        ))
+    }
+
+    #[debug_ensures(ret.is_ok() -> self.drawing().node_count() == old(self.drawing().node_count() + 4))]
     #[debug_ensures(ret.is_err() -> self.drawing().node_count() == old(self.drawing().node_count()))]
     fn cane_around_bend(
         &mut self,
@@ -166,10 +227,13 @@ impl<R: AccessRules> Draw for Layout<R> {
         around: BendIndex,
         sense: RotationSense,
         width: f64,
-    ) -> Result<CaneHead, DrawException> {
-        let tangent = self
-            .drawing()
-            .guide_for_head_around_bend(&head, around, sense, width)?;
+    ) -> Result<(CaneHead, bool), DrawException> {
+        let tangent = {
+            crate::metrics::incr(&crate::metrics::METRICS.guide_calls);
+            let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.guide_nanos);
+            self.drawing()
+                .guide_for_head_around_bend(&head, around, sense, width)
+        }?;
         let offset = self
             .drawing()
             .offset_for_guide_for_head_around_bend(&head, around, width);
@@ -185,6 +249,34 @@ impl<R: AccessRules> Draw for Layout<R> {
             offset,
         )
         .map_err(|err| DrawException::CannotWrapAround(around.into(), err))
+    }
+
+    #[debug_ensures(ret.is_ok() -> self.drawing().node_count() == old(self.drawing().node_count() + 4))]
+    fn cane_around_bend_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: BendIndex,
+        sense: RotationSense,
+        width: f64,
+    ) -> Result<CaneHead, DrawException> {
+        let tangent = self
+            .drawing()
+            .guide_for_head_around_bend(&head, around, sense, width)?;
+        let offset = self
+            .drawing()
+            .offset_for_guide_for_head_around_bend(&head, around, width);
+
+        Ok(self.cane_around_trusted(
+            recorder,
+            head,
+            around.into(),
+            tangent.start_point(),
+            tangent.end_point(),
+            sense,
+            width,
+            offset,
+        ))
     }
 
     #[debug_ensures(ret.is_some() -> self.drawing().node_count() == old(self.drawing().node_count() - 4))]
@@ -203,6 +295,8 @@ impl<R: AccessRules> Draw for Layout<R> {
 trait DrawPrivate {
     type R;
 
+    /// Returns the created head and whether it had to be squeezed through
+    /// under bends.
     fn cane_around(
         &mut self,
         recorder: &mut LayoutEdit,
@@ -213,7 +307,21 @@ trait DrawPrivate {
         sense: RotationSense,
         width: f64,
         offset: f64,
-    ) -> Result<CaneHead, DrawingException>;
+    ) -> Result<(CaneHead, bool), DrawingException>;
+
+    /// Same as `.cane_around(..)`, but performs no checks. Must only be
+    /// used to replay draws verified earlier in the same state.
+    fn cane_around_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: GearIndex,
+        from: Point,
+        to: Point,
+        sense: RotationSense,
+        width: f64,
+        offset: f64,
+    ) -> CaneHead;
 
     fn extend_head<T, E: From<Infringement>>(
         &mut self,
@@ -223,6 +331,18 @@ trait DrawPrivate {
         then: impl FnOnce(&mut Self, &mut LayoutEdit) -> Result<T, E>,
     ) -> Result<T, E>;
 
+    /// Same as `.extend_head(..)`, but moves the head's face without
+    /// checking for infringements.
+    fn extend_head_trusted<T>(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        to: Point,
+        then: impl FnOnce(&mut Self, &mut LayoutEdit) -> T,
+    ) -> T;
+
+    /// Returns the created head and whether it had to be squeezed through
+    /// under bends.
     fn cane(
         &mut self,
         recorder: &mut LayoutEdit,
@@ -232,7 +352,19 @@ trait DrawPrivate {
         sense: RotationSense,
         width: f64,
         offset: f64,
-    ) -> Result<CaneHead, DrawingException>;
+    ) -> Result<(CaneHead, bool), DrawingException>;
+
+    /// Same as `.cane(..)`, but performs no checks and never squeezes.
+    fn cane_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: GearIndex,
+        to: Point,
+        sense: RotationSense,
+        width: f64,
+        offset: f64,
+    ) -> CaneHead;
 }
 
 impl<R: AccessRules> DrawPrivate for Layout<R> {
@@ -250,9 +382,26 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
         sense: RotationSense,
         width: f64,
         offset: f64,
-    ) -> Result<CaneHead, DrawingException> {
+    ) -> Result<(CaneHead, bool), DrawingException> {
         self.extend_head(recorder, head, from, |this, recorder| {
             this.cane(recorder, head, around, to, sense, width, offset)
+        })
+    }
+
+    #[debug_ensures(self.drawing().node_count() == old(self.drawing().node_count() + 4))]
+    fn cane_around_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: GearIndex,
+        from: Point,
+        to: Point,
+        sense: RotationSense,
+        width: f64,
+        offset: f64,
+    ) -> CaneHead {
+        self.extend_head_trusted(recorder, head, from, |this, recorder| {
+            this.cane_trusted(recorder, head, around, to, sense, width, offset)
         })
     }
 
@@ -275,6 +424,19 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
         }
     }
 
+    fn extend_head_trusted<T>(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        to: Point,
+        then: impl FnOnce(&mut Self, &mut LayoutEdit) -> T,
+    ) -> T {
+        if let Head::Cane(head) = head {
+            self.move_dot_infringably(recorder, head.face.into(), to);
+        }
+        then(self, recorder)
+    }
+
     #[debug_ensures(ret.is_ok() -> self.drawing().node_count() == old(self.drawing().node_count() + 4))]
     #[debug_ensures(ret.is_err() -> self.drawing().node_count() == old(self.drawing().node_count()))]
     fn cane(
@@ -286,7 +448,7 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
         sense: RotationSense,
         width: f64,
         offset: f64,
-    ) -> Result<CaneHead, DrawingException> {
+    ) -> Result<(CaneHead, bool), DrawingException> {
         let layer = head.face().primitive_ref(self.drawing()).layer();
         let maybe_net = head.face().primitive_ref(self.drawing()).maybe_net();
 
@@ -314,7 +476,7 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
         // These two operations differ simply: cane insertion squeezes through
         // under bends, cane addition does not.
 
-        let cane = if let Ok(cane) = self.add_cane(
+        let (cane, squeezed) = if let Ok(cane) = self.add_cane(
             recorder,
             head.face(),
             around,
@@ -323,25 +485,83 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
             bend_weight,
             sense,
         ) {
-            cane
+            (cane, false)
         } else {
-            self.insert_cane(
-                recorder,
-                head.face(),
-                around,
-                dot_weight,
-                seg_weight,
-                bend_weight,
-                sense,
-            )?
+            (
+                self.insert_cane(
+                    recorder,
+                    head.face(),
+                    around,
+                    dot_weight,
+                    seg_weight,
+                    bend_weight,
+                    sense,
+                )?,
+                true,
+            )
         };
 
-        Ok(CaneHead {
+        Ok((
+            CaneHead {
+                face: self
+                    .drawing()
+                    .primitive_ref(cane.bend)
+                    .other_joint(cane.dot),
+                cane,
+            },
+            squeezed,
+        ))
+    }
+
+    fn cane_trusted(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        head: Head,
+        around: GearIndex,
+        to: Point,
+        sense: RotationSense,
+        width: f64,
+        offset: f64,
+    ) -> CaneHead {
+        let layer = head.face().primitive_ref(self.drawing()).layer();
+        let maybe_net = head.face().primitive_ref(self.drawing()).maybe_net();
+
+        let dot_weight = LooseDotWeight(GeneralDotWeight {
+            circle: Circle {
+                pos: to,
+                r: width / 2.0,
+            },
+            layer,
+            maybe_net,
+        });
+        let seg_weight = SeqLooseSegWeight(GeneralSegWeight {
+            width,
+            layer,
+            maybe_net,
+        });
+        let bend_weight = LooseBendWeight(GeneralBendWeight {
+            width,
+            offset,
+            layer,
+            maybe_net,
+        });
+
+        let cane = self.add_cane_infringably(
+            recorder,
+            head.face(),
+            around,
+            dot_weight,
+            seg_weight,
+            bend_weight,
+            sense,
+        );
+
+        CaneHead {
             face: self
                 .drawing()
                 .primitive_ref(cane.bend)
                 .other_joint(cane.dot),
             cane,
-        })
+        }
     }
 }

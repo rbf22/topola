@@ -25,7 +25,7 @@ use crate::{
 };
 
 use super::{
-    invoker::GetDebugOverlayData, ratline::RatlineUid, Autorouter, AutorouterError,
+    invoker::GetDebugOverlayData, pad_entry, ratline::RatlineUid, Autorouter, AutorouterError,
     PlanarAutorouteOptions,
 };
 
@@ -33,6 +33,10 @@ use super::{
 pub struct PlanarAutorouteConfiguration {
     pub ratlines: Vec<RatlineUid>,
     pub terminating_dot_map: BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    /// Extra path cost for wrapping each primitive, accumulated from
+    /// recorded blockers (negotiated congestion). Inflating these
+    /// obstacles' costs makes retries prefer alternate corridors.
+    pub obstacle_penalties: BTreeMap<PrimitiveIndex, f64>,
 }
 
 impl PlanarAutorouteConfiguration {
@@ -108,15 +112,18 @@ impl PlanarAutorouteExecutionStepper {
         let (origin, destination) = configuration.ratline_terminating_dots(autorouter, 0);
         let mut router = Router::new(autorouter.board.layout_mut(), options.router);
 
+        let mut route = router.route(
+            LayoutEdit::new(),
+            origin,
+            destination,
+            options.router.routed_band_width,
+        )?;
+        route.set_obstacle_penalties(configuration.obstacle_penalties.clone());
+
         Ok(Self {
             configuration,
             curr_ratline_index: 0,
-            route: Some(router.route(
-                LayoutEdit::new(),
-                origin,
-                destination,
-                options.router.routed_band_width,
-            )?),
+            route: Some(route),
             layout_edits: vec![],
             board_data_edits: vec![],
             options,
@@ -154,12 +161,14 @@ impl PlanarAutorouteExecutionStepper {
             .ratline_terminating_dots(autorouter, self.curr_ratline_index);
         let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
 
-        self.route = Some(router.route(
+        let mut route = router.route(
             LayoutEdit::new(),
             origin,
             destination,
             self.options.router.routed_band_width,
-        )?);
+        )?;
+        route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
+        self.route = Some(route);
 
         Ok(())
     }
@@ -204,6 +213,21 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
 
         if self.curr_ratline_index >= self.configuration().ratlines.len() {
             self.dissolve_route_stepper_and_push_layout_edit();
+
+            if self.options.improve_pad_entry {
+                let mut layout_edit = LayoutEdit::new();
+                let mut board_data_edit = BoardDataEdit::new();
+                let stats = pad_entry::improve_pad_entries(
+                    autorouter,
+                    &mut layout_edit,
+                    &mut board_data_edit,
+                    self.options.principal_layer,
+                    self.options.pad_entry_min_angle,
+                );
+                log::debug!("pad-entry post-processing: {stats:?}");
+                self.layout_edits.push(layout_edit);
+                self.board_data_edits.push(board_data_edit);
+            }
 
             return Ok(ControlFlow::Break(Some(BoardEdit::new_from_edits(
                 BoardDataEdit::merge_iter(self.board_data_edits.iter().cloned()),

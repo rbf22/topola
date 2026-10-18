@@ -19,7 +19,6 @@ use topola::autorouter::PresortBy;
 use topola::board::edit::BoardEdit;
 use topola::board::AccessMesadata;
 use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef};
-use topola::drawing::rules::AccessRules;
 
 use topola::router::RouterOptions;
 use topola::specctra::design::SpecctraDesign;
@@ -30,6 +29,7 @@ pub mod suggest;
 use cli::Cli;
 
 fn main() -> Result<(), std::io::Error> {
+    env_logger::init();
     let args = Cli::parse();
     let design_file = File::open(&args.input)?;
     let design_bufread = BufReader::new(design_file);
@@ -78,6 +78,8 @@ fn main() -> Result<(), std::io::Error> {
                     principal_layer: 0,
                     presort_by: PresortBy::RatlineIntersectionCountAndLength,
                     permutate: true,
+                    reconfigure_by: Default::default(),
+                    congestion_penalty: 500.0,
                     router: RouterOptions {
                         wrap_around_bands: true,
                         squeeze_through_under_bends: false,
@@ -88,6 +90,8 @@ fn main() -> Result<(), std::io::Error> {
                         progress_bonus: 0.005,
                     },
                     max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
+                    improve_pad_entry: args.pad_entry,
+                    pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
                 },
             ),
             None,
@@ -204,17 +208,24 @@ fn main() -> Result<(), std::io::Error> {
     }
 
     if let Some(suggest_shifts_filename) = &args.suggest_shifts {
-        let drawing = invoker.autorouter().board().layout().drawing();
-        let channel_half_width = args
-            .channel_width
-            .unwrap_or_else(|| 100.0 / 2.0 + drawing.rules().largest_clearance(None));
         let file = File::create(suggest_shifts_filename)?;
-        suggest::write_suggestions(invoker.autorouter(), channel_half_width, file)?;
+        suggest::write_suggestions(
+            invoker.autorouter_mut(),
+            RouterOptions {
+                wrap_around_bands: true,
+                squeeze_through_under_bends: false,
+                routed_band_width: 100.0,
+            },
+            file,
+        )?;
         eprintln!(
             "[topola] wrote shift suggestions to {}",
             suggest_shifts_filename.display()
         );
     }
+
+    #[cfg(feature = "metrics")]
+    eprintln!("{}", topola::metrics::METRICS);
 
     let output_filename = args
         .output

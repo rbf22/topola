@@ -115,6 +115,10 @@ pub struct NavnodeWeight {
 pub enum NavmeshError {
     #[error("failed to insert vertex in navmesh")]
     Insertion(#[from] InsertionError),
+    #[error("route origin is not reachable in the navmesh")]
+    UnreachableOrigin,
+    #[error("route destination is not reachable in the navmesh")]
+    UnreachableDestination,
 }
 
 /// The navmesh holds the entire Topola's search space represented as a graph.
@@ -148,6 +152,8 @@ impl Navmesh {
         destination: FixedDotIndex,
         options: RouterOptions,
     ) -> Result<Self, NavmeshError> {
+        crate::metrics::incr(&crate::metrics::METRICS.navmesh_builds);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.navmesh_nanos);
         let prenavmesh = Prenavmesh::new(layout, origin, destination, options)?;
         Self::new_from_prenavmesh(layout, prenavmesh, origin, destination, options)
     }
@@ -317,12 +323,25 @@ impl Navmesh {
             }
         }
 
+        crate::metrics::add(
+            &crate::metrics::METRICS.navmesh_nodes_total,
+            graph.node_count(),
+        );
+        crate::metrics::add(
+            &crate::metrics::METRICS.navmesh_edges_total,
+            graph.edge_count(),
+        );
+
         Ok(Self {
             graph,
             origin,
-            origin_navnode: NavnodeIndex(origin_navnode.unwrap()),
+            origin_navnode: NavnodeIndex(
+                origin_navnode.ok_or(NavmeshError::UnreachableOrigin)?,
+            ),
             destination,
-            destination_navnode: NavnodeIndex(destination_navnode.unwrap()),
+            destination_navnode: NavnodeIndex(
+                destination_navnode.ok_or(NavmeshError::UnreachableDestination)?,
+            ),
             prenavmesh,
         })
     }

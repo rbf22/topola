@@ -12,14 +12,14 @@ use thiserror::Error;
 use crate::{
     drawing::{
         band::BandTermsegIndex,
-        bend::{BendIndex, BendWeight, LooseBendWeight},
+        bend::{BendIndex, BendWeight, LooseBendIndex, LooseBendWeight},
         dot::{
             DotIndex, DotWeight, FixedDotIndex, FixedDotWeight, GeneralDotWeight, LooseDotIndex,
             LooseDotWeight,
         },
         gear::GearIndex,
         graph::{GetMaybeNet, IsInLayer, MakePrimitiveRef, PrimitiveIndex, PrimitiveWeight},
-        primitive::{GetLimbs, MakePrimitiveShape},
+        primitive::MakePrimitiveShape,
         rules::AccessRules,
         seg::{
             FixedSegIndex, FixedSegWeight, LoneLooseSegIndex, LoneLooseSegWeight, SegIndex,
@@ -95,6 +95,10 @@ impl<R: AccessRules> Layout<R> {
         bend_weight: LooseBendWeight,
         sense: RotationSense,
     ) -> Result<Cane, DrawingException> {
+        // Don't infringe upon limbs of wraparound's filleteds. Collected
+        // once here instead of being recomputed for every evaluated
+        // candidate.
+        let exempt_limbs = self.drawing.overlapee_limbs(around.into());
         self.drawing.add_cane(
             recorder,
             from,
@@ -103,18 +107,7 @@ impl<R: AccessRules> Layout<R> {
             seg_weight,
             bend_weight,
             sense,
-            &|drawing, _infringer, infringee| {
-                // Don't infringe upon limbs of wraparound's filleteds.
-                !drawing
-                    .overlapees(around.into())
-                    .find(|overlapee| {
-                        PrimitiveIndex::from(overlapee.2)
-                            .primitive_ref(drawing)
-                            .limbs()
-                            .contains(&infringee)
-                    })
-                    .is_some()
-            },
+            &move |_, _infringer, infringee| !exempt_limbs.contains(&infringee),
         )
     }
 
@@ -137,6 +130,30 @@ impl<R: AccessRules> Layout<R> {
             bend_weight,
             sense,
             &|_drawing, _infringer, _infringee| true,
+        )
+    }
+
+    /// Adds a cane unconditionally, without performing any infringement or
+    /// collision checks. Used to replay draws that were already verified in
+    /// the same board and navcord state.
+    pub fn add_cane_infringably(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        from: DotIndex,
+        around: GearIndex,
+        dot_weight: LooseDotWeight,
+        seg_weight: SeqLooseSegWeight,
+        bend_weight: LooseBendWeight,
+        sense: RotationSense,
+    ) -> Cane {
+        self.drawing.add_cane_infringably(
+            recorder,
+            from,
+            around,
+            dot_weight,
+            seg_weight,
+            bend_weight,
+            sense,
         )
     }
 
@@ -283,6 +300,21 @@ impl<R: AccessRules> Layout<R> {
         to: Point,
     ) -> Result<(), Infringement> {
         self.drawing.move_dot(recorder, dot, to)
+    }
+
+    /// Moves a dot unconditionally, without checking for infringements.
+    pub fn move_dot_infringably(&mut self, recorder: &mut LayoutEdit, dot: DotIndex, to: Point) {
+        self.drawing.move_dot_infringably(recorder, dot, to)
+    }
+
+    /// Re-solves the bow on `around` and every bow wrapped around it
+    /// outward, e.g. after one of the bend's joints was moved.
+    pub fn update_this_and_outward_bows(
+        &mut self,
+        recorder: &mut LayoutEdit,
+        around: LooseBendIndex,
+    ) -> Result<(), DrawingException> {
+        self.drawing.update_this_and_outward_bows(recorder, around)
     }
 
     pub fn add_poly(

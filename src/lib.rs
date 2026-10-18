@@ -29,6 +29,7 @@ pub mod geometry;
 pub mod interactor;
 pub mod layout;
 pub mod math;
+pub mod metrics;
 pub mod router;
 pub mod scored;
 pub mod specctra;

@@ -44,11 +44,37 @@ pub enum PresortBy {
     PairwiseDetours,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ReconfigureBy {
+    /// Directed rip-up-and-reroute driven by recorded blocker history
+    /// (negotiated congestion), falling back to ordering permutations.
+    #[default]
+    NegotiatedCongestion,
+    /// Ordering permutations only.
+    SccPermutations,
+}
+
+fn default_congestion_penalty() -> f64 {
+    500.0
+}
+
+fn default_pad_entry_min_angle() -> f64 {
+    std::f64::consts::FRAC_PI_4
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct PlanarAutorouteOptions {
     pub principal_layer: usize,
     pub presort_by: PresortBy,
     pub permutate: bool,
+    /// How the reconfigurer chooses the next ratline ordering after a
+    /// routing failure.
+    #[serde(default)]
+    pub reconfigure_by: ReconfigureBy,
+    /// Cost penalty applied to paths wrapping a fixed obstacle, per
+    /// recorded block, in layout units.
+    #[serde(default = "default_congestion_penalty")]
+    pub congestion_penalty: f64,
     pub router: RouterOptions,
     pub timeout: TimeoutOptions,
     /// Maximum number of reconfigurations (e.g. ratline order
@@ -56,6 +82,17 @@ pub struct PlanarAutorouteOptions {
     /// been routed so far. `None` means no limit.
     #[serde(default)]
     pub max_reconfigurations: Option<usize>,
+    /// Runs pad-entry post-processing after routing finishes: band ends
+    /// crossing a polygonal pad's boundary below
+    /// [`PlanarAutorouteOptions::pad_entry_min_angle`] are swung to the
+    /// last cane's alternate tangent where possible.
+    #[serde(default)]
+    pub improve_pad_entry: bool,
+    /// Minimum angle, in radians, at which a trace may cross a
+    /// polygonal pad's boundary. Used only when
+    /// [`PlanarAutorouteOptions::improve_pad_entry`] is set.
+    #[serde(default = "default_pad_entry_min_angle")]
+    pub pad_entry_min_angle: f64,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -88,6 +125,10 @@ impl<M: AccessMesadata> Autorouter<M> {
     pub fn new(board: Board<M>) -> Result<Self, InsertionError> {
         let ratsnests = Ratsnests::new(&board)?;
         Ok(Self { board, ratsnests })
+    }
+
+    pub fn board_mut(&mut self) -> &mut Board<M> {
+        &mut self.board
     }
 
     pub fn pointroute(

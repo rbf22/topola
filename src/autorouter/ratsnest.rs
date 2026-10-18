@@ -232,6 +232,16 @@ impl Ratsnest {
             .band_termseg = Some(termseg);
     }
 
+    /// Replaces `old` with `new` in every ratline's recorded band
+    /// termseg, e.g. after a band end was redrawn.
+    pub fn rename_band_termseg(&mut self, old: BandTermsegIndex, new: BandTermsegIndex) {
+        for weight in self.graph.edge_weights_mut() {
+            if weight.band_termseg == Some(old) {
+                weight.band_termseg = Some(new);
+            }
+        }
+    }
+
     pub fn graph(&self) -> &StableUnGraph<RatvertexWeight, RatlineWeight, usize> {
         &self.graph
     }

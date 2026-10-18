@@ -338,6 +338,41 @@ impl<M: AccessMesadata> Board<M> {
         }
     }
 
+    /// Iterates the uids of all registered bands.
+    pub fn bands(&self) -> impl Iterator<Item = BandUid> + '_ {
+        self.bands_by_id.right_values().copied()
+    }
+
+    /// Rebinds the band registered between `source` and `target` to
+    /// `new_uid`, e.g. after one of its termsegs was redrawn. No-op when
+    /// no band is registered for the endpoint pair.
+    pub fn update_band_uid(
+        &mut self,
+        recorder: &mut BoardDataEdit,
+        source: FixedDotIndex,
+        target: FixedDotIndex,
+        new_uid: BandUid,
+    ) {
+        let ep = EtchedPath {
+            end_points: (source, target).into(),
+        };
+
+        let Some((_, old_uid)) = self.bands_by_id.remove_by_left(&ep) else {
+            return;
+        };
+        self.bands_by_id.insert(ep, new_uid);
+        recorder
+            .bands_by_id
+            .insert(ep, (Some(old_uid), Some(new_uid)));
+
+        if let Some((_, bandname)) = self.band_bandname.remove_by_left(&old_uid) {
+            self.band_bandname.insert(new_uid, bandname.clone());
+            recorder
+                .bands_by_name
+                .insert(bandname, (Some(old_uid), Some(new_uid)));
+        }
+    }
+
     /// Removes the band between the two nodes.
     pub fn remove_band_between_nodes(
         &mut self,

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::ops::ControlFlow;
+use std::{collections::BTreeMap, ops::ControlFlow};
 
 use derive_getters::Getters;
 use geo::algorithm::line_measures::{Distance, Euclidean};
@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
     draw::DrawException,
-    navcord::Navcord,
+    navcord::{GhostVerdict, Navcord, ProbeMemoEntry, ProbeVerdict},
     navcorder::{Navcorder, NavcorderException},
     navmesh::{Navmesh, NavmeshError, NavnodeIndex},
     route::RouteStepper,
@@ -45,6 +45,9 @@ pub struct RouterThetastarStrategy<'a, R> {
     pub destination: FixedDotIndex,
     pub probe_ghosts: Vec<PrimitiveShape>,
     pub probe_obstacles: Vec<PrimitiveIndex>,
+    /// Extra path costs charged for navigating to (wrapping) a navnode's
+    /// primitive (negotiated congestion).
+    pub obstacle_penalties: Option<&'a BTreeMap<PrimitiveIndex, f64>>,
 }
 
 impl<'a, R> RouterThetastarStrategy<'a, R> {
@@ -55,6 +58,7 @@ impl<'a, R> RouterThetastarStrategy<'a, R> {
             destination: target,
             probe_ghosts: vec![],
             probe_obstacles: vec![],
+            obstacle_penalties: None,
         }
     }
 }
@@ -68,6 +72,7 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         navnode: NavnodeIndex,
         tracker: &PathTracker<Navmesh>,
     ) -> Result<Option<BandTermsegIndex>, ()> {
+        crate::metrics::incr(&crate::metrics::METRICS.visit_navnode_calls);
         let new_path = tracker.reconstruct_path_to(navnode);
 
         if navnode == navmesh.destination_navnode() {
@@ -98,10 +103,131 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         maybe_initial_parent_navnode: Option<NavnodeIndex>,
         probed_navnode: NavnodeIndex,
     ) -> ControlFlow<Option<f64>> {
-        let result = self.navcord.step_to(self.layout, navmesh, probed_navnode);
+        crate::metrics::incr(&crate::metrics::METRICS.probes);
+
+        let memo_key = (
+            self.navcord.path.clone().into_boxed_slice(),
+            maybe_initial_parent_navnode,
+            probed_navnode,
+        );
+
+        if let Some(entry) = self.navcord.probe_memo.get(&memo_key) {
+            crate::metrics::incr(&crate::metrics::METRICS.probes_memoized);
+            self.probe_ghosts = entry.ghosts.clone();
+            self.probe_obstacles = entry.obstacles.clone();
+
+            return match entry.verdict {
+                ProbeVerdict::Drawn(length) => {
+                    // Replay the successful probe without drawing: the
+                    // navnode is pushed so that `.step_back(..)` undoes
+                    // this virtual step, exactly as it would undo a real
+                    // probe.
+                    self.navcord.path.push(probed_navnode);
+                    self.navcord.virtual_probe = true;
+                    ControlFlow::Break(Some(length))
+                }
+                ProbeVerdict::Backtrackable => ControlFlow::Continue(()),
+                ProbeVerdict::Terminal => ControlFlow::Break(None),
+            };
+        }
+
+        let ret = self.place_probe_to_navnode_intern(
+            navmesh,
+            maybe_initial_parent_navnode,
+            probed_navnode,
+        );
+        let verdict = match ret {
+            ControlFlow::Break(Some(length)) => {
+                crate::metrics::incr(&crate::metrics::METRICS.probes_los_ok);
+                ProbeVerdict::Drawn(length)
+            }
+            ControlFlow::Break(None) => {
+                crate::metrics::incr(&crate::metrics::METRICS.probes_failed);
+                ProbeVerdict::Terminal
+            }
+            ControlFlow::Continue(()) => {
+                crate::metrics::incr(&crate::metrics::METRICS.probes_backtracked);
+                ProbeVerdict::Backtrackable
+            }
+        };
+        self.navcord.probe_memo.insert(
+            memo_key,
+            ProbeMemoEntry {
+                verdict,
+                ghosts: self.probe_ghosts.clone(),
+                obstacles: self.probe_obstacles.clone(),
+            },
+        );
+        ret
+    }
+
+    fn remove_probe(&mut self, _navmesh: &Navmesh) {
+        self.navcord.step_back(self.layout);
+    }
+
+    fn estimate_cost_to_goal(&mut self, navmesh: &Navmesh, vertex: NavnodeIndex) -> f64 {
+        let start_point = PrimitiveIndex::from(navmesh.node_weight(vertex).unwrap().binavnode)
+            .primitive_ref(self.layout.drawing())
+            .shape()
+            .center();
+        let end_point = self
+            .layout
+            .drawing()
+            .primitive_ref(self.destination)
+            .shape()
+            .center();
+
+        Euclidean::distance(&end_point, &start_point)
+    }
+}
+
+impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
+    fn place_probe_to_navnode_intern(
+        &mut self,
+        navmesh: &Navmesh,
+        maybe_initial_parent_navnode: Option<NavnodeIndex>,
+        probed_navnode: NavnodeIndex,
+    ) -> ControlFlow<Option<f64>> {
+        // Probes are speculative steps that are always undone right after,
+        // so they are evaluated without drawing whenever possible. A
+        // `Drawn` ghost verdict is recorded in `.drawn_memo` so that a
+        // later real `.step_to(..)` for the same draw replays it without
+        // repeating checks.
+        let result = match self
+            .navcord
+            .ghost_step_to(self.layout, navmesh, probed_navnode)
+        {
+            GhostVerdict::Drawn(length) => {
+                crate::metrics::incr(&crate::metrics::METRICS.ghost_probes);
+                self.navcord
+                    .drawn_memo
+                    .entry(self.navcord.path.clone().into_boxed_slice())
+                    .or_default()
+                    .insert(probed_navnode, length);
+                self.navcord.path.push(probed_navnode);
+                self.navcord.virtual_probe = true;
+                Ok(length)
+            }
+            GhostVerdict::Failed(err) => Err(err),
+            GhostVerdict::Unsupported => {
+                self.navcord.step_to(self.layout, navmesh, probed_navnode)
+            }
+        };
 
         ControlFlow::Break(match result {
-            Ok(probe_length) => Some(probe_length),
+            Ok(probe_length) => Some(
+                probe_length
+                    + self
+                        .obstacle_penalties
+                        .and_then(|penalties| {
+                            penalties
+                                .get(&PrimitiveIndex::from(
+                                    navmesh.node_weight(probed_navnode).unwrap().binavnode,
+                                ))
+                                .copied()
+                        })
+                        .unwrap_or(0.0),
+            ),
             Err(err) => {
                 if let NavcorderException::CannotDraw(draw_err) = err {
                     let layout_err = match draw_err {
@@ -176,25 +302,6 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
                 None
             }
         })
-    }
-
-    fn remove_probe(&mut self, _navmesh: &Navmesh) {
-        self.navcord.step_back(self.layout);
-    }
-
-    fn estimate_cost_to_goal(&mut self, navmesh: &Navmesh, vertex: NavnodeIndex) -> f64 {
-        let start_point = PrimitiveIndex::from(navmesh.node_weight(vertex).unwrap().binavnode)
-            .primitive_ref(self.layout.drawing())
-            .shape()
-            .center();
-        let end_point = self
-            .layout
-            .drawing()
-            .primitive_ref(self.destination)
-            .shape()
-            .center();
-
-        Euclidean::distance(&end_point, &start_point)
     }
 }
 

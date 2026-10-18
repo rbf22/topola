@@ -107,6 +107,7 @@ impl PreconfigurePlanarAutoroute for SccIntersectionsAndLengthRatlinePlanarAutor
         PlanarAutorouteConfiguration {
             ratlines: presorted_ratlines,
             terminating_dot_map: input.terminating_dot_map,
+            obstacle_penalties: BTreeMap::new(),
         }
     }
 }

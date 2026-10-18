@@ -133,6 +133,12 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
         }
     }
 
+    /// Returns a mutable reference to the autorouter, for commands run
+    /// outside the stepper machinery such as channel probes.
+    pub fn autorouter_mut(&mut self) -> &mut Autorouter<M> {
+        &mut self.autorouter
+    }
+
     //#[debug_requires(self.ongoing_command.is_none())]
     /// Executes a command, managing the command status and history.
     ///

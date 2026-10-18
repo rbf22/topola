@@ -51,6 +51,7 @@ where
     }
 
     pub fn reconstruct_path_to(&self, last: G::NodeId) -> Vec<G::NodeId> {
+        crate::metrics::incr(&crate::metrics::METRICS.path_reconstructions);
         let mut path = vec![last];
 
         let mut current = last;
@@ -236,6 +237,8 @@ where
                     return Err(ThetastarError::NotFound);
                 };
 
+                crate::metrics::incr(&crate::metrics::METRICS.frontier_pops);
+
                 if let Ok(maybe_result) =
                     strategy.visit_navnode(&self.graph, navnode, &self.path_tracker)
                 {
@@ -251,6 +254,9 @@ where
                             // If the node has already been visited with an equal or lower
                             // estimated score than now, then we do not need to re-visit it.
                             if *entry.get() <= estimate_score {
+                                crate::metrics::incr(
+                                    &crate::metrics::METRICS.stale_frontier_pops,
+                                );
                                 return Ok(ControlFlow::Continue(self.state));
                             }
                             entry.insert(estimate_score);

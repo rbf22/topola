@@ -177,6 +177,8 @@ impl Prenavmesh {
         destination: FixedDotIndex,
         _options: RouterOptions,
     ) -> Result<Self, NavmeshError> {
+        crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_builds);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.prenavmesh_nanos);
         let mut this = Self {
             triangulation: Triangulation::new(PrenavnodeToHandleMap::new(
                 layout.drawing().geometry().dot_index_bound(),
