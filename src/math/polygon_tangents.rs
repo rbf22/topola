@@ -130,7 +130,7 @@ impl<I: Copy> CachedPolyExt<I> {
             // the following is necessary to find the "furthest" tangent points
             let same_direction = |pos: usize, vec: Point| {
                 let vec_cur = origin - poly_ext[pos].0;
-                approx::abs_diff_eq!(0., dot_product(vec_cur, vec))
+                crate::math::abs_diff_eq(0., dot_product(vec_cur, vec))
             };
             let mut pos_false = rev_pos_true;
             let vec_false = origin - poly_ext[pos_false].0;

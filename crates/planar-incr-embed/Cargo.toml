@@ -14,7 +14,6 @@ serde = ["dep:serde", "spade/serde"]
 [dependencies]
 log.workspace = true
 num-traits = "0.2"
-peeking_take_while = "1.0"
 spade.workspace = true
 
 [dependencies.serde]

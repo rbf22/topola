@@ -280,3 +280,44 @@ Biggest win but largest design change — needs Phase A numbers to justify.
 7. **F** — parallel probes/ordering search (needs `Send` boundaries;
    check after C/D change the shape of the hot loop).
 8. **G** — probe-data-driven ordering (compounds with everything above).
+
+---
+
+## Dependency reduction (completed)
+
+`cargo machete` reported no unused direct dependencies, so reduction
+required replacing functionality. Removed from the shipped dependency
+set (workspace tree: 171 → 158 unique crates):
+
+- **`peeking_take_while`** — single call in
+  `crates/planar-incr-embed/src/utils.rs` replaced by a std `Peekable`
+  loop in `rotate_iter`.
+- **`ron`** (lib) — the topo-navmesh debug dump in
+  `src/autorouter/execution.rs` now uses `serde_json::to_string_pretty`
+  (already a workspace dep). `ron` remains only as a
+  `planar-incr-embed` dev-dep for insta snapshots.
+- **`clap_mangen` + `build.rs`** — deleted; it generated a man page into
+  a gitignored `man/` directory that is not shipped anywhere.
+- **`env_logger`** — replaced by `crates/topola-cli/src/logger.rs`, a
+  ~70-line `log::Log` impl honoring `RUST_LOG` (global level,
+  `module=level` directives, longest-prefix wins; default `warn`).
+  Drops anstream/env_filter/jiff transitives.
+- **`itertools`** — `circular_tuple_windows` in `specctra/design.rs`
+  replaced by index arithmetic; `Permutations` in
+  `planar_reconfigurer.rs` replaced by a local cloneable
+  `SccPermutations` iterator (lexicographic `next_permutation` over
+  index vectors; only k=0 and k=n cases were used). Drops `either`.
+- **`approx`** — moved to dev-deps; the 4 real-code call sites use new
+  `math::abs_diff_eq`/`math::relative_eq` helpers matching the
+  crate-default epsilon semantics. Tests keep the `approx` macros.
+
+Retained with rationale: `num-traits` (deep generic bounds throughout
+planar-incr-embed — replacing means concretizing to f64), `bimap`
+(substantial bidirectional-map usage), `derive-getters`/`enum_dispatch`/
+`contracts-try` (macro-driven, many sites), `petgraph`/`spade`/`geo`/
+`rstar`/`serde`/`thiserror` (foundational), `clap` (CLI core), all
+dev-only test crates (`proptest`/`rstest`/`rstest_reuse`/`insta`).
+
+Caveat: `cargo fmt --check` reports pre-existing diffs in files
+untouched by this work — the tree was not fmt-clean before; only
+touched files were normalized.

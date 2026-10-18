@@ -19,6 +19,7 @@ metrics = ["topola/metrics"]
 
 [dependencies]
 geo.workspace = true
+log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
@@ -30,12 +31,3 @@ default-features = false
 version = "4.5"
 features = ["derive"]
 
-[dependencies.env_logger]
-version = "0.11"
-
-[build-dependencies]
-clap_mangen = "0.2"
-
-[build-dependencies.clap]
-version = "4.5"
-features = ["derive"]

@@ -9,7 +9,7 @@
 use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap, BTreeSet};
 
 use geo::{Euclidean, Length, Line, Point, Rotate};
-use itertools::Itertools;
+
 use specctra_core::math::PointWithRotation;
 
 use crate::{
@@ -733,8 +733,8 @@ impl SpecctraDesign {
         nodes.push(first_index.into());
         let mut prev_index = first_index;
 
-        if approx::abs_diff_eq!(coords[0].x, coords.last().unwrap().x)
-            && approx::abs_diff_eq!(coords[0].y, coords.last().unwrap().y)
+        if crate::math::abs_diff_eq(coords[0].x, coords.last().unwrap().x)
+            && crate::math::abs_diff_eq(coords[0].y, coords.last().unwrap().y)
         {
             coords = &coords[..coords.len() - 1];
         }
@@ -822,11 +822,14 @@ impl SpecctraDesign {
             maybe_first_chain_segment = Some((Line::new(last_pos, first_pos), 0));
         }
 
-        for (index, coord_triple) in coords
-            .iter()
-            .circular_tuple_windows::<(_, _, _)>()
-            .enumerate()
-        {
+        // Circular triples of consecutive coords; nothing is emitted when
+        // fewer than three coords exist.
+        for index in 0..if coords.len() >= 3 { coords.len() } else { 0 } {
+            let coord_triple = (
+                &coords[index],
+                &coords[(index + 1) % coords.len()],
+                &coords[(index + 2) % coords.len()],
+            );
             let curr_pos0 = Self::pos(place, pin, coord_triple.0.x, coord_triple.0.y, flip);
             let curr_pos1 = Self::pos(place, pin, coord_triple.1.x, coord_triple.1.y, flip);
             let curr_pos2 = Self::pos(place, pin, coord_triple.2.x, coord_triple.2.y, flip);

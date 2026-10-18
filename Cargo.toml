@@ -48,18 +48,16 @@ disable_contracts = ["contracts-try/disable_contracts"]
 metrics = []
 
 [dependencies]
-approx = "0.5"
 bimap.workspace = true
 contracts-try = "0.7"
 derive-getters.workspace = true
 enum_dispatch = "0.3"
 geo.workspace = true
-itertools = "0.14"
 log.workspace = true
 petgraph.workspace = true
-ron = "0.10"
 rstar.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 spade.workspace = true
 thiserror.workspace = true
 
@@ -71,6 +69,7 @@ features = ["serde"]
 path = "crates/specctra-core"
 
 [dev-dependencies]
+approx = "0.5"
 serde_json.workspace = true
 proptest = "1.6"
 rstest = "0.26.1"

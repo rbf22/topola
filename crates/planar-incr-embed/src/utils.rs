@@ -26,14 +26,14 @@ where
     Iter: Clone + Iterator<Item = Item>,
     F: Clone + Fn(&Item) -> bool,
 {
-    use peeking_take_while::PeekableExt;
     let not_is_start = move |i: &Item| !is_start(i);
 
     let mut it_first = iter.clone().peekable();
-    let start_idx = it_first
-        .by_ref()
-        .peeking_take_while(not_is_start.clone())
-        .count();
+    let mut start_idx = 0;
+    while it_first.peek().is_some_and(|item| not_is_start(item)) {
+        it_first.next();
+        start_idx += 1;
+    }
 
     (start_idx, it_first.chain(iter.take_while(not_is_start)))
 }

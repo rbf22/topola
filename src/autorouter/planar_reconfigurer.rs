@@ -5,12 +5,10 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    iter::{Skip, Take},
 };
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
-use itertools::{Itertools, Permutations};
 use petgraph::visit::Walker;
 use specctra_core::mesadata::AccessMesadata;
 
@@ -114,7 +112,7 @@ impl PlanarAutorouteReconfigurer {
 struct SccSearchNode {
     permutation: Vec<Scc>,
     #[getter(skip)]
-    permutations_iter: Skip<Permutations<Take<std::vec::IntoIter<Scc>>>>,
+    permutations_iter: SccPermutations,
     #[getter(skip)]
     length: usize,
 }
@@ -143,11 +141,9 @@ impl PartialEq for SccSearchNode {
 
 impl SccSearchNode {
     pub fn new(sccs: Vec<Scc>) -> Self {
-        let len = sccs.len();
-
         Self {
             permutation: sccs.clone(),
-            permutations_iter: sccs.into_iter().take(len).permutations(0).skip(0),
+            permutations_iter: SccPermutations::new(sccs, 0, 0),
             length: 0,
         }
     }
@@ -183,12 +179,11 @@ impl SccSearchNode {
 
         Some(Self {
             permutation: self.permutation.clone(),
-            permutations_iter: self
-                .permutation
-                .into_iter()
-                .take(length)
-                .permutations(length)
-                .skip(1),
+            permutations_iter: SccPermutations::new(
+                self.permutation.into_iter().take(length).collect(),
+                length,
+                1,
+            ),
             length,
         })
     }
@@ -205,6 +200,64 @@ impl SccSearchNode {
 
         Some((self, changed_count))
     }
+}
+
+/// Cloneable iterator over permutations of a vector of `Scc`s, yielding
+/// owned vectors in lexicographic index order. Only the `k == 0` case (a
+/// single empty permutation) and the `k == elements.len()` case (full
+/// permutations) are supported, matching this module's usage; replaces
+/// `itertools`' `permutations(k)`.
+#[derive(Clone, Debug)]
+struct SccPermutations {
+    elements: Vec<Scc>,
+    indices: Option<Vec<usize>>,
+    emit_current: bool,
+}
+
+impl SccPermutations {
+    fn new(elements: Vec<Scc>, k: usize, skip_first: usize) -> Self {
+        assert!(k == 0 || k == elements.len());
+        let mut this = Self {
+            indices: Some((0..k).collect()),
+            elements,
+            emit_current: true,
+        };
+        for _ in 0..skip_first {
+            this.next();
+        }
+        this
+    }
+}
+
+impl Iterator for SccPermutations {
+    type Item = Vec<Scc>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let indices = self.indices.as_mut()?;
+        if !self.emit_current && !next_permutation(indices) {
+            self.indices = None;
+            return None;
+        }
+        self.emit_current = false;
+        Some(indices.iter().map(|&i| self.elements[i].clone()).collect())
+    }
+}
+
+/// Advances `indices` (a permutation of distinct values) to the next
+/// lexicographically greater ordering. Returns `false` when exhausted.
+fn next_permutation(indices: &mut [usize]) -> bool {
+    let Some(i) = indices.windows(2).rposition(|w| w[0] < w[1]) else {
+        return false;
+    };
+    let j = i
+        + 1
+        + indices[i + 1..]
+            .iter()
+            .rposition(|&x| x > indices[i])
+            .unwrap();
+    indices.swap(i, j);
+    indices[i + 1..].reverse();
+    true
 }
 
 pub struct SccPermutationsPlanarAutorouteReconfigurer {
@@ -392,8 +445,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         // clinching bend — a probe can die on `NoBitangents` or far
         // from the pad — so the endpoints' outward wrap chains are
         // checked directly.
-        let mut obstacles: BTreeSet<PrimitiveIndex> =
-            stepper.obstacles().iter().copied().collect();
+        let mut obstacles: BTreeSet<PrimitiveIndex> = stepper.obstacles().iter().copied().collect();
 
         let (origin, destination) = failed.ref_(autorouter).endpoint_dots();
 
@@ -499,8 +551,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             }
 
             let constraint = (failed_scc, blocker_scc);
-            if !self.dead_precedence.contains(&constraint)
-                && !self.precedence.contains(&constraint)
+            if !self.dead_precedence.contains(&constraint) && !self.precedence.contains(&constraint)
             {
                 self.precedence.push(constraint);
             }
@@ -579,8 +630,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                 .precedence
                 .iter()
                 .rposition(|(earlier, later)| {
-                    order.iter().position(|s| s == earlier)
-                        > order.iter().position(|s| s == later)
+                    order.iter().position(|s| s == earlier) > order.iter().position(|s| s == later)
                 })
                 .map(|index| self.precedence.remove(index))
             {
@@ -625,9 +675,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
                         | PrimitiveIndex::FixedBend(_)
                 )
             })
-            .map(|(primitive, count)| {
-                (*primitive, *count as f64 * self.options.congestion_penalty)
-            })
+            .map(|(primitive, count)| (*primitive, *count as f64 * self.options.congestion_penalty))
             .collect()
     }
 }
@@ -673,8 +721,7 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
         if let Some(order) = self.constrained_order(&self.base_scc_order(autorouter, stepper)) {
             let ratlines = self.ratlines_in_scc_order(autorouter, &order);
 
-            if ratlines != stepper.configuration().ratlines
-                && self.emitted.insert(ratlines.clone())
+            if ratlines != stepper.configuration().ratlines && self.emitted.insert(ratlines.clone())
             {
                 return Some(PlanarAutorouteConfiguration {
                     ratlines,

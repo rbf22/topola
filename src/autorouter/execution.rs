@@ -93,14 +93,11 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
                         }
 
                         let topo_navmesh = autoroute.maybe_topo_navmesh().unwrap().to_owned();
-                        let mut pretty_config = ron::ser::PrettyConfig::new();
-                        pretty_config.depth_limit = 2;
                         log::debug!(
                             "topo navmesh result: {}",
-                            ron::ser::to_string_pretty(
-                                &ng::pie::navmesh::NavmeshSer::from(topo_navmesh),
-                                pretty_config
-                            )
+                            serde_json::to_string_pretty(&ng::pie::navmesh::NavmeshSer::from(
+                                topo_navmesh
+                            ))
                             .unwrap()
                         );
 

@@ -11,19 +11,19 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use topola::autorouter::anterouter::AnterouterOptions;
 use topola::autorouter::execution::Command;
 use topola::autorouter::history::History;
 use topola::autorouter::invoker::Invoker;
+use topola::autorouter::multilayer_autoroute::MultilayerAutorouteOptions;
 use topola::autorouter::ratline::RatlineUid;
 use topola::autorouter::selection::PinSelection;
-use topola::board::Board;
-use topola::autorouter::anterouter::AnterouterOptions;
-use topola::autorouter::multilayer_autoroute::MultilayerAutorouteOptions;
 use topola::autorouter::Autorouter;
 use topola::autorouter::PlanarAutorouteOptions;
 use topola::autorouter::PresortBy;
 use topola::board::edit::BoardEdit;
 use topola::board::AccessMesadata;
+use topola::board::Board;
 use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef};
 
 use topola::router::RouterOptions;
@@ -32,6 +32,7 @@ use topola::specctra::mesadata::SpecctraMesadata;
 use topola::stepper::{EstimateProgress, Step, TimeoutOptions};
 
 pub mod cli;
+pub mod logger;
 pub mod suggest;
 use cli::Cli;
 use serde::Deserialize;
@@ -77,7 +78,7 @@ fn apply_shift_report(
 }
 
 fn main() -> Result<(), std::io::Error> {
-    env_logger::init();
+    logger::init();
     let args = Cli::parse();
     let design_file = File::open(&args.input)?;
     let design_bufread = BufReader::new(design_file);
@@ -110,44 +111,44 @@ fn main() -> Result<(), std::io::Error> {
 
         let (done, undone) = history.dissolve();
         for entry in done {
-        let mut last_report = Instant::now();
-        let start = Instant::now();
-        let status = invoker.execute_with_timeout(
-            entry.command().clone(),
-            args.max_seconds.map(Duration::from_secs_f64),
-            |execute| {
-                if last_report.elapsed() >= Duration::from_secs(2) {
-                    let progress = execute.estimate_progress();
-                    let value = *progress.value();
-                    let maximum = *progress.maximum();
-                    let pct = if maximum > 0 {
-                        100.0 * value as f64 / maximum as f64
-                    } else {
-                        0.0
-                    };
-                    eprintln!(
-                        "[topola] {} elapsed, routed {}/{} ({:.1}%)",
-                        humantime(start.elapsed()),
-                        value,
-                        maximum,
-                        pct
-                    );
-                    let _ = std::io::stderr().flush();
-                    last_report = Instant::now();
-                }
-            },
-        );
-        match status {
-            Ok(true) => eprintln!(
-                "[topola] timed out after {}, keeping routed bands",
-                humantime(start.elapsed())
-            ),
-            Ok(false) => eprintln!(
-                "[topola] command finished in {}",
-                humantime(start.elapsed())
-            ),
-            Err(err) => eprintln!("[topola] command failed: {:?}", err),
-        }
+            let mut last_report = Instant::now();
+            let start = Instant::now();
+            let status = invoker.execute_with_timeout(
+                entry.command().clone(),
+                args.max_seconds.map(Duration::from_secs_f64),
+                |execute| {
+                    if last_report.elapsed() >= Duration::from_secs(2) {
+                        let progress = execute.estimate_progress();
+                        let value = *progress.value();
+                        let maximum = *progress.maximum();
+                        let pct = if maximum > 0 {
+                            100.0 * value as f64 / maximum as f64
+                        } else {
+                            0.0
+                        };
+                        eprintln!(
+                            "[topola] {} elapsed, routed {}/{} ({:.1}%)",
+                            humantime(start.elapsed()),
+                            value,
+                            maximum,
+                            pct
+                        );
+                        let _ = std::io::stderr().flush();
+                        last_report = Instant::now();
+                    }
+                },
+            );
+            match status {
+                Ok(true) => eprintln!(
+                    "[topola] timed out after {}, keeping routed bands",
+                    humantime(start.elapsed())
+                ),
+                Ok(false) => eprintln!(
+                    "[topola] command finished in {}",
+                    humantime(start.elapsed())
+                ),
+                Err(err) => eprintln!("[topola] command failed: {:?}", err),
+            }
         }
         let _ = undone; // replay drops undone history entries
         invoker
@@ -490,7 +491,10 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
     }
 
     best.map(|(_, invoker)| invoker).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "all parallel routing jobs failed")
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "all parallel routing jobs failed",
+        )
     })
 }
 

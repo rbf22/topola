@@ -649,8 +649,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         around: LooseBendIndex,
     ) -> Result<(), DrawingException> {
         crate::metrics::incr(&crate::metrics::METRICS.bow_updates);
-        let _timer =
-            crate::metrics::Timer::start(&crate::metrics::METRICS.bow_update_nanos);
+        let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.bow_update_nanos);
         self.update_bow(recorder, around)?;
 
         let mut outwards = self.primitive_ref(around).outwards();
@@ -781,11 +780,12 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             })?;
 
         #[cfg(debug_assertions)]
-        use crate::{
-            drawing::primitive::MakePrimitiveShape, geometry::shape::MeasureLength,
-        };
+        use crate::{drawing::primitive::MakePrimitiveShape, geometry::shape::MeasureLength};
         #[cfg(debug_assertions)]
-        approx::assert_abs_diff_eq!(bend.primitive_ref(self).shape().length(), 0.0);
+        assert!(crate::math::abs_diff_eq(
+            bend.primitive_ref(self).shape().length(),
+            0.0
+        ));
 
         Ok(Cane {
             seg,
@@ -837,9 +837,13 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         weight: LooseBendWeight,
     ) -> LooseBendIndex {
         match around {
-            GearIndex::FixedDot(core) => self
-                .recording_geometry_with_rtree
-                .add_bend(recorder, from.into(), to.into(), core.into(), weight),
+            GearIndex::FixedDot(core) => self.recording_geometry_with_rtree.add_bend(
+                recorder,
+                from.into(),
+                to.into(),
+                core.into(),
+                weight,
+            ),
             GearIndex::FixedBend(inner) => {
                 self.add_outer_bend_infringably(recorder, from, to, inner.into(), weight)
             }
@@ -875,7 +879,12 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
 
     /// Moves a dot unconditionally, without checking for infringements.
     #[debug_ensures(self.recording_geometry_with_rtree.node_count() == old(self.recording_geometry_with_rtree.node_count()))]
-    pub fn move_dot_infringably(&mut self, recorder: &mut DrawingEdit<CW, Cel>, dot: DotIndex, to: Point) {
+    pub fn move_dot_infringably(
+        &mut self,
+        recorder: &mut DrawingEdit<CW, Cel>,
+        dot: DotIndex,
+        to: Point,
+    ) {
         self.recording_geometry_with_rtree
             .move_dot(recorder, dot, to);
     }
@@ -1002,10 +1011,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
     /// — the only shapes that follow a translation — and `None` when
     /// the compound cannot be shifted (e.g. it has a member bend,
     /// whose inner circle would not move with its joints).
-    pub fn shiftable_member_dots(
-        &self,
-        compound: GenericIndex<CW>,
-    ) -> Option<Vec<FixedDotIndex>> {
+    pub fn shiftable_member_dots(&self, compound: GenericIndex<CW>) -> Option<Vec<FixedDotIndex>> {
         let mut member_dots = vec![];
 
         for (_label, node) in self.geometry().compound_members(compound) {

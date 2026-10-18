@@ -95,6 +95,21 @@ pub fn dot_product(v1: Point, v2: Point) -> f64 {
     v1.x() * v2.x() + v1.y() * v2.y()
 }
 
+/// `approx::abs_diff_eq!` with the crate-default epsilon (`f64::EPSILON`).
+pub(crate) fn abs_diff_eq(lhs: f64, rhs: f64) -> bool {
+    (lhs - rhs).abs() <= f64::EPSILON
+}
+
+/// `approx::relative_eq!` with the crate-default epsilon and max-relative
+/// (`f64::EPSILON` for both).
+pub(crate) fn relative_eq(lhs: f64, rhs: f64) -> bool {
+    if lhs == rhs {
+        return true;
+    }
+    let diff = (lhs - rhs).abs();
+    diff <= f64::EPSILON || diff <= f64::EPSILON * lhs.abs().max(rhs.abs())
+}
+
 /// Calculates the perp dot product of vectors `v1` and `v2`.
 ///
 /// This is defined as the dot product of `v1` rotated counterclockwise by 90
@@ -107,7 +122,7 @@ pub fn dot_product(v1: Point, v2: Point) -> f64 {
 /// the plane anyway.
 pub fn perp_dot_product(v1: Point, v2: Point) -> f64 {
     // catch numerical rounding errors
-    if approx::relative_eq!(v1.x(), v2.x()) && approx::relative_eq!(v1.y(), v2.y()) {
+    if relative_eq(v1.x(), v2.x()) && relative_eq(v1.y(), v2.y()) {
         return 0.0;
     }
 
