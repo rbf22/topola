@@ -51,6 +51,28 @@ Key findings:
 | B3+ | constrained-base LRU keyed by exact `ConstraintKey` set + whole-navmesh cache validated by exact loose-prim snapshot | ~0.5s | 4x4: bases 12x, constrained 24x (hits 94, deltas 180x), navmesh hit 1x |
 | C2 | `path_scratch` for `reconstruct_path_into`; nested memos — no per-call path clone | — | removes ~100K Vec allocs per 4x4 run |
 | F2 | `--jobs N`: N threads each load the dsn, route with a different `shuffle_seed`, best invoker kept | — | first full completion flags siblings to finish early |
+| C1 | index-addressed thetastar maps (scores/est/predecessors = Vec<Option<T>> via GetIndex); compound-compare without Vec collects | ~0.5s | same search behavior (pops 3941, visits 100745) |
+| F2b | `layer_seed` on `MultilayerAutorouteOptions` — parallel workers get pseudo-random initial layer assignments, fanout failures fall back to preferred layer | — | seed 7 routes astable_multivibrator 16/16 |
+
+candE.dsn is a **4-layer board** (F.Cu, In1.Cu, In2.Cu, B.Cu): all
+earlier runs were single-layer, where ~26/107 is a hard ceiling, not
+an ordering failure. With `--multilayer --surgical-ripup` the peak
+rises to ~38/107 but still oscillates and does not converge within
+600s — the outer search rotates the first-failing ratline's layer per
+inner attempt (A* over layer assignments), and the inner negotiated-
+congestion search keeps permuting. Convergence on candE remains open;
+`--jobs N --multilayer` now gives N different layer assignments per
+wall-clock budget.
+
+Known latent bug: a nondeterministic `unreachable!()` panic at
+`geometry.rs:155` (`primitive_weight` dereferences an index that now
+holds a `Compound` node — primitives and compounds share the
+StableDiGraph index space, so any index held across a via swap can be
+recycled). Seen once on astable_multivibrator at 13/16 after ~3.5 min;
+re-runs pass. Reconfiguration timing is wall-clock driven, so the
+suite's passing run is luck, not proof. Candidates: indices persisted
+in `anteroute_edits`/`terminating_dot_map`/`obstacles` across
+re-layering.
 
 candE.dsn after C8–B2' (300s cap): construction 197s (~66%),
 step_to evals 72.9s, rework 2.7s, draw machinery ~0 — profile is now

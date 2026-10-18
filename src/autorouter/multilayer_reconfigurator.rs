@@ -54,7 +54,8 @@ impl MultilayerAutorouteReconfigurator {
         input: MultilayerAutoroutePreconfigurerInput,
         options: MultilayerAutorouteOptions,
     ) -> Result<Self, AutorouterError> {
-        let preconfigurer = MultilayerPreconfigurer::new(autorouter, input.clone());
+        let preconfigurer =
+            MultilayerPreconfigurer::new_seeded(autorouter, input.clone(), options.layer_seed);
 
         let preconfiguration = MultilayerAutorouteConfiguration {
             plan: preconfigurer.plan().clone(),

@@ -53,6 +53,13 @@ pub struct MultilayerAutorouteOptions {
     pub anterouter: AnterouterOptions,
     pub planar: PlanarAutorouteOptions,
     pub timeout: TimeoutOptions,
+    /// Seed for perturbing the initial layer assignment: when nonzero,
+    /// each ratline starts on a deterministic pseudo-random layer
+    /// instead of its preferred layer, falling back to the preferred
+    /// layer when fanout placement fails. Parallel workers pass
+    /// different seeds to explore different layer assignments.
+    #[serde(default)]
+    pub layer_seed: u64,
 }
 
 #[derive(Getters)]
@@ -87,7 +94,7 @@ impl MultilayerAutorouteExecutionStepper {
 
         for (ratline, layer) in configuration.plan.layer_map.clone() {
             let mut ratline_edit = BoardEdit::new();
-            anterouter
+            if anterouter
                 .anteroute_ratline(
                     autorouter,
                     &mut ratline_edit,
@@ -96,7 +103,26 @@ impl MultilayerAutorouteExecutionStepper {
                     &options.anterouter,
                     &mut terminating_dot_map,
                 )
-                .expect("fanout via placement failed");
+                .is_err()
+            {
+                // Seeded layer assignments may ask for a layer the
+                // pads cannot reach. Reverse any partial placement and
+                // fall back to the preferred layer.
+                autorouter.board.apply_edit(&ratline_edit.reverse());
+                anteroute_edit.merge(ratline_edit.clone());
+                anteroute_edit.merge(ratline_edit.reverse());
+                ratline_edit = BoardEdit::new();
+                anterouter
+                    .anteroute_ratline(
+                        autorouter,
+                        &mut ratline_edit,
+                        ratline,
+                        ratline.ref_(autorouter).preferred_layer(),
+                        &options.anterouter,
+                        &mut terminating_dot_map,
+                    )
+                    .expect("fanout via placement failed");
+            }
             anteroute_edit.merge(ratline_edit.clone());
             anteroute_edits.insert(ratline, ratline_edit);
         }

@@ -383,11 +383,18 @@ impl Prenavmesh {
                     PrimitiveIndex::FixedSeg(_) => 2,
                     _ => return None,
                 };
-                let pos = node
-                    .primitive_ref(layout.drawing())
-                    .shape()
-                    .center();
-                Some((tag, node.index(), pos.x().to_bits(), pos.y().to_bits()))
+                let primitive = node.primitive_ref(layout.drawing());
+                let pos = primitive.shape().center();
+                // The net is part of the identity: a via swapped for
+                // another net's via at the same index and position is a
+                // different primitive as the navmesh sees it.
+                Some((
+                    tag,
+                    node.index(),
+                    pos.x().to_bits(),
+                    pos.y().to_bits(),
+                    primitive.maybe_net(),
+                ))
             })
             // Order-independent fold: the rtree yields nodes in
             // traversal order, which shifts as loose primitives come

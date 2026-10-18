@@ -322,6 +322,7 @@ fn make_command(
                     initial: 5.0,
                     progress_bonus: 0.5,
                 },
+                layer_seed: 0,
             },
         )
     } else {
@@ -403,6 +404,7 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                                 initial: 5.0,
                                 progress_bonus: 0.5,
                             },
+                            layer_seed: i as u64,
                         },
                     )
                 } else {

@@ -22,6 +22,14 @@ pub struct MultilayerAutoroutePreconfigurerInput {
     pub ratlines: BTreeSet<RatlineUid>,
 }
 
+/// splitmix64 finalizer — deterministic, cheap, well-distributed.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
+}
+
 #[derive(Getters)]
 pub struct MultilayerPreconfigurer {
     plan: AnterouterPlan,
@@ -32,6 +40,20 @@ impl MultilayerPreconfigurer {
         autorouter: &Autorouter<impl AccessMesadata>,
         input: MultilayerAutoroutePreconfigurerInput,
     ) -> Self {
+        Self::new_seeded(autorouter, input, 0)
+    }
+
+    /// `layer_seed == 0` keeps every ratline's preferred layer. A
+    /// nonzero seed assigns each ratline a deterministic
+    /// pseudo-random layer, so parallel routing workers explore
+    /// different initial layer assignments. Assignments that fail
+    /// fanout placement fall back to the preferred layer.
+    pub fn new_seeded(
+        autorouter: &Autorouter<impl AccessMesadata>,
+        input: MultilayerAutoroutePreconfigurerInput,
+        layer_seed: u64,
+    ) -> Self {
+        let layer_count = autorouter.board().layout().drawing().layer_count();
         Self::new_from_layer_map(
             autorouter,
             &input.ratlines,
@@ -39,7 +61,14 @@ impl MultilayerPreconfigurer {
                 .ratlines
                 .iter()
                 .enumerate()
-                .map(|(_i, ratline)| (*ratline, ratline.ref_(autorouter).preferred_layer()))
+                .map(|(i, ratline)| {
+                    let layer = if layer_seed == 0 {
+                        ratline.ref_(autorouter).preferred_layer()
+                    } else {
+                        splitmix64(layer_seed ^ i as u64) as usize % layer_count
+                    };
+                    (*ratline, layer)
+                })
                 .collect(),
         )
     }
