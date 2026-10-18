@@ -146,15 +146,17 @@ exact-snapshot validation in B4 (see progress log).
 
 ## Phase C — Cheap wins in the search loop
 
-- [ ] C1. Replace `BTreeMap` g-scores in `src/astar.rs` with a dense `Vec`
-      (nodes are `NodeIndex`-numbered) or HashMap; same for
-      `thetastar.rs` maps (`scores`, `estimated_costs`, `predecessors` →
-      `Vec`-indexed-by-navnode where domain allows).
+- [x] C1. `thetastar.rs` maps are now index-addressed `Vec<Option<T>>`
+      (`scores`, `estimated_costs`, `predecessors`) via `GetIndex` —
+      grow-on-demand, no hashing. `src/astar.rs` keeps `BTreeMap`: its
+      keys are `SccSearchNode` permutation states, not index-addressable,
+      and the permutation search is cold anyway.
 - [x] C2. Kill per-visit allocations: `PathTracker::reconstruct_path_into`
       writes into a `path_scratch` buffer on the strategy; `probe_memo`
       and `step_memo` became nested `path → inner map` so lookups borrow
       the live path (`Box<[N]>: Borrow<[N]>`) instead of cloning it per
-      probe/step. (Compound-iterator comparison still open.)
+      probe/step; same-compound check in `place_probe_to_navnode`
+      compares compound iterators without collecting `Vec`s.
 - [x] C3. Memoize probe results: cache `step_to` verdicts keyed by
       (navcord-path-state, initial-parent, target navnode) in
       `Navcord::probe_memo`. 62s → 14s on 4x4.
@@ -203,14 +205,15 @@ Biggest win but largest design change — needs Phase A numbers to justify.
 
 ## Phase E — Evaluate the `ng` (PieNavmesh) router
 
-- [ ] E1. Benchmark `topo_autoroute` vs `planar_autoroute` on the same
-        boards (it already computes `PieNavmesh` once per board and runs
-        multi-goal A* — the architecturally better design).
+- [x] E1. Benchmarked via `Command::TopoAutoroute` on the 4x4 board
+        (`-c` command file): the ng router did not finish in 2.5+ min
+        where the planar path takes ~0.5s — not competitive as-is.
 - [ ] E2. If competitive: fix its hot spots — `evaluate_navmesh` clones
         layout, recorder, and `BTreeMap`s per edge evaluation
         (`eval.rs:91-92`); replace clones with in-place apply/revert.
-- [ ] E3. Decide where to invest: legacy planar path (Phase D) vs. ng
-        path going forward.
+- [x] E3. Decision: keep investing in the legacy planar path. ng needs
+        E2-style work before it can even be measured meaningfully;
+        revisit only if Phase D stalls.
 
 ## Phase F — Parallelism (exploration, not per-route)
 

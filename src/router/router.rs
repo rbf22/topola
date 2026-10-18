@@ -18,7 +18,8 @@ use crate::{
         rules::AccessRules,
     },
     geometry::{primitive::PrimitiveShape, shape::AccessShape},
-    layout::{Layout, LayoutEdit},
+    graph::GenericIndex,
+    layout::{CompoundEntryLabel, CompoundWeight, Layout, LayoutEdit},
     router::navmesh::BinavnodeNodeIndex,
 };
 
@@ -260,15 +261,20 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
                         .unwrap()
                         .binavnode;
 
-                    let initial_parent_compounds: Vec<_> = match initial_parent_binavnode {
-                        BinavnodeNodeIndex::FixedDot(dot) => {
-                            self.layout.drawing().compounds(dot).collect()
-                        }
-                        BinavnodeNodeIndex::FixedBend(_bend) => {
-                            todo!()
-                        }
-                        BinavnodeNodeIndex::LooseBend(bend) => {
-                            self.layout.drawing().compounds(bend).collect()
+                    let drawing = self.layout.drawing();
+                    let compounds = |binavnode: BinavnodeNodeIndex| -> Box<
+                        dyn Iterator<Item = (CompoundEntryLabel, GenericIndex<CompoundWeight>)> + '_,
+                    > {
+                        match binavnode {
+                            BinavnodeNodeIndex::FixedDot(dot) => {
+                                Box::new(drawing.compounds(dot))
+                            }
+                            BinavnodeNodeIndex::FixedBend(_bend) => {
+                                todo!()
+                            }
+                            BinavnodeNodeIndex::LooseBend(bend) => {
+                                Box::new(drawing.compounds(bend))
+                            }
                         }
                     };
 
@@ -277,22 +283,8 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
                         .unwrap()
                         .binavnode;
 
-                    let from_compounds: Vec<_> = match from_binavnode {
-                        BinavnodeNodeIndex::FixedDot(dot) => {
-                            self.layout.drawing().compounds(dot).collect()
-                        }
-                        BinavnodeNodeIndex::FixedBend(_bend) => {
-                            todo!()
-                        }
-                        BinavnodeNodeIndex::LooseBend(bend) => {
-                            self.layout.drawing().compounds(bend).collect()
-                        }
-                    };
-
-                    if initial_parent_compounds.iter().any(|compound1| {
-                        from_compounds
-                            .iter()
-                            .any(|compound2| compound1 == compound2)
+                    if compounds(initial_parent_binavnode).any(|compound1| {
+                        compounds(from_binavnode).any(|compound2| compound1 == compound2)
                     }) {
                         // If we have failed to do a line-of-sight draw, but
                         // the current probe source navnode and the initial

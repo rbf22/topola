@@ -8,8 +8,7 @@
 // Petgraph's original copyright line is
 // Copyright (c) 2015
 
-use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::hash::Hash;
 
 use std::ops::{ControlFlow, Sub};
@@ -19,35 +18,50 @@ use petgraph::algo::Measure;
 use petgraph::visit::{EdgeRef, GraphBase, IntoEdgeReferences, IntoEdges};
 use thiserror::Error;
 
+use crate::graph::GetIndex;
 use crate::scored::MinScored;
 use crate::stepper::{EstimateProgress, LinearScale, Step};
+
+/// Index-addressed per-node slot: node ids are dense `NodeIndex`-style
+/// numbers, so a grow-on-demand `Vec` beats a hash map on every lookup.
+fn node_slot<'a, T: Copy, N: GetIndex>(slots: &'a [Option<T>], node: N) -> Option<T> {
+    slots.get(node.index()).copied().flatten()
+}
+
+fn set_node_slot<T: Clone, N: GetIndex>(slots: &mut Vec<Option<T>>, node: N, value: T) {
+    let index = node.index();
+    if index >= slots.len() {
+        slots.resize(index + 1, None);
+    }
+    slots[index] = Some(value);
+}
 
 #[derive(Debug)]
 pub struct PathTracker<G>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
 {
-    predecessors: HashMap<G::NodeId, G::NodeId>,
+    predecessors: Vec<Option<G::NodeId>>,
 }
 
 impl<G> PathTracker<G>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
 {
     fn new() -> PathTracker<G> {
         PathTracker {
-            predecessors: HashMap::new(),
+            predecessors: vec![],
         }
     }
 
     fn predecessor(&self, node: G::NodeId) -> Option<G::NodeId> {
-        self.predecessors.get(&node).copied()
+        node_slot(&self.predecessors, node)
     }
 
     fn set_predecessor(&mut self, node: G::NodeId, previous: G::NodeId) {
-        self.predecessors.insert(node, previous);
+        set_node_slot(&mut self.predecessors, node, previous);
     }
 
     /// Reconstructs the path to `last` into `path`, reusing its
@@ -58,7 +72,7 @@ where
         path.push(last);
 
         let mut current = last;
-        while let Some(&previous) = self.predecessors.get(&current) {
+        while let Some(previous) = self.predecessor(current) {
             path.push(previous);
             current = previous;
         }
@@ -76,7 +90,7 @@ where
 pub trait ThetastarStrategy<G, K, R>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy,
 {
@@ -133,7 +147,7 @@ pub enum ThetastarState<N: Copy, E: Copy> {
 pub struct ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -142,10 +156,11 @@ where
     /// The priority queue of the navnodes to expand.
     #[getter(skip)]
     frontier: BinaryHeap<MinScored<K, G::NodeId>>,
-    /// Also known as the g-scores, or just g.
-    scores: HashMap<G::NodeId, K>,
+    /// Also known as the g-scores, or just g. Index-addressed:
+    /// `scores[node.index()]` is `Some(g)` once `node` is scored.
+    scores: Vec<Option<K>>,
     /// Also known as the f-scores, or just f.
-    estimated_costs: HashMap<G::NodeId, K>,
+    estimated_costs: Vec<Option<K>>,
     #[getter(skip)]
     path_tracker: PathTracker<G>,
     // FIXME: To work around edge references borrowing from the graph we collect then reiterate over them.
@@ -168,7 +183,7 @@ pub enum ThetastarError {
 impl<G, K> ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -183,16 +198,15 @@ where
             state: ThetastarState::Scanning,
             graph,
             frontier: BinaryHeap::new(),
-            scores: HashMap::new(),
-            estimated_costs: HashMap::new(),
+            scores: vec![],
+            estimated_costs: vec![],
             path_tracker: PathTracker::<G>::new(),
             edge_ids: Vec::new(),
             progress_estimate_value: K::default(),
             progress_estimate_maximum: estimated_cost_from_start_to_goal,
         };
 
-        let zero_score = K::default();
-        this.scores.insert(start, zero_score);
+        set_node_slot(&mut this.scores, start, K::default());
         this.frontier
             .push(MinScored(estimated_cost_from_start_to_goal, start));
         this
@@ -225,7 +239,7 @@ impl<G, K, R, S: ThetastarStrategy<G, K, R>>
     Step<S, (K, Vec<G::NodeId>, R), ThetastarState<G::NodeId, G::EdgeId>> for ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
@@ -251,27 +265,22 @@ where
                 {
                     if let Some(result) = maybe_result {
                         let path = self.path_tracker.reconstruct_path_to(navnode);
-                        let cost = self.scores[&navnode];
+                        let cost = node_slot(&self.scores, navnode).unwrap();
 
                         return Ok(ControlFlow::Break((cost, path, result)));
                     }
 
-                    match self.estimated_costs.entry(navnode) {
-                        Entry::Occupied(mut entry) => {
-                            // If the node has already been visited with an equal or lower
-                            // estimated score than now, then we do not need to re-visit it.
-                            if *entry.get() <= estimate_score {
-                                crate::metrics::incr(
-                                    &crate::metrics::METRICS.stale_frontier_pops,
-                                );
-                                return Ok(ControlFlow::Continue(self.state));
-                            }
-                            entry.insert(estimate_score);
-                        }
-                        Entry::Vacant(entry) => {
-                            entry.insert(estimate_score);
-                        }
+                    // If the node has already been visited with an equal or lower
+                    // estimated score than now, then we do not need to re-visit it.
+                    if node_slot(&self.estimated_costs, navnode)
+                        .is_some_and(|score| score <= estimate_score)
+                    {
+                        crate::metrics::incr(
+                            &crate::metrics::METRICS.stale_frontier_pops,
+                        );
+                        return Ok(ControlFlow::Continue(self.state));
                     }
+                    set_node_slot(&mut self.estimated_costs, navnode, estimate_score);
 
                     self.edge_ids.clear();
                     self.edge_ids
@@ -300,7 +309,7 @@ where
 
                 if let Some(parent_navnode) = self.path_tracker.predecessor(curr_navnode) {
                     strategy.visit_navnode(&self.graph, parent_navnode, &self.path_tracker);
-                    let parent_score = self.scores[&parent_navnode];
+                    let parent_score = node_slot(&self.scores, parent_navnode).unwrap();
 
                     match strategy.place_probe_to_navnode(
                         &self.graph,
@@ -318,29 +327,24 @@ where
                             let next = probed_navnode;
                             let next_score = parent_score + los_cost;
 
-                            match self.scores.entry(next) {
-                                Entry::Occupied(mut entry) => {
-                                    // No need to add neighbors that we have already reached through a
-                                    // shorter path than now.
-                                    if *entry.get() <= next_score {
-                                        // We just remove the probe instantly
-                                        // here instead of doing it in
-                                        // ThetastarState::Probing or a new
-                                        // state to avoid complicating.
-                                        strategy.remove_probe(&self.graph);
+                            // No need to add neighbors that we have already reached through a
+                            // shorter path than now.
+                            if node_slot(&self.scores, next)
+                                .is_some_and(|score| score <= next_score)
+                            {
+                                // We just remove the probe instantly
+                                // here instead of doing it in
+                                // ThetastarState::Probing or a new
+                                // state to avoid complicating.
+                                strategy.remove_probe(&self.graph);
 
-                                        self.state = ThetastarState::ProbeOnNavedge(
-                                            initial_source_navnode,
-                                            visited_navedge,
-                                        );
-                                        return Ok(ControlFlow::Continue(self.state));
-                                    }
-                                    entry.insert(next_score);
-                                }
-                                Entry::Vacant(entry) => {
-                                    entry.insert(next_score);
-                                }
+                                self.state = ThetastarState::ProbeOnNavedge(
+                                    initial_source_navnode,
+                                    visited_navedge,
+                                );
+                                return Ok(ControlFlow::Continue(self.state));
                             }
+                            set_node_slot(&mut self.scores, next, next_score);
 
                             self.push_to_frontier(next, next_score, parent_navnode, strategy);
 
@@ -370,7 +374,7 @@ where
                 }
             }
             ThetastarState::ProbeOnNavedge(visited_navnode, visited_navedge) => {
-                let visited_score = self.scores[&visited_navnode];
+                let visited_score = node_slot(&self.scores, visited_navnode).unwrap();
                 let initial_source_navnode = (&self.graph).edge_ref(visited_navedge).source();
                 let initial_parent_navnode = self.path_tracker.predecessor(initial_source_navnode);
                 let probed_navnode = (&self.graph).edge_ref(visited_navedge).target();
@@ -383,20 +387,14 @@ where
                     let next = probed_navnode;
                     let next_score = visited_score + navedge_cost;
 
-                    match self.scores.entry(next) {
-                        Entry::Occupied(mut entry) => {
-                            // No need to add neighbors that we have already reached through a
-                            // shorter path than now.
-                            if *entry.get() <= next_score {
-                                self.state = ThetastarState::Probing(visited_navnode);
-                                return Ok(ControlFlow::Continue(self.state));
-                            }
-                            entry.insert(next_score);
-                        }
-                        Entry::Vacant(entry) => {
-                            entry.insert(next_score);
-                        }
+                    // No need to add neighbors that we have already reached through a
+                    // shorter path than now.
+                    if node_slot(&self.scores, next).is_some_and(|score| score <= next_score)
+                    {
+                        self.state = ThetastarState::Probing(visited_navnode);
+                        return Ok(ControlFlow::Continue(self.state));
                     }
+                    set_node_slot(&mut self.scores, next, next_score);
 
                     self.push_to_frontier(next, next_score, visited_navnode, strategy);
 
@@ -419,7 +417,7 @@ where
 impl<G, K> EstimateProgress for ThetastarStepper<G, K>
 where
     G: GraphBase,
-    G::NodeId: Eq + Ord + Hash,
+    G::NodeId: Eq + Ord + Hash + GetIndex,
     for<'a> &'a G: IntoEdges<NodeId = G::NodeId, EdgeId = G::EdgeId> + MakeEdgeRef,
     K: Measure + Copy + Sub<Output = K>,
 {
