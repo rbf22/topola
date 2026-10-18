@@ -54,4 +54,16 @@ pub struct Cli {
         help = "Stop trying new route orderings after this many reconfigurations, keeping already routed bands"
     )]
     pub max_reconfigurations: Option<u64>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Write a JSON report of channel blockers and per-component shift suggestions for unrouted ratlines"
+    )]
+    pub suggest_shifts: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        value_name = "WIDTH",
+        help = "Half-width of the wish channel used for shift suggestions (defaults to routed band half-width plus largest clearance)"
+    )]
+    pub channel_width: Option<f64>,
 }

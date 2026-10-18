@@ -19,12 +19,14 @@ use topola::autorouter::PresortBy;
 use topola::board::edit::BoardEdit;
 use topola::board::AccessMesadata;
 use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef};
+use topola::drawing::rules::AccessRules;
 
 use topola::router::RouterOptions;
 use topola::specctra::design::SpecctraDesign;
 use topola::stepper::{EstimateProgress, TimeoutOptions};
 
 pub mod cli;
+pub mod suggest;
 use cli::Cli;
 
 fn main() -> Result<(), std::io::Error> {
@@ -199,6 +201,19 @@ fn main() -> Result<(), std::io::Error> {
                 );
             }
         }
+    }
+
+    if let Some(suggest_shifts_filename) = &args.suggest_shifts {
+        let drawing = invoker.autorouter().board().layout().drawing();
+        let channel_half_width = args
+            .channel_width
+            .unwrap_or_else(|| 100.0 / 2.0 + drawing.rules().largest_clearance(None));
+        let file = File::create(suggest_shifts_filename)?;
+        suggest::write_suggestions(invoker.autorouter(), channel_half_width, file)?;
+        eprintln!(
+            "[topola] wrote shift suggestions to {}",
+            suggest_shifts_filename.display()
+        );
     }
 
     let output_filename = args
