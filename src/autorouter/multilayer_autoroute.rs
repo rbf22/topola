@@ -418,3 +418,156 @@ impl GetDebugOverlayData for MultilayerAutorouteExecutionStepper {
         self.planar.obstacles()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeSet, fs::File, io::BufReader};
+
+    use specctra_core::mesadata::SpecctraMesadata;
+
+    use super::*;
+    use crate::{
+        autorouter::{
+            multilayer_preconfigurer::{
+                MultilayerAutoroutePreconfigurerInput, MultilayerPreconfigurer,
+            },
+            PresortBy, ReconfigureBy,
+        },
+        drawing::graph::MakePrimitiveRef,
+        geometry::GetLayer,
+        router::RouterOptions,
+        specctra::design::SpecctraDesign,
+    };
+
+    fn astable() -> Autorouter<SpecctraMesadata> {
+        let design_file =
+            File::open("tests/multilayer/astable_multivibrator/astable_multivibrator.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+        Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+    }
+
+    /// Moving a ratline to another layer removes its old fanout vias
+    /// and places new ones. Every `terminating_dot_map` value must
+    /// afterwards resolve to a live dot on the layer the stepper's
+    /// recorded plan claims — before the purge fix a dead
+    /// `FixedDotIndex` survived in the map until a later `add_via`
+    /// recycled its node slot into a compound and `primitive_weight`
+    /// panicked.
+    #[test]
+    fn reconfigure_refreshes_terminating_dot_map() {
+        let mut autorouter = astable();
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+
+        let ratlines: BTreeSet<RatlineUid> = (0..layer_count)
+            .flat_map(|layer| {
+                autorouter
+                    .ratsnests()
+                    .on_principal_layer(layer)
+                    .graph()
+                    .edge_indices()
+                    .take(2)
+                    .map(move |index| RatlineUid {
+                        principal_layer: layer,
+                        index,
+                    })
+            })
+            .take(3)
+            .collect();
+        let rotated = *ratlines.iter().next().unwrap();
+
+        let options = MultilayerAutorouteOptions {
+            anterouter: AnterouterOptions {
+                fanout_clearance: 200.0,
+            },
+            planar: PlanarAutorouteOptions {
+                principal_layer: 0,
+                presort_by: PresortBy::RatlineIntersectionCountAndLength,
+                permutate: true,
+                reconfigure_by: ReconfigureBy::default(),
+                congestion_penalty: 500.0,
+                router: RouterOptions {
+                    wrap_around_bands: true,
+                    squeeze_through_under_bends: false,
+                    routed_band_width: 100.0,
+                },
+                timeout: TimeoutOptions {
+                    initial: 1.0,
+                    progress_bonus: 0.005,
+                },
+                max_reconfigurations: None,
+                improve_pad_entry: false,
+                pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+                escape_stubs: false,
+                surgical_ripup: false,
+                shuffle_seed: 0,
+            },
+            timeout: TimeoutOptions {
+                initial: 10.0,
+                progress_bonus: 0.0,
+            },
+            layer_seed: 0,
+        };
+
+        let plan = MultilayerPreconfigurer::new(
+            &autorouter,
+            MultilayerAutoroutePreconfigurerInput {
+                ratlines: ratlines.clone(),
+            },
+        )
+        .plan()
+        .clone();
+
+        let make_configuration = |plan: &AnterouterPlan| MultilayerAutorouteConfiguration {
+            plan: plan.clone(),
+            planar: PlanarAutoroutePreconfigurerInput {
+                ratlines: ratlines.clone(),
+                terminating_dot_map: BTreeMap::new(),
+            },
+        };
+
+        let mut stepper = MultilayerAutorouteExecutionStepper::new(
+            &mut autorouter,
+            make_configuration(&plan),
+            options,
+        )
+        .unwrap();
+
+        let assert_map_consistent =
+            |stepper: &MultilayerAutorouteExecutionStepper,
+             autorouter: &Autorouter<SpecctraMesadata>| {
+                let drawing = autorouter.board().layout().drawing();
+                for ((ratline, _), dot) in &stepper.planar().configuration().terminating_dot_map {
+                    // A stale index panics here once its freed slot has
+                    // been recycled into another node variant.
+                    let dot_ref = dot.primitive_ref(drawing);
+                    assert_eq!(dot_ref.layer(), stepper.plan.layer_map[ratline]);
+                }
+            };
+        assert_map_consistent(&stepper, &autorouter);
+
+        // Cycle the ratline across layers twice: each reconfigure
+        // removes the previous fanout via and installs fresh
+        // terminating dots, so both the purge and the remap run.
+        let mut new_plan = plan;
+        for _ in 0..2 {
+            *new_plan.layer_map.get_mut(&rotated).unwrap() =
+                (new_plan.layer_map[&rotated] + 1) % layer_count;
+            stepper
+                .reconfigure(&mut autorouter, make_configuration(&new_plan))
+                .unwrap();
+            assert_map_consistent(&stepper, &autorouter);
+            // The swap must have actually run: a relayered ratline
+            // without fanout dots would mean the test exercised
+            // nothing.
+            assert!(
+                stepper
+                    .planar()
+                    .configuration()
+                    .terminating_dot_map
+                    .keys()
+                    .any(|(ratline, _)| *ratline == rotated),
+                "rotated ratline has no terminating-dot map entries"
+            );
+        }
+    }
+}

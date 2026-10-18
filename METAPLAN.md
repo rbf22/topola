@@ -349,3 +349,20 @@ Also: `dot_weight`/`seg_weight`/`bend_weight`/`compound_weight` and the
 bend `core_weight` lookup no longer panic bare — they report the
 offending index and what the slot actually holds, so any remaining
 stale-index path names itself.
+
+Follow-up unit coverage (post-fix):
+
+- `reconfigure_refreshes_terminating_dot_map`
+  (`multilayer_autoroute::tests`) — builds a 3-ratline multilayer
+  stepper on the astable fixture and cycles one ratline across layers
+  twice through `reconfigure`. After each swap it asserts every
+  `terminating_dot_map` value resolves to a live dot on the layer the
+  recorded plan claims, and that the rotated ratline actually gained
+  fanout-dot entries (so the swap path provably ran — not vacuous).
+  Deterministic; ~50ms.
+- `Permutations<T>` tests (`planar_reconfigurer::tests`) — the
+  `itertools` replacement is now generic over `T: Clone` and covered
+  for: exhaustive n! enumeration, k=0 single-empty semantics,
+  `skip_first` dropping the identity, and clone-forks-iteration (the
+  A* expansion clones search nodes wholesale); plus a direct
+  `next_permutation` lexicographic/exhaustion test.

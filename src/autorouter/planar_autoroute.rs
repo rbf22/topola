@@ -609,7 +609,6 @@ impl GetDebugOverlayData for PlanarAutorouteExecutionStepper {
 mod tests {
     use std::{collections::BTreeMap, fs::File, io::BufReader};
 
-    use petgraph::visit::EdgeIndexable;
     use specctra_core::mesadata::SpecctraMesadata;
 
     use super::*;
@@ -617,7 +616,6 @@ mod tests {
         autorouter::{PresortBy, ReconfigureBy},
         board::edit::BoardEdit,
         drawing::dot::FixedDotIndex,
-        graph::GenericIndex,
         router::RouterOptions,
         specctra::design::SpecctraDesign,
         stepper::TimeoutOptions,

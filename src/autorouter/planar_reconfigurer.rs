@@ -130,7 +130,7 @@ impl PlanarAutorouteReconfigurer {
 struct SccSearchNode {
     permutation: Vec<Scc>,
     #[getter(skip)]
-    permutations_iter: SccPermutations,
+    permutations_iter: Permutations<Scc>,
     #[getter(skip)]
     length: usize,
 }
@@ -161,7 +161,7 @@ impl SccSearchNode {
     pub fn new(sccs: Vec<Scc>) -> Self {
         Self {
             permutation: sccs.clone(),
-            permutations_iter: SccPermutations::new(sccs, 0, 0),
+            permutations_iter: Permutations::new(sccs, 0, 0),
             length: 0,
         }
     }
@@ -197,7 +197,7 @@ impl SccSearchNode {
 
         Some(Self {
             permutation: self.permutation.clone(),
-            permutations_iter: SccPermutations::new(
+            permutations_iter: Permutations::new(
                 self.permutation.into_iter().take(length).collect(),
                 length,
                 1,
@@ -220,20 +220,20 @@ impl SccSearchNode {
     }
 }
 
-/// Cloneable iterator over permutations of a vector of `Scc`s, yielding
-/// owned vectors in lexicographic index order. Only the `k == 0` case (a
+/// Cloneable iterator over permutations of a vector, yielding owned
+/// vectors in lexicographic index order. Only the `k == 0` case (a
 /// single empty permutation) and the `k == elements.len()` case (full
 /// permutations) are supported, matching this module's usage; replaces
 /// `itertools`' `permutations(k)`.
 #[derive(Clone, Debug)]
-struct SccPermutations {
-    elements: Vec<Scc>,
+struct Permutations<T> {
+    elements: Vec<T>,
     indices: Option<Vec<usize>>,
     emit_current: bool,
 }
 
-impl SccPermutations {
-    fn new(elements: Vec<Scc>, k: usize, skip_first: usize) -> Self {
+impl<T: Clone> Permutations<T> {
+    fn new(elements: Vec<T>, k: usize, skip_first: usize) -> Self {
         assert!(k == 0 || k == elements.len());
         let mut this = Self {
             indices: Some((0..k).collect()),
@@ -247,8 +247,8 @@ impl SccPermutations {
     }
 }
 
-impl Iterator for SccPermutations {
-    type Item = Vec<Scc>;
+impl<T: Clone> Iterator for Permutations<T> {
+    type Item = Vec<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let indices = self.indices.as_mut()?;
@@ -759,5 +759,65 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
                 return Some(configuration);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{next_permutation, Permutations};
+
+    /// Full-permutation enumeration must yield all n! distinct
+    /// orderings, first the identity, each exactly once.
+    #[test]
+    fn permutations_enumerates_all_orderings() {
+        let perms: Vec<Vec<u32>> = Permutations::new(vec![1, 2, 3, 4], 4, 0).collect();
+        assert_eq!(perms.len(), 24);
+        assert_eq!(perms[0], vec![1, 2, 3, 4]);
+        let unique: BTreeSet<_> = perms.iter().collect();
+        assert_eq!(unique.len(), 24);
+    }
+
+    /// `k == 0` yields a single empty permutation — the semantics of
+    /// `itertools`' `permutations(0)` that `SccSearchNode::new` relies
+    /// on for the not-yet-permuted root node.
+    #[test]
+    fn permutations_k0_yields_single_empty() {
+        let mut perms = Permutations::new(vec![1, 2, 3], 0, 0);
+        assert_eq!(perms.next(), Some(vec![]));
+        assert_eq!(perms.next(), None);
+    }
+
+    /// Skipping the first permutation drops the identity, matching the
+    /// `.skip(1)` `SccSearchNode::resize` applies — the node's current
+    /// permutation is already the identity.
+    #[test]
+    fn permutations_skip_first_drops_identity() {
+        let mut perms = Permutations::new(vec![1, 2, 3], 3, 1);
+        assert_eq!(perms.next(), Some(vec![1, 3, 2]));
+    }
+
+    /// Cloning mid-iteration forks the enumeration — the A* expansion
+    /// clones `SccSearchNode`s wholesale, including this iterator.
+    #[test]
+    fn permutations_clone_forks_iteration() {
+        let perms = Permutations::new(vec![1, 2, 3], 3, 1);
+        let mut a = perms.clone();
+        let mut b = perms;
+        assert_eq!(a.next(), b.next());
+        assert_eq!(a.next(), b.next());
+        a.next();
+        assert_ne!(a.next(), b.next());
+    }
+
+    #[test]
+    fn next_permutation_advances_lexicographically() {
+        let mut indices = vec![0, 1, 2];
+        assert!(next_permutation(&mut indices));
+        assert_eq!(indices, vec![0, 2, 1]);
+        // Exhaustion: the last ordering reports false.
+        let mut last = vec![2, 1, 0];
+        assert!(!next_permutation(&mut last));
     }
 }
