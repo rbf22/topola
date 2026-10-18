@@ -29,8 +29,9 @@ default-features = false
 features = ["spade", "use-serde"]
 
 [workspace.dependencies.petgraph]
-git = "https://codeberg.org/topola/petgraph.git"
-features = ["serde-1"]
+path = "crates/petgraph"
+default-features = false
+features = ["stable_graph", "serde-1"]
 
 [workspace.dependencies.serde]
 version = "1"

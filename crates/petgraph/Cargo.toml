@@ -1,0 +1,45 @@
+# Vendored from https://codeberg.org/topola/petgraph.git @ 1bae625
+# (petgraph 0.6.5 + StableGraph::update_node, used by geometry.rs to
+# restore nodes at recycled indices during undo).
+
+[package]
+name = "petgraph"
+version = "0.6.5"
+license = "MIT OR Apache-2.0"
+authors = ["bluss", "mitchmindtree"]
+description = "Graph data structure library. Provides graph types and graph algorithms."
+rust-version = "1.64"
+edition = "2018"
+
+[lib]
+bench = false
+name = "petgraph"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+fixedbitset = { version = "0.4.0", default-features = false }
+indexmap = "2.0"
+quickcheck = { optional = true, version = "0.8", default-features = false }
+serde = { version = "1.0", optional = true }
+serde_derive = { version = "1.0", optional = true }
+rayon = { version = "1.5.3", optional = true }
+
+[features]
+rayon = ["dep:rayon", "indexmap/rayon"]
+all = [
+    "unstable",
+    "quickcheck",
+    "matrix_graph",
+    "stable_graph",
+    "graphmap",
+    "rayon",
+]
+default = ["graphmap", "stable_graph", "matrix_graph"]
+generate = []
+graphmap = []
+matrix_graph = []
+serde-1 = ["serde", "serde_derive"]
+stable_graph = []
+unstable = ["generate"]
