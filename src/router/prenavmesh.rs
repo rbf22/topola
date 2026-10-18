@@ -364,6 +364,43 @@ impl Prenavmesh {
             .collect()
     }
 
+    /// Unordered fingerprint of `layer`'s fixed primitives: variant,
+    /// node index, and position bits. Fixed geometry is supposed not
+    /// to change while routing, but multilayer re-layering places and
+    /// removes fanout vias and stub segs mid-run — and freed indices
+    /// are recycled, so this is keyed by index plus position rather
+    /// than index bounds.
+    pub fn fixed_fingerprint(layout: &Layout<impl AccessRules>, layer: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let (count, sum) = layout
+            .drawing()
+            .layer_primitive_nodes(layer)
+            .filter_map(|node| {
+                let tag = match node {
+                    PrimitiveIndex::FixedDot(_) => 0u8,
+                    PrimitiveIndex::FixedBend(_) => 1,
+                    PrimitiveIndex::FixedSeg(_) => 2,
+                    _ => return None,
+                };
+                let pos = node
+                    .primitive_ref(layout.drawing())
+                    .shape()
+                    .center();
+                Some((tag, node.index(), pos.x().to_bits(), pos.y().to_bits()))
+            })
+            // Order-independent fold: the rtree yields nodes in
+            // traversal order, which shifts as loose primitives come
+            // and go, so only commutative accumulators keep the
+            // fingerprint stable while the fixed set is unchanged.
+            .fold((0u64, 0x9e3779b97f4a7c15u64), |(count, acc), entry| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                entry.hash(&mut hasher);
+                (count + 1, acc.wrapping_add(hasher.finish()))
+            });
+        count.rotate_left(32) ^ sum
+    }
+
     /// Inserts the origin and destination vertices into the prenavmesh.
     /// Applied to a cloned base for every route.
     pub fn add_endpoints(
@@ -522,44 +559,145 @@ impl Prenavmesh {
     }
 }
 
+/// Exact identity of a loose primitive as the navmesh sees it: the map
+/// key carries its (possibly recycled) index, and the signature carries
+/// everything its references dereference — the weight plus joint and
+/// inner-bend linkage. Geometry is implied by the linked dots, which
+/// have entries of their own. Edits applied or reverted through
+/// `.apply(..)` restore indices and weights exactly, so an equal
+/// snapshot proves a cached navmesh's loose-primitive references are
+/// still valid — unlike a geometry-only fingerprint, which a rerouted
+/// band over the same gears could collide with while its bend indices
+/// differ.
+#[derive(Debug, PartialEq)]
+enum LooseSig {
+    Dot(crate::drawing::graph::PrimitiveWeight),
+    Seg(crate::drawing::graph::PrimitiveWeight, usize, usize),
+    Bend(crate::drawing::graph::PrimitiveWeight, usize, usize, Option<usize>),
+}
+
+type LooseSnapshot = BTreeMap<PrimitiveIndex, LooseSig>;
+
+/// Snapshots every loose primitive on `layer`: bands of any net can be
+/// wrapped by the navmesh's navnodes, so the snapshot cannot be
+/// restricted to one net.
+fn loose_snapshot(layout: &Layout<impl AccessRules>, layer: usize) -> LooseSnapshot {
+    let drawing = layout.drawing();
+    let geometry = drawing.geometry();
+    layout
+        .drawing()
+        .layer_primitive_nodes(layer)
+        .filter_map(|node| {
+            let sig = match node {
+                PrimitiveIndex::LooseDot(_) => {
+                    LooseSig::Dot(geometry.primitive_weight(node.index()))
+                }
+                PrimitiveIndex::LoneLooseSeg(seg) => {
+                    let (from, to) = geometry.seg_joints(seg.into());
+                    LooseSig::Seg(
+                        geometry.primitive_weight(node.index()),
+                        from.index(),
+                        to.index(),
+                    )
+                }
+                PrimitiveIndex::SeqLooseSeg(seg) => {
+                    let (from, to) = geometry.seg_joints(seg.into());
+                    LooseSig::Seg(
+                        geometry.primitive_weight(node.index()),
+                        from.index(),
+                        to.index(),
+                    )
+                }
+                PrimitiveIndex::LooseBend(bend) => {
+                    let bend_index: crate::drawing::bend::BendIndex = bend.into();
+                    let (from, to) = geometry.bend_joints(bend_index);
+                    LooseSig::Bend(
+                        geometry.primitive_weight(node.index()),
+                        from.index(),
+                        to.index(),
+                        geometry.inner(bend_index).map(|inner| inner.index()),
+                    )
+                }
+                _ => return None,
+            };
+            Some((node, sig))
+        })
+        .collect()
+}
+
 /// A cached prenavmesh base for one `(net, layer)` pair.
 struct PrenavmeshBase {
     /// Vertices for all foreign-net fixed primitives on the layer.
     vertex: PrenavmeshTriangulation,
-    /// `vertex` plus every current constraint edge, without endpoint
-    /// vertices. `None` while invalidated.
-    constrained: Option<Prenavmesh>,
-    /// The loose-seg constraint edges `constrained` was built from.
-    loose_keys: BTreeSet<ConstraintKey>,
+    /// Fingerprint of the layer's fixed primitives the vertex base was
+    /// built from. Fanout vias placed or removed during multilayer
+    /// re-layering — and index recycling — change the fingerprint,
+    /// forcing a rebuild.
+    fingerprint: u64,
+    /// Constrained bases — `vertex` plus constraint edges, no endpoint
+    /// vertices — each keyed by the exact loose-seg constraint set it
+    /// was built from, most-recently-used last. Revisited loose states
+    /// (e.g. restored by a backtrace, which re-applies edits with
+    /// identical geometry) hit by exact set equality; states that only
+    /// add constraints delta-extend a subset entry.
+    constrained: Vec<(BTreeSet<ConstraintKey>, Prenavmesh)>,
+}
+
+/// A fully built navmesh kept for reuse while the board state it was
+/// built against can still be proven identical.
+struct CachedNavmesh {
+    /// `(net, layer, origin, destination, fixed fingerprint, options)`.
+    /// The options are folded in because they affect navnode
+    /// generation (`squeeze_through_under_bends` adds navnodes).
+    key: (
+        Option<usize>,
+        usize,
+        FixedDotIndex,
+        FixedDotIndex,
+        u64,
+        u64,
+        bool,
+        bool,
+    ),
+    /// Every loose primitive's identity at build time. Reuse requires
+    /// exact equality — index, weight and linkage alike — which undo
+    /// restores bit-for-bit, so backtraces hit legitimately.
+    snapshot: LooseSnapshot,
+    navmesh: super::navmesh::Navmesh,
 }
 
 /// Cache of prenavmesh bases keyed by `(net, layer)`. The vertex
 /// triangulation only depends on the board's fixed primitives and is
-/// built once per net; the constrained base is reused while only new
-/// loose-seg constraints appear, and rebuilt after rip-ups (detected as
-/// stored constraint edges missing from the board — primitive indices
-/// are never trusted since they are recycled).
-///
-/// Whole navmeshes are deliberately not cached: navnodes wrap loose
-/// bends, whose indices are recycled as bands are ripped up and
-/// redrawn, and the constraint fingerprint is keyed by core geometry —
-/// a rerouted band over the same gears yields the same fingerprint
-/// while its bend indices change, so a cached navmesh would hold stale
-/// references.
+/// built once per net; constrained bases and whole navmeshes are kept
+/// in small MRU lists and reused whenever their exact board-state keys
+/// still match.
 #[derive(Default)]
 pub struct PrenavmeshBases {
     map: HashMap<(Option<usize>, usize), PrenavmeshBase>,
+    /// Reusable whole navmeshes, MRU last. Bounded because each navmesh
+    /// carries a whole search graph.
+    navmeshes: Vec<CachedNavmesh>,
 }
+
+/// Bounds the number of constrained bases kept per `(net, layer)`.
+const CONSTRAINED_CACHE_CAP: usize = 16;
+
+/// Bounds the number of whole navmeshes kept globally; each carries a
+/// search graph proportional to the board.
+const NAVMESH_CACHE_CAP: usize = 32;
 
 impl PrenavmeshBases {
     /// Drops every cached base. Only needed after edits that can change
     /// fixed-primitive geometry or nets — never happens while routing.
     pub fn clear(&mut self) {
         self.map.clear();
+        self.navmeshes.clear();
     }
 
     /// Builds a navmesh for the `origin`–`destination` ratline, reusing
-    /// cached vertex and constraint bases for its `(net, layer)`.
+    /// a whole cached navmesh when the layer's loose-primitive state is
+    /// provably identical, and falling back to cached vertex and
+    /// constraint bases otherwise.
     pub fn navmesh(
         &mut self,
         layout: &Layout<impl AccessRules>,
@@ -569,16 +707,50 @@ impl PrenavmeshBases {
     ) -> Result<super::navmesh::Navmesh, NavmeshError> {
         let origin_primitive = origin.primitive_ref(layout.drawing());
         let (maybe_net, layer) = (origin_primitive.maybe_net(), origin_primitive.layer());
-        let loose_constraints = Prenavmesh::loose_constraints(layout, maybe_net, layer);
+        let snapshot = loose_snapshot(layout, layer);
+        let key = (
+            maybe_net,
+            layer,
+            origin,
+            destination,
+            Prenavmesh::fixed_fingerprint(layout, layer),
+            options.routed_band_width.to_bits(),
+            options.wrap_around_bands,
+            options.squeeze_through_under_bends,
+        );
 
-        let prenavmesh = self.prenavmesh_with(layout, origin, destination, loose_constraints)?;
-        Ok(super::navmesh::Navmesh::new_from_prenavmesh(
+        if let Some(pos) = self
+            .navmeshes
+            .iter()
+            .position(|cached| cached.key == key && cached.snapshot == snapshot)
+        {
+            crate::metrics::incr(&crate::metrics::METRICS.navmesh_cache_hits);
+            let cached = self.navmeshes.remove(pos);
+            let navmesh = cached.navmesh.clone();
+            self.navmeshes.push(cached);
+            return Ok(navmesh);
+        }
+
+        let loose_constraints = Prenavmesh::loose_constraints(layout, maybe_net, layer);
+        let prenavmesh =
+            self.prenavmesh_with(layout, origin, destination, loose_constraints)?;
+        let navmesh = super::navmesh::Navmesh::new_from_prenavmesh(
             layout,
             prenavmesh,
             origin,
             destination,
             options,
-        )?)
+        )?;
+
+        if self.navmeshes.len() >= NAVMESH_CACHE_CAP {
+            self.navmeshes.remove(0);
+        }
+        self.navmeshes.push(CachedNavmesh {
+            key,
+            snapshot,
+            navmesh: navmesh.clone(),
+        });
+        Ok(navmesh)
     }
 
     /// Builds a prenavmesh for the `origin`–`destination` ratline,
@@ -604,64 +776,98 @@ impl PrenavmeshBases {
     ) -> Result<Prenavmesh, NavmeshError> {
         let origin_primitive = origin.primitive_ref(layout.drawing());
         let key = (origin_primitive.maybe_net(), origin_primitive.layer());
+        let fingerprint = Prenavmesh::fixed_fingerprint(layout, key.1);
 
-        if !self.map.contains_key(&key) {
+        if !self.map.contains_key(&key) || self.map[&key].fingerprint != fingerprint {
+            // Build or rebuild the vertex base: the fingerprint only
+            // changes when fixed primitives appear, disappear, or move.
             let vertex = Prenavmesh::vertex_triangulation_for_net(layout, key.0, key.1)?;
             self.map.insert(
                 key,
                 PrenavmeshBase {
                     vertex,
-                    constrained: None,
-                    loose_keys: BTreeSet::new(),
+                    fingerprint,
+                    constrained: vec![],
                 },
             );
         }
         let base = self.map.get_mut(&key).unwrap();
 
-        // Reuse the constrained base while it only misses constraints
-        // for newly committed loose segs. Rip-ups remove constraints
-        // from the board, which spade cannot remove from a
-        // triangulation, and a new loose seg may intersect a stored
-        // fixed-seg constraint that a fresh build would have dropped —
-        // both force a full rebuild.
-        let mut reusable = false;
-        if let Some(constrained) = base.constrained.as_mut() {
-            if base
-                .loose_keys
-                .iter()
-                .all(|key| loose_constraints.contains_key(key))
-            {
-                reusable = true;
-                for (key, constraint) in loose_constraints.iter() {
-                    if base.loose_keys.contains(key) {
-                        continue;
-                    }
-                    if !constrained.try_add_constraint(*constraint)? {
-                        reusable = false;
-                        break;
-                    }
-                    crate::metrics::incr(
-                        &crate::metrics::METRICS.prenavmesh_delta_constraint_adds,
-                    );
+        let loose_keys: BTreeSet<ConstraintKey> =
+            loose_constraints.keys().copied().collect();
+
+        // An entry for exactly this loose state — typically restored by
+        // a backtrace — can be reused outright.
+        if let Some(pos) = base
+            .constrained
+            .iter()
+            .position(|(keys, _)| *keys == loose_keys)
+        {
+            crate::metrics::incr(
+                &crate::metrics::METRICS.prenavmesh_constrained_base_hits,
+            );
+            let entry = base.constrained.remove(pos);
+            let mut prenavmesh = entry.1.clone();
+            base.constrained.push(entry);
+            prenavmesh.add_endpoints(layout, origin, destination)?;
+            return Ok(prenavmesh);
+        }
+
+        // Otherwise delta-extend the largest subset entry: its stored
+        // constraints are all still present and only new ones need
+        // adding. Rip-ups remove constraints, which spade cannot remove
+        // from a triangulation, and a new loose seg may intersect a
+        // stored fixed-seg constraint that a fresh build would have
+        // dropped — both force a full rebuild.
+        let mut constrained = None;
+        if let Some((pos, subset_keys)) = base
+            .constrained
+            .iter()
+            .enumerate()
+            .filter(|(_, (keys, _))| {
+                keys.iter().all(|key| loose_constraints.contains_key(key))
+            })
+            .max_by_key(|(_, (keys, _))| keys.len())
+            .map(|(pos, (keys, _))| (pos, keys.clone()))
+        {
+            let mut candidate = base.constrained[pos].1.clone();
+            let mut ok = true;
+            for (key, constraint) in loose_constraints.iter() {
+                if subset_keys.contains(key) {
+                    continue;
                 }
+                if !candidate.try_add_constraint(*constraint)? {
+                    ok = false;
+                    break;
+                }
+                crate::metrics::incr(
+                    &crate::metrics::METRICS.prenavmesh_delta_constraint_adds,
+                );
+            }
+            if ok {
+                constrained = Some(candidate);
             }
         }
 
-        if !reusable {
-            crate::metrics::incr(&crate::metrics::METRICS.prenavmesh_constrained_base_builds);
-            let _timer = crate::metrics::Timer::start(
-                &crate::metrics::METRICS.prenavmesh_constrained_base_nanos,
-            );
-            base.constrained = Some(Prenavmesh::constrained_base(
-                layout,
-                key.0,
-                key.1,
-                base.vertex.clone(),
-            )?);
-        }
-        base.loose_keys = loose_constraints.into_keys().collect();
+        let constrained = match constrained {
+            Some(constrained) => constrained,
+            None => {
+                crate::metrics::incr(
+                    &crate::metrics::METRICS.prenavmesh_constrained_base_builds,
+                );
+                let _timer = crate::metrics::Timer::start(
+                    &crate::metrics::METRICS.prenavmesh_constrained_base_nanos,
+                );
+                Prenavmesh::constrained_base(layout, key.0, key.1, base.vertex.clone())?
+            }
+        };
 
-        let mut prenavmesh = base.constrained.as_ref().unwrap().clone();
+        if base.constrained.len() >= CONSTRAINED_CACHE_CAP {
+            base.constrained.remove(0);
+        }
+        base.constrained.push((loose_keys, constrained.clone()));
+
+        let mut prenavmesh = constrained;
         prenavmesh.add_endpoints(layout, origin, destination)?;
         Ok(prenavmesh)
     }

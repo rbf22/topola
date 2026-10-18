@@ -45,6 +45,9 @@ pub struct RouterThetastarStrategy<'a, R> {
     pub destination: FixedDotIndex,
     pub probe_ghosts: Vec<PrimitiveShape>,
     pub probe_obstacles: Vec<PrimitiveIndex>,
+    /// Scratch buffer for `reconstruct_path_to`, reused across visits
+    /// to avoid a `Vec` allocation per navnode visit.
+    pub path_scratch: Vec<NavnodeIndex>,
     /// Extra path costs charged for navigating to (wrapping) a navnode's
     /// primitive (negotiated congestion).
     pub obstacle_penalties: Option<&'a BTreeMap<PrimitiveIndex, f64>>,
@@ -58,6 +61,7 @@ impl<'a, R> RouterThetastarStrategy<'a, R> {
             destination: target,
             probe_ghosts: vec![],
             probe_obstacles: vec![],
+            path_scratch: vec![],
             obstacle_penalties: None,
         }
     }
@@ -73,7 +77,8 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         tracker: &PathTracker<Navmesh>,
     ) -> Result<Option<BandTermsegIndex>, ()> {
         crate::metrics::incr(&crate::metrics::METRICS.visit_navnode_calls);
-        let new_path = tracker.reconstruct_path_to(navnode);
+        tracker.reconstruct_path_into(&mut self.path_scratch, navnode);
+        let new_path = self.path_scratch.as_slice();
 
         if navnode == navmesh.destination_navnode() {
             self.layout
@@ -112,13 +117,14 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
     ) -> ControlFlow<Option<f64>> {
         crate::metrics::incr(&crate::metrics::METRICS.probes);
 
-        let memo_key = (
-            self.navcord.path.clone().into_boxed_slice(),
-            maybe_initial_parent_navnode,
-            probed_navnode,
-        );
+        let memo_key = (maybe_initial_parent_navnode, probed_navnode);
 
-        if let Some(entry) = self.navcord.probe_memo.get(&memo_key) {
+        if let Some(entry) = self
+            .navcord
+            .probe_memo
+            .get(self.navcord.path.as_slice())
+            .and_then(|by_path| by_path.get(&memo_key))
+        {
             crate::metrics::incr(&crate::metrics::METRICS.probes_memoized);
             self.probe_ghosts = entry.ghosts.clone();
             self.probe_obstacles = entry.obstacles.clone();
@@ -164,14 +170,18 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
                 ProbeVerdict::Backtrackable
             }
         };
-        self.navcord.probe_memo.insert(
-            memo_key,
-            ProbeMemoEntry {
-                verdict,
-                ghosts: self.probe_ghosts.clone(),
-                obstacles: self.probe_obstacles.clone(),
-            },
-        );
+        self.navcord
+            .probe_memo
+            .entry(self.navcord.path.clone().into_boxed_slice())
+            .or_default()
+            .insert(
+                memo_key,
+                ProbeMemoEntry {
+                    verdict,
+                    ghosts: self.probe_ghosts.clone(),
+                    obstacles: self.probe_obstacles.clone(),
+                },
+            );
         ret
     }
 

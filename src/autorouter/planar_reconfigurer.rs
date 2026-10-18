@@ -25,6 +25,7 @@ use crate::{
         Autorouter, PlanarAutorouteOptions, ReconfigureBy,
     },
     drawing::{
+        dot::FixedDotIndex,
         gear::WalkOutwards,
         graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
         loose::{GetPrevNextLoose, LooseIndex},
@@ -74,6 +75,27 @@ impl PlanarAutorouteReconfigurer {
                     ),
                 )
             }
+        }
+    }
+
+    /// Extends the stored preconfiguration's terminating-dot
+    /// remappings, so subsequently emitted configurations keep them.
+    /// Multilayer re-layering calls this after swapping fanout vias;
+    /// without it the next emitted configuration would revert to the
+    /// stale terminating dots.
+    pub fn remap_terminating_dots(
+        &mut self,
+        entries: &BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    ) {
+        match self {
+            Self::SccPermutations(reconfigurer) => reconfigurer
+                .preconfiguration
+                .terminating_dot_map
+                .extend(entries.iter()),
+            Self::NegotiatedCongestion(reconfigurer) => reconfigurer
+                .preconfiguration
+                .terminating_dot_map
+                .extend(entries.iter()),
         }
     }
 }
@@ -189,7 +211,7 @@ impl SccPermutationsPlanarAutorouteReconfigurer {
     ) -> Self {
         // TODO: Instead of instantiating presorter again here, get it from
         // an argument.
-        let (sccs, _escape_scores) = presorter.dissolve();
+        let (sccs, _escape_scores, _shuffle_seed) = presorter.dissolve();
 
         Self {
             configuration_search: Astar::new(SccSearchNode::new(sccs)),

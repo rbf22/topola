@@ -61,49 +61,71 @@ impl Anterouter {
 
         // PERF: Unnecessary clone.
         for (ratline, layer) in self.plan.layer_map.clone().iter() {
-            let endpoint_indices = ratline.ref_(autorouter).endpoint_indices();
-            let endpoint_dots = ratline.ref_(autorouter).endpoint_dots();
-
-            if let Some(terminating_dot) =
-                self.plan
-                    .static_terminating_dot_map
-                    .get(&(*ratline, endpoint_dots.0, *layer))
-            {
-                terminating_dot_map.insert((*ratline, endpoint_dots.0), *terminating_dot);
-            } else {
-                self.anteroute_fanout(
-                    autorouter,
-                    recorder,
-                    endpoint_indices.0,
-                    *ratline,
-                    endpoint_dots.0,
-                    *layer,
-                    options,
-                    &mut terminating_dot_map,
-                );
-            }
-
-            if let Some(terminating_dot) =
-                self.plan
-                    .static_terminating_dot_map
-                    .get(&(*ratline, endpoint_dots.1, *layer))
-            {
-                terminating_dot_map.insert((*ratline, endpoint_dots.1), *terminating_dot);
-            } else {
-                self.anteroute_fanout(
-                    autorouter,
-                    recorder,
-                    endpoint_indices.1,
-                    *ratline,
-                    endpoint_dots.1,
-                    *layer,
-                    options,
-                    &mut terminating_dot_map,
-                );
-            }
+            self.anteroute_ratline(
+                autorouter,
+                recorder,
+                *ratline,
+                *layer,
+                options,
+                &mut terminating_dot_map,
+            )
+            .expect("fanout via placement failed");
         }
 
         terminating_dot_map
+    }
+
+    /// Anteroutes one ratline to `layer`: for each endpoint that is not
+    /// already statically terminating on the layer, places a fanout via
+    /// and a fixed seg off the pad, and records the endpoint's remap to
+    /// the via's target-layer dot in `terminating_dot_map`. Used both
+    /// by the initial anteroute pass and by multilayer re-layering,
+    /// which re-anteroutes only the ratlines whose layer changed.
+    ///
+    /// Returns `Err` when an endpoint's fanout could not be placed;
+    /// whatever the other endpoint placed stays, and its terminating
+    /// remap is still recorded.
+    pub fn anteroute_ratline(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        recorder: &mut BoardEdit,
+        ratline: RatlineUid,
+        layer: usize,
+        options: &AnterouterOptions,
+        terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    ) -> Result<(), ()> {
+        let endpoint_indices = ratline.ref_(autorouter).endpoint_indices();
+        let endpoint_dots = ratline.ref_(autorouter).endpoint_dots();
+        let mut result = Ok(());
+
+        for endpoint in [0, 1] {
+            let endpoint_index = [endpoint_indices.0, endpoint_indices.1][endpoint];
+            let endpoint_dot = [endpoint_dots.0, endpoint_dots.1][endpoint];
+
+            if let Some(terminating_dot) = self
+                .plan
+                .static_terminating_dot_map
+                .get(&(ratline, endpoint_dot, layer))
+            {
+                terminating_dot_map.insert((ratline, endpoint_dot), *terminating_dot);
+            } else if self
+                .anteroute_fanout(
+                    autorouter,
+                    recorder,
+                    endpoint_index,
+                    ratline,
+                    endpoint_dot,
+                    layer,
+                    options,
+                    terminating_dot_map,
+                )
+                .is_err()
+            {
+                result = Err(());
+            }
+        }
+
+        result
     }
 
     fn anteroute_fanout(
@@ -116,7 +138,7 @@ impl Anterouter {
         target_layer: usize,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) {
+    ) -> Result<(), ()> {
         let mut ratline_delta: Point = ratline.ref_(autorouter).line_segment().delta().into();
 
         if ratvertex == ratline.ref_(autorouter).endpoint_indices().1 {
@@ -158,7 +180,7 @@ impl Anterouter {
             )
             .is_ok()
         {
-            return;
+            return Ok(());
         }
 
         let mut large_bbox = small_bbox;
@@ -194,7 +216,7 @@ impl Anterouter {
             )
             .is_ok()
         {
-            return;
+            return Ok(());
         }
 
         if self
@@ -212,7 +234,7 @@ impl Anterouter {
             )
             .is_ok()
         {
-            return;
+            return Ok(());
         }
 
         if self
@@ -230,10 +252,10 @@ impl Anterouter {
             )
             .is_ok()
         {
-            return;
+            return Ok(());
         }
 
-        panic!();
+        Err(())
     }
 
     fn anteroute_fanout_on_bbox(

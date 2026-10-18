@@ -47,21 +47,45 @@ Key findings:
 | B2' | per-(net,layer) prenavmesh vertex-base cache | ~0.7s | 133 builds → 12 bases + 133 from-base clones |
 | B3 | constrained-base delta cache (geometry `ConstraintKey`s) | ~0.8s | construction 227→~126ms; deltas 144x on 4x4 |
 | — | geometry `generation` counter on `GeometryWithRtree` | — | bumps on all mutators + `apply` (undo/redo safe) |
+| — | guard: don't reconfigure when stepper already routed all ratlines | — | completed configurations were being reconfigured away before commit |
+| B3+ | constrained-base LRU keyed by exact `ConstraintKey` set + whole-navmesh cache validated by exact loose-prim snapshot | ~0.5s | 4x4: bases 12x, constrained 24x (hits 94, deltas 180x), navmesh hit 1x |
+| C2 | `path_scratch` for `reconstruct_path_into`; nested memos — no per-call path clone | — | removes ~100K Vec allocs per 4x4 run |
+| F2 | `--jobs N`: N threads each load the dsn, route with a different `shuffle_seed`, best invoker kept | — | first full completion flags siblings to finish early |
 
 candE.dsn after C8–B2' (300s cap): construction 197s (~66%),
 step_to evals 72.9s, rework 2.7s, draw machinery ~0 — profile is now
 dominated by prenavmesh rebuilds (hence B2'/B3) and by the search not
 converging (oscillates 9–26/107 — an ordering problem, not raw speed).
 
-Whole-navmesh caching was tried and **rejected**: navnodes retain
-`LooseBend`/`PrimitiveIndex` references whose slots are recycled after
-rip-ups and redraws, so a cached navmesh dereferences stale weights
-(`unreachable!` in `GetWeight`). The safe boundary is prenavmesh-level
-caching: vertex bases keyed by (net, layer) plus constrained bases
-validated by geometry-based `ConstraintKey` sets (immune to index
-recycling). The `generation` counter is kept for future caches and
-detects any board mutation including `apply`/undo — it is deliberately
-NOT used as a cache key because every band commit bumps it.
+candE.dsn after B3+/B4/C2 (300s cap): constrained-base LRU hit
+2448/2494 builds (41 full builds, 53 deltas), vertex bases 5x, whole-
+navmesh hits 87x; navmesh conversion 73.8s is still the top
+construction cost; step_to evals 137s. **Ordering still does not
+converge** — oscillates 7–26/107 to the deadline. Caveat for reading
+progress: `finish_early` forces `curr_ratline_index = len`, so the
+"routed 107/107 (100%)" print after a deadline is an artifact of early
+finishing, not real completion — earlier "candE converged" readings
+were this artifact.
+
+Whole-navmesh caching — first tried and rejected, then **accepted
+behind exact validation**: navnodes retain `LooseBend`/`PrimitiveIndex`
+references whose slots are recycled after rip-ups (the `unreachable!`
+in `GetWeight`), but `apply()` restores indices and weights bit-for-bit.
+The cache therefore keys on `(net, layer, origin, destination, fixed
+fingerprint, options)` and validates reuse with an exact
+`PrimitiveIndex → LooseSig` snapshot (weight, joints, inner-bend
+linkage): an equal snapshot proves every loose reference in the cached
+navnodes resolves to the same weight. Backtraces hit legitimately; any
+state not bit-identical misses and rebuilds. Bounded to 32 navmeshes.
+The `generation` counter detects any board mutation including
+`apply`/undo — it is deliberately NOT used as a cache key because every
+band commit bumps it.
+
+Cache-invalidation subtlety found by metrics: the fixed-primitive
+fingerprint must fold order-independently — `layer_primitive_nodes`
+yields rtree traversal order, which shifts as loose prims come and go.
+An order-dependent fold flaps on every call and forces vertex-base
+rebuilds (87x vs 12x on 4x4); the count⊕sum fold restores stability.
 
 Post-B2' breakdown on 4x4 (instrumented): construction ~227ms (~30%),
 step_to eval ~334ms (~45%), thetastar bookkeeping + rest ~200ms.
@@ -97,16 +121,28 @@ Unit coverage for the virtual navcord: 8 tests in `router::navcord::tests`
 - [x] B1. `probe_channels`: shared `PrenavmeshBases` cache hoisted out of
       the per-ratline loop — probes reuse vertex/constrained bases since
       the board reverts after each probe.
-- [x] B3. Constraint-side caching: `PrenavmeshBases` keeps a cloned
-      constrained base per (net, layer) and applies delta additions for
-      newly committed loose segs. Validation compares `ConstraintKey`
-      sets built from endpoint/core geometry (not `PrimitiveIndex`es),
-      so rip-ups and index recycling fail the subset check and force a
-      rebuild — self-validating, no explicit invalidation hooks needed.
+- [x] B3. Constraint-side caching: `PrenavmeshBases` keeps a bounded MRU
+      of constrained bases per (net, layer), keyed by the exact
+      `ConstraintKey` set (endpoint/core geometry, not
+      `PrimitiveIndex`es) — exact-set hits reuse outright, supersets
+      delta-extend the largest subset entry, rip-ups and index
+      recycling fail the check and rebuild. Self-validating, no explicit
+      invalidation hooks needed.
+- [x] B4. Whole-navmesh cache in `PrenavmeshBases`, keyed
+      (net, layer, origin, destination, fixed fingerprint, options) and
+      gated by exact `PrimitiveIndex → LooseSig` snapshot equality —
+      `apply()` restores indices/weights bit-for-bit, so equal snapshots
+      prove the navnodes' loose-primitive references still resolve.
+- [x] B5. Completion guard: `PlanarAutorouteReconfigurator::step` no
+      longer reconfigures once the stepper routed every ratline — a
+      fully routed configuration used to be backtraced away on the same
+      tick instead of committing (the candE "107/107 then 26 kept"
+      symptom).
 
 Risk (resolved): incremental vertex insertion turned out unnecessary —
-bulk_load + clone amortizes it. Whole-navmesh caching was rejected
-(stale `LooseBend` references; see progress log).
+bulk_load + clone amortizes it. Whole-navmesh caching was first
+rejected over stale `LooseBend` references, then accepted behind the
+exact-snapshot validation in B4 (see progress log).
 
 ## Phase C — Cheap wins in the search loop
 
@@ -114,10 +150,11 @@ bulk_load + clone amortizes it. Whole-navmesh caching was rejected
       (nodes are `NodeIndex`-numbered) or HashMap; same for
       `thetastar.rs` maps (`scores`, `estimated_costs`, `predecessors` →
       `Vec`-indexed-by-navnode where domain allows).
-- [ ] C2. Kill per-visit allocations: reuse a buffer in
-      `reconstruct_path_to`; compare compounds via iterators instead of
-      collecting two `Vec`s in `place_probe_to_navnode`
-      (`router.rs:131-158`); reuse `probe_ghosts`/`probe_obstacles` buffers.
+- [x] C2. Kill per-visit allocations: `PathTracker::reconstruct_path_into`
+      writes into a `path_scratch` buffer on the strategy; `probe_memo`
+      and `step_memo` became nested `path → inner map` so lookups borrow
+      the live path (`Box<[N]>: Borrow<[N]>`) instead of cloning it per
+      probe/step. (Compound-iterator comparison still open.)
 - [x] C3. Memoize probe results: cache `step_to` verdicts keyed by
       (navcord-path-state, initial-parent, target navnode) in
       `Navcord::probe_memo`. 62s → 14s on 4x4.
@@ -180,12 +217,14 @@ Biggest win but largest design change — needs Phase A numbers to justify.
 - [ ] F1. `probe_channels` is embarrassingly parallel: each probe reverts
         the board — run probes on `Board` clones across threads (rayon).
         Measure clone cost vs. probe cost first.
-- [ ] F2. Parallel permutation search: evaluate multiple
-        ratline orderings (presort variants, shuffles) concurrently on
-        board clones; keep the best result. Turns "more exploration" into
-        free wall-clock on multicore.
-- [ ] F3. Requires: making the stepper interfaces Send-capable or running
-        whole `Autorouter` instances per thread (simpler).
+- [x] F2. Parallel permutation search: `topola --jobs N` spawns N
+        threads; each loads the .dsn, builds its own board/invoker, and
+        routes with a different `shuffle_seed` (deterministic within-SCC
+        ratline shuffle in the preconfigurer). First attempt to route
+        everything flags the rest to finish early; the invoker that
+        routed the most ratlines is kept for reporting/.ses output.
+- [x] F3. Resolved by running whole `Autorouter`/`Invoker` instances per
+        thread — no `Send` surgery needed on stepper internals.
 
 ## Phase G — Smarter ordering from probe data
 

@@ -56,6 +56,12 @@ pub struct Cli {
     pub max_reconfigurations: Option<u64>,
     #[arg(
         long,
+        value_name = "N",
+        help = "Run N parallel routing attempts with different ratline orderings and keep the best result"
+    )]
+    pub jobs: Option<u16>,
+    #[arg(
+        long,
         value_name = "FILE",
         help = "Write a JSON report of channel blockers and per-component shift suggestions for unrouted ratlines"
     )]

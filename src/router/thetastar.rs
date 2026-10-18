@@ -50,9 +50,12 @@ where
         self.predecessors.insert(node, previous);
     }
 
-    pub fn reconstruct_path_to(&self, last: G::NodeId) -> Vec<G::NodeId> {
+    /// Reconstructs the path to `last` into `path`, reusing its
+    /// allocation. Called once per navnode visit.
+    pub fn reconstruct_path_into(&self, path: &mut Vec<G::NodeId>, last: G::NodeId) {
         crate::metrics::incr(&crate::metrics::METRICS.path_reconstructions);
-        let mut path = vec![last];
+        path.clear();
+        path.push(last);
 
         let mut current = last;
         while let Some(&previous) = self.predecessors.get(&current) {
@@ -61,7 +64,11 @@ where
         }
 
         path.reverse();
+    }
 
+    pub fn reconstruct_path_to(&self, last: G::NodeId) -> Vec<G::NodeId> {
+        let mut path = vec![];
+        self.reconstruct_path_into(&mut path, last);
         path
     }
 }

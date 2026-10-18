@@ -54,6 +54,11 @@ pub struct SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
     /// touching the densest regions route first, before corridors
     /// clog. Empty when a different presort is selected.
     escape_scores: BTreeMap<RatlineUid, f64>,
+    /// Seed for a deterministic within-SCC ratline shuffle; `0` keeps
+    /// the deterministic ordering. Parallel exploration runs give each
+    /// attempt a different seed so they traverse different ordering
+    /// trajectories.
+    shuffle_seed: u64,
 }
 
 impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
@@ -98,7 +103,11 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
             BTreeMap::new()
         };
 
-        Self { sccs, escape_scores }
+        Self {
+            sccs,
+            escape_scores,
+            shuffle_seed: options.shuffle_seed,
+        }
     }
 
     fn scc_score(params: &PresortParams, scc: &Scc) -> f64 {
@@ -161,11 +170,25 @@ impl PreconfigurePlanarAutoroute for SccIntersectionsAndLengthRatlinePlanarAutor
         autorouter: &mut Autorouter<impl AccessMesadata>,
         input: PlanarAutoroutePreconfigurerInput,
     ) -> PlanarAutorouteConfiguration {
+        let mut ratlines: Vec<_> = input.ratlines.iter().copied().collect();
+        if self.shuffle_seed != 0 {
+            // Deterministic within-SCC diversity for parallel
+            // exploration: shuffling the input only permutes the order
+            // ratlines are collected *inside* each SCC below — the
+            // SCC-level congestion ordering is preserved.
+            let mut state = self.shuffle_seed.wrapping_mul(0x9e3779b97f4a7c15).max(1);
+            for i in (1..ratlines.len()).rev() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let j = (state % (i as u64 + 1)) as usize;
+                ratlines.swap(i, j);
+            }
+        }
         let mut presorted_ratlines = vec![];
 
         for scc in self.sccs.iter() {
-            let mut scc_ratlines: Vec<_> = input
-                .ratlines
+            let mut scc_ratlines: Vec<_> = ratlines
                 .iter()
                 .filter(|ratline| scc.scc_ref(autorouter).contains(**ratline))
                 .copied()

@@ -36,3 +36,6 @@ dist/
 
 # ignore manpages
 topola.1
+
+# macOS
+.DS_Store

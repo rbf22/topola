@@ -248,6 +248,162 @@ impl PlanarAutorouteExecutionStepper {
 
         self.curr_ratline_index = self.configuration.ratlines.len();
     }
+
+    /// Surgical rip-up, phase one: reverts the in-flight route's
+    /// partial work, removes the bands of `rip_up` ratlines — resolved
+    /// under the *current* configuration's terminating-dot map, which
+    /// is where the bands were registered — and folds their edit slots
+    /// into `pending_edit` so each creation and removal record
+    /// coalesces instead of resurrecting the band on undo.
+    ///
+    /// Must be followed by [`Self::install_configuration`] (which may
+    /// change the terminating-dot map) before stepping resumes.
+    /// Between the two calls the board holds no bands for the ripped
+    /// ratlines and no route is in flight, which is where multilayer
+    /// re-layering swaps the affected fanout vias.
+    pub fn surgical_rip_up(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        rip_up: &[RatlineUid],
+    ) -> Result<(), AutorouterError> {
+        log::debug!(
+            "surgical rip-up: removing {} blocker bands at ratline {}",
+            rip_up.len(),
+            self.curr_ratline_index,
+        );
+        crate::metrics::incr(&crate::metrics::METRICS.surgical_ripups);
+
+        if let Some(taken_route) = self.route.take() {
+            let (_thetastar, navcord, ..) = taken_route.dissolve();
+            let edit = BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
+            autorouter.board.apply_edit(&edit.reverse());
+        }
+
+        // Drop the ripped-up ratlines' edit slots, preserving the
+        // per-position alignment between the edit vecs and the
+        // configuration's ratlines. The dropped entries merge into
+        // `pending_edit` before the surgical removals so each ripped
+        // band's creation and removal records coalesce into a no-op
+        // instead of resurrecting the band on undo.
+        let mut indices: Vec<_> = rip_up
+            .iter()
+            .filter_map(|ratline| {
+                self.configuration
+                    .ratlines
+                    .iter()
+                    .position(|uid| uid == ratline)
+            })
+            .filter(|index| *index < self.layout_edits.len())
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+
+        let mut ripped_edits = BoardEdit::new();
+        for index in indices.iter().rev() {
+            ripped_edits
+                .layout_edit
+                .merge(self.layout_edits.remove(*index));
+            ripped_edits
+                .board_data_edit
+                .merge(self.board_data_edits.remove(*index));
+        }
+
+        // Bands are looked up under the current configuration:
+        // reconfigurations that change `terminating_dot_map`
+        // (multilayer re-layering) must still find each band where it
+        // was registered, under the old terminating dots.
+        let mut removal_edit = BoardEdit::new();
+        for ratline in rip_up {
+            let index = self
+                .configuration
+                .ratlines
+                .iter()
+                .position(|uid| uid == ratline)
+                .unwrap();
+            let (origin, destination) =
+                self.configuration.ratline_terminating_dots(autorouter, index);
+
+            let Some(band) = autorouter.board.band_between_nodes(origin, destination)
+            else {
+                continue;
+            };
+
+            autorouter
+                .board
+                .remove_band_between_nodes(&mut removal_edit, origin, destination)
+                .map_err(|_| AutorouterError::CouldNotRemoveBand(band[false]))?;
+        }
+
+        // Chronological merge: the ripped bands' original edits
+        // precede their surgical removals, so each pair coalesces to a
+        // no-op when the pending edit later merges into a slot.
+        self.pending_edit.merge(ripped_edits);
+        self.pending_edit.merge(removal_edit);
+        Ok(())
+    }
+
+    /// Surgical rip-up, phase two: installs `new_configuration` and
+    /// resumes routing at the ratline that was being attempted, which
+    /// keeps its position relative to the requeued `rip_up` ratlines
+    /// by the caller's ordering. When routing had already run off the
+    /// end of the ratline list, resumes at the first requeued ratline
+    /// instead.
+    pub fn install_configuration(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        new_configuration: PlanarAutorouteConfiguration,
+    ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
+        let attempted = self
+            .configuration
+            .ratlines
+            .get(self.curr_ratline_index)
+            .copied();
+        let first_requeued = new_configuration.rip_up.first().copied();
+        let rip_up_count = new_configuration.rip_up.len();
+
+        let result = PlanarAutorouteConfigurationStatus {
+            configuration: std::mem::replace(&mut self.configuration, new_configuration),
+            costs: PlanarAutorouteCosts {
+                lengths: (0..self.curr_ratline_index).map(|_| 0.0).collect(),
+            },
+        };
+
+        self.curr_ratline_index = if let Some(attempted) = attempted {
+            self.configuration
+                .ratlines
+                .iter()
+                .position(|uid| *uid == attempted)
+                .unwrap()
+        } else {
+            // The queue was exhausted: the requeued ratlines sit at the
+            // end of the new ordering.
+            first_requeued
+                .and_then(|ratline| {
+                    self.configuration
+                        .ratlines
+                        .iter()
+                        .position(|uid| *uid == ratline)
+                })
+                .unwrap_or_else(|| self.configuration.ratlines.len().saturating_sub(rip_up_count))
+        };
+
+        if self.curr_ratline_index < self.configuration.ratlines.len() {
+            self.start_routing_ratline(autorouter)?;
+        }
+        Ok(result)
+    }
+
+    /// Extends the live configuration's terminating-dot remappings.
+    /// Multilayer re-layering calls this between
+    /// [`Self::surgical_rip_up`] and [`Self::install_configuration`]
+    /// after placing the new fanout vias; planar reconfigurations
+    /// leave the map untouched.
+    pub fn remap_terminating_dots(
+        &mut self,
+        entries: &BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    ) {
+        self.configuration.terminating_dot_map.extend(entries.iter());
+    }
 }
 
 impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteContinueStatus>
@@ -376,96 +532,8 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for PlanarAutorouteExecutionS
         new_configuration: PlanarAutorouteConfiguration,
     ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
         if !new_configuration.rip_up.is_empty() {
-            // Surgical rip-up: revert the failed route's partial work,
-            // then remove only the blocking bands. Every other routed
-            // band survives, and the ripped-up ratlines are requeued
-            // right after the failed one in the new ordering.
-            log::debug!(
-                "surgical rip-up: removing {} blocker bands at ratline {}",
-                new_configuration.rip_up.len(),
-                self.curr_ratline_index,
-            );
-            if let Some(taken_route) = self.route.take() {
-                let (_thetastar, navcord, ..) = taken_route.dissolve();
-                let edit =
-                    BoardEdit::new_from_edits(BoardDataEdit::new(), navcord.recorder);
-                autorouter.board.apply_edit(&edit.reverse());
-            }
-
-            // Drop the ripped-up ratlines' edit slots, preserving the
-            // per-position alignment between the edit vecs and the
-            // configuration's ratlines. The dropped entries merge into
-            // `pending_edit` before the surgical removals so each
-            // ripped band's creation and removal records coalesce into
-            // a no-op instead of resurrecting the band on undo.
-            let mut indices: Vec<_> = new_configuration
-                .rip_up
-                .iter()
-                .filter_map(|ratline| {
-                    self.configuration
-                        .ratlines
-                        .iter()
-                        .position(|uid| uid == ratline)
-                })
-                .collect();
-            indices.sort_unstable();
-
-            let mut ripped_edits = BoardEdit::new();
-            for index in indices.iter().rev() {
-                ripped_edits
-                    .layout_edit
-                    .merge(self.layout_edits.remove(*index));
-                ripped_edits
-                    .board_data_edit
-                    .merge(self.board_data_edits.remove(*index));
-            }
-
-            let mut removal_edit = BoardEdit::new();
-            for ratline in &new_configuration.rip_up {
-                let index = new_configuration
-                    .ratlines
-                    .iter()
-                    .position(|uid| uid == ratline)
-                    .unwrap();
-                let (origin, destination) =
-                    new_configuration.ratline_terminating_dots(autorouter, index);
-
-                let Some(band) = autorouter.board.band_between_nodes(origin, destination)
-                else {
-                    continue;
-                };
-
-                autorouter
-                    .board
-                    .remove_band_between_nodes(&mut removal_edit, origin, destination)
-                    .map_err(|_| AutorouterError::CouldNotRemoveBand(band[false]))?;
-            }
-
-            // Chronological merge: the ripped bands' original edits
-            // precede their surgical removals, so each pair coalesces
-            // to a no-op when the pending edit later merges into the
-            // failed ratline's slot.
-            self.pending_edit.merge(ripped_edits);
-            self.pending_edit.merge(removal_edit);
-
-            let failed = self.configuration.ratlines[self.curr_ratline_index];
-            let result = PlanarAutorouteConfigurationStatus {
-                configuration: std::mem::replace(&mut self.configuration, new_configuration),
-                costs: PlanarAutorouteCosts {
-                    lengths: (0..*self.curr_ratline_index()).map(|_| 0.0).collect(),
-                },
-            };
-
-            // The failed ratline keeps its slot in the new ordering;
-            // the ripped-up ratlines follow right after.
-            self.curr_ratline_index = self
-                .configuration
-                .ratlines
-                .iter()
-                .position(|uid| *uid == failed)
-                .unwrap();
-            self.start_routing_ratline(autorouter)?;
-            return Ok(result);
+            self.surgical_rip_up(autorouter, &new_configuration.rip_up)?;
+            return self.install_configuration(autorouter, new_configuration);
         }
 
         let Some(new_index) = new_configuration

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::ops::ControlFlow;
+use std::{collections::BTreeMap, ops::ControlFlow};
 
 use specctra_core::mesadata::AccessMesadata;
 
@@ -11,18 +11,19 @@ use crate::{
         escape_stubs,
         invoker::GetDebugOverlayData,
         planar_autoroute::{
-            PlanarAutorouteConfigurationStatus, PlanarAutorouteContinueStatus,
-            PlanarAutorouteExecutionStepper,
+            PlanarAutorouteConfiguration, PlanarAutorouteConfigurationStatus,
+            PlanarAutorouteContinueStatus, PlanarAutorouteExecutionStepper,
         },
         planar_preconfigurer::{
             PlanarAutoroutePreconfigurerInput, PreconfigurePlanarAutoroute, PresortParams,
             SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer,
         },
         planar_reconfigurer::{MakeNextPlanarAutorouteConfiguration, PlanarAutorouteReconfigurer},
+        ratline::RatlineUid,
         Autorouter, AutorouterError, PlanarAutorouteOptions,
     },
     board::edit::{BoardDataEdit, BoardEdit},
-    drawing::graph::PrimitiveIndex,
+    drawing::{dot::FixedDotIndex, graph::PrimitiveIndex},
     geometry::{edit::Edit, primitive::PrimitiveShape},
     layout::LayoutEdit,
     router::{navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper},
@@ -99,6 +100,64 @@ impl PlanarAutorouteReconfigurator {
         })
     }
 
+    /// Begins a surgical reconfiguration driven from outside the
+    /// reconfigurer: rips up the bands of `rip_up` ratlines (resolved
+    /// under the live configuration's terminating-dot map) and folds
+    /// their edit slots into the stepper's pending edit. Leaves no
+    /// route in flight.
+    ///
+    /// Must be followed by [`Self::commit_surgical_reconfiguration`]
+    /// before stepping resumes. Between the two calls the caller may
+    /// modify the board — e.g. swap the ripped ratlines' fanout vias
+    /// for multilayer re-layering — and call
+    /// [`Self::remap_terminating_dots`] to update the remappings the
+    /// requeued ratlines will route to.
+    pub fn begin_surgical_reconfiguration(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        rip_up: &[RatlineUid],
+    ) -> Result<(), AutorouterError> {
+        self.stepper.surgical_rip_up(autorouter, rip_up)
+    }
+
+    /// Installs `new_configuration` after
+    /// [`Self::begin_surgical_reconfiguration`] and resumes routing.
+    /// Its `rip_up` list is informational only — the bands are already
+    /// gone — but is kept for the resume-position bookkeeping.
+    pub fn commit_surgical_reconfiguration(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        new_configuration: PlanarAutorouteConfiguration,
+    ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
+        self.reconfiguration_count += 1;
+        self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
+        self.stepper
+            .install_configuration(autorouter, new_configuration)
+    }
+
+    /// Extends the terminating-dot remappings in both the stepper's
+    /// live configuration and the reconfigurer's stored
+    /// preconfiguration, so emitted configurations keep them.
+    pub fn remap_terminating_dots(
+        &mut self,
+        entries: &BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    ) {
+        self.stepper.remap_terminating_dots(entries);
+        self.reconfigurer.remap_terminating_dots(entries);
+    }
+
+    /// The live configuration of the inner stepper — the ratline order
+    /// and terminating-dot map routing is currently working against.
+    pub fn configuration(&self) -> &PlanarAutorouteConfiguration {
+        self.stepper.configuration()
+    }
+
+    /// Index of the ratline currently being attempted in the live
+    /// configuration's ordering.
+    pub fn curr_ratline_index(&self) -> usize {
+        *self.stepper.curr_ratline_index()
+    }
+
     /// Finishes routing early, keeping already routed bands. The next
     /// `step()` produces the accumulated edit without triggering another
     /// reconfiguration.
@@ -155,7 +214,16 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
         autorouter: &mut Autorouter<M>,
     ) -> Result<ControlFlow<Option<BoardEdit>, PlanarAutorouteReconfiguratorStatus>, AutorouterError>
     {
+        // Once the stepper has routed every ratline it must not be
+        // reconfigured: the next `step()` produces the merged edit, and
+        // reconfiguring here would backtrace away a completed
+        // configuration — the in-flight route is gone by then, so the
+        // timeout's subscale no longer accrues budget.
+        let stepper_done =
+            *self.stepper.curr_ratline_index() >= self.stepper.configuration().ratlines.len();
+
         if !self.finished
+            && !stepper_done
             && !self
                 .timeout
                 .update(*self.estimate_progress().subscale().value() as f64)

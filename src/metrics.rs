@@ -37,7 +37,7 @@ macro_rules! metrics_struct {
                 writeln!(f, "== topola metrics ==")?;
                 writeln!(
                     f,
-                    "construction: prenavmesh {}x ({:.1}ms), bases {}x ({:.1}ms) + from-base {}x ({:.1}ms) + constrained {}x ({:.1}ms, deltas {}x), navmesh {}x ({:.1}ms), navnodes {} edges {}",
+                    "construction: prenavmesh {}x ({:.1}ms), bases {}x ({:.1}ms) + from-base {}x ({:.1}ms) + constrained {}x ({:.1}ms, deltas {}x, hits {}), navmesh {}x ({:.1}ms, hits {}), navnodes {} edges {}",
                     self.prenavmesh_builds.load(Ordering::Relaxed),
                     ms(self.prenavmesh_nanos.load(Ordering::Relaxed)),
                     self.prenavmesh_base_builds.load(Ordering::Relaxed),
@@ -51,8 +51,11 @@ macro_rules! metrics_struct {
                         .load(Ordering::Relaxed)),
                     self.prenavmesh_delta_constraint_adds
                         .load(Ordering::Relaxed),
+                    self.prenavmesh_constrained_base_hits
+                        .load(Ordering::Relaxed),
                     self.navmesh_builds.load(Ordering::Relaxed),
                     ms(self.navmesh_nanos.load(Ordering::Relaxed)),
+                    self.navmesh_cache_hits.load(Ordering::Relaxed),
                     self.navmesh_nodes_total.load(Ordering::Relaxed),
                     self.navmesh_edges_total.load(Ordering::Relaxed),
                 )?;
@@ -63,6 +66,12 @@ macro_rules! metrics_struct {
                     self.stale_frontier_pops.load(Ordering::Relaxed),
                     self.visit_navnode_calls.load(Ordering::Relaxed),
                     self.path_reconstructions.load(Ordering::Relaxed),
+                )?;
+                writeln!(
+                    f,
+                    "reconfiguration: surgical_ripups {}, multilayer_surgical_reconfigures {}",
+                    self.surgical_ripups.load(Ordering::Relaxed),
+                    self.multilayer_surgical_reconfigures.load(Ordering::Relaxed),
                 )?;
                 writeln!(
                     f,
@@ -130,7 +139,9 @@ metrics_struct!(
     prenavmesh_from_base_nanos,
     prenavmesh_constrained_base_builds,
     prenavmesh_constrained_base_nanos,
+    prenavmesh_constrained_base_hits,
     prenavmesh_delta_constraint_adds,
+    navmesh_cache_hits,
     navmesh_builds,
     navmesh_nanos,
     navmesh_nodes_total,
@@ -146,6 +157,9 @@ metrics_struct!(
     probes_los_ok,
     probes_failed,
     probes_backtracked,
+    // Reconfiguration
+    surgical_ripups,
+    multilayer_surgical_reconfigures,
     // Geometry draw/undraw — the suspected hot path
     step_to_ok,
     step_to_err,

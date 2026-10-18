@@ -187,16 +187,21 @@ pub struct Navcord {
     band_net: Option<usize>,
     band_layer: usize,
     /// Memoized probe verdicts keyed by the navcord path state, initial
-    /// parent navnode, and probed navnode.
-    pub probe_memo:
-        HashMap<(Box<[NavnodeIndex]>, Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>,
+    /// parent navnode, and probed navnode. Nested so that lookups can
+    /// borrow the live path instead of cloning it per probe.
+    pub probe_memo: HashMap<
+        Box<[NavnodeIndex]>,
+        HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>,
+    >,
     /// Memoized `.step_to(..)` verdicts keyed by the navcord state —
     /// the path plus the number of leading materialized canes — and
     /// the target navnode. `.rework_path(..)` redraws paths over and
     /// over, so this saves re-evaluating their geometry each time.
+    /// Nested so that lookups can borrow the live path instead of
+    /// cloning it per step.
     step_memo: HashMap<
-        (Box<[NavnodeIndex]>, usize, NavnodeIndex),
-        Result<(GhostReplay, f64), NavcorderException>,
+        Box<[NavnodeIndex]>,
+        HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>,
     >,
 }
 
@@ -491,9 +496,11 @@ impl Navcord {
             .iter()
             .take_while(|cane| matches!(cane, PathCane::Real(..)))
             .count();
-        let memo_key = (self.path.clone().into_boxed_slice(), materialized, to);
-
-        if let Some(entry) = self.step_memo.get(&memo_key) {
+        if let Some(entry) = self
+            .step_memo
+            .get(self.path.as_slice())
+            .and_then(|by_path| by_path.get(&(materialized, to)))
+        {
             crate::metrics::incr(&crate::metrics::METRICS.step_memo_hits);
             return match entry.clone() {
                 Ok((replay, length)) => {
@@ -519,7 +526,10 @@ impl Navcord {
         // Cap the memo so that on pathological boards it does not grow
         // without bound; beyond the cap verdicts are just re-evaluated.
         if self.step_memo.len() < 2_000_000 {
-            self.step_memo.insert(memo_key, verdict.clone());
+            self.step_memo
+                .entry(self.path.clone().into_boxed_slice())
+                .or_default()
+                .insert((materialized, to), verdict.clone());
         }
 
         match verdict {

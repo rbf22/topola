@@ -81,6 +81,39 @@ impl<DW, SW, BW, CW, Cel, PI, DI, SI, BI> GeometryEdit<DW, SW, BW, CW, Cel, PI, 
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Dots this edit creates (i.e. removes when reversed).
+    pub fn created_dots(&self) -> impl Iterator<Item = DI> + '_
+    where
+        DI: Copy,
+    {
+        self.dots
+            .iter()
+            .filter(|(_, (old, new))| old.is_none() && new.is_some())
+            .map(|(index, _)| *index)
+    }
+
+    /// Segs this edit creates (i.e. removes when reversed).
+    pub fn created_segs(&self) -> impl Iterator<Item = SI> + '_
+    where
+        SI: Copy,
+    {
+        self.segs
+            .iter()
+            .filter(|(_, (old, new))| old.is_none() && new.is_some())
+            .map(|(index, _)| *index)
+    }
+
+    /// Bends this edit creates (i.e. removes when reversed).
+    pub fn created_bends(&self) -> impl Iterator<Item = BI> + '_
+    where
+        BI: Copy,
+    {
+        self.bends
+            .iter()
+            .filter(|(_, (old, new))| old.is_none() && new.is_some())
+            .map(|(index, _)| *index)
+    }
 }
 
 impl<

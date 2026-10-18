@@ -112,6 +112,12 @@ pub struct PlanarAutorouteOptions {
     /// [`ReconfigureBy::NegotiatedCongestion`] is selected.
     #[serde(default)]
     pub surgical_ripup: bool,
+    /// Seed for a deterministic within-SCC ratline shuffle applied at
+    /// preconfiguration; `0` keeps the deterministic ordering. Parallel
+    /// exploration runs give each attempt a different seed so they
+    /// traverse different ordering trajectories.
+    #[serde(default)]
+    pub shuffle_seed: u64,
 }
 
 #[derive(Error, Debug, Clone)]

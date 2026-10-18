@@ -7,12 +7,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Write;
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use topola::autorouter::execution::Command;
 use topola::autorouter::history::History;
 use topola::autorouter::invoker::Invoker;
 use topola::autorouter::ratline::RatlineUid;
 use topola::autorouter::selection::PinSelection;
+use topola::board::Board;
 use topola::autorouter::anterouter::AnterouterOptions;
 use topola::autorouter::multilayer_autoroute::MultilayerAutorouteOptions;
 use topola::autorouter::Autorouter;
@@ -24,7 +28,8 @@ use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef};
 
 use topola::router::RouterOptions;
 use topola::specctra::design::SpecctraDesign;
-use topola::stepper::{EstimateProgress, TimeoutOptions};
+use topola::specctra::mesadata::SpecctraMesadata;
+use topola::stepper::{EstimateProgress, Step, TimeoutOptions};
 
 pub mod cli;
 pub mod suggest;
@@ -80,96 +85,31 @@ fn main() -> Result<(), std::io::Error> {
     let design =
         SpecctraDesign::load(design_bufread).expect("File failed to parse as Specctra DSN");
 
-    let mut board = design.make_board(&mut BoardEdit::new());
-
-    if let Some(report_filename) = &args.apply_shifts {
-        apply_shift_report(&mut board, report_filename)?;
-    }
-
-    let history = if let Some(commands_filename) = args.commands {
-        let command_file = File::open(commands_filename)?;
-        let commands_bufread = BufReader::new(command_file);
-        serde_json::from_reader(commands_bufread)?
+    let mut invoker = if args.jobs.unwrap_or(1) > 1 && args.commands.is_none() {
+        run_parallel_jobs(&args)?
     } else {
-        let mut history = History::new();
-        let selection = if !args.nets.is_empty() {
-            let nets: BTreeSet<String> = args.nets.iter().cloned().collect();
-            for net in &nets {
-                if board.mesadata().netname_net(net).is_none() {
-                    eprintln!("[topola] warning: net '{}' not found", net);
-                }
-            }
-            let selection = PinSelection::new_select_nets(&board, &nets);
-            eprintln!(
-                "[topola] selected {} pins across {} requested nets",
-                selection.selectors().count(),
-                nets.len()
-            );
-            selection
-        } else if !args.exclude_nets.is_empty() {
-            let nets: BTreeSet<String> = args.exclude_nets.iter().cloned().collect();
-            let selection = PinSelection::new_select_all_except_nets(&board, &nets);
-            eprintln!(
-                "[topola] selected {} pins excluding {} nets",
-                selection.selectors().count(),
-                nets.len()
-            );
-            selection
+        let mut board = design.make_board(&mut BoardEdit::new());
+
+        if let Some(report_filename) = &args.apply_shifts {
+            apply_shift_report(&mut board, report_filename)?;
+        }
+
+        let history = if let Some(commands_filename) = &args.commands {
+            let command_file = File::open(commands_filename)?;
+            let commands_bufread = BufReader::new(command_file);
+            serde_json::from_reader(commands_bufread)?
         } else {
-            PinSelection::new_select_layer(&board, 0)
-        };
-        let planar_options = PlanarAutorouteOptions {
-            principal_layer: 0,
-            presort_by: if args.escape_presort {
-                PresortBy::RatlineEscapeDensity
-            } else {
-                PresortBy::RatlineIntersectionCountAndLength
-            },
-            permutate: true,
-            reconfigure_by: Default::default(),
-            congestion_penalty: 500.0,
-            router: RouterOptions {
-                wrap_around_bands: true,
-                squeeze_through_under_bends: args.multilayer,
-                routed_band_width: 100.0,
-            },
-            timeout: TimeoutOptions {
-                initial: 1.0,
-                progress_bonus: 0.005,
-            },
-            max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
-            improve_pad_entry: args.pad_entry,
-            pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
-            escape_stubs: args.escape_stubs,
-            surgical_ripup: args.surgical_ripup,
+            let mut history = History::new();
+            let selection = make_selection(&board, &args);
+            let command = make_command(&args, selection, make_planar_options(&args));
+            history.do_(command, None);
+            history
         };
 
-        let command = if args.multilayer {
-            Command::MultilayerAutoroute(
-                selection,
-                MultilayerAutorouteOptions {
-                    anterouter: AnterouterOptions {
-                        fanout_clearance: 200.0,
-                    },
-                    planar: planar_options,
-                    timeout: TimeoutOptions {
-                        initial: 5.0,
-                        progress_bonus: 0.5,
-                    },
-                },
-            )
-        } else {
-            Command::Autoroute(selection, planar_options)
-        };
+        let mut invoker = Invoker::new(Autorouter::new(board).unwrap());
 
-        history.do_(command, None);
-        history
-    };
-
-    let mut invoker = Invoker::new(Autorouter::new(board).unwrap());
-
-    let (done, undone) = history.dissolve();
-    for entry in done {
+        let (done, undone) = history.dissolve();
+        for entry in done {
         let mut last_report = Instant::now();
         let start = Instant::now();
         let status = invoker.execute_with_timeout(
@@ -208,8 +148,10 @@ fn main() -> Result<(), std::io::Error> {
             ),
             Err(err) => eprintln!("[topola] command failed: {:?}", err),
         }
-    }
-    let _ = undone; // replay drops undone history entries
+        }
+        let _ = undone; // replay drops undone history entries
+        invoker
+    };
 
     {
         use topola::graph::MakeRef;
@@ -303,6 +245,251 @@ fn main() -> Result<(), std::io::Error> {
         .expect("Failed to write Specctra Session file");
 
     Ok(())
+}
+
+fn make_selection(board: &Board<SpecctraMesadata>, args: &Cli) -> PinSelection {
+    if !args.nets.is_empty() {
+        let nets: BTreeSet<String> = args.nets.iter().cloned().collect();
+        for net in &nets {
+            if board.mesadata().netname_net(net).is_none() {
+                eprintln!("[topola] warning: net '{}' not found", net);
+            }
+        }
+        let selection = PinSelection::new_select_nets(&board, &nets);
+        eprintln!(
+            "[topola] selected {} pins across {} requested nets",
+            selection.selectors().count(),
+            nets.len()
+        );
+        selection
+    } else if !args.exclude_nets.is_empty() {
+        let nets: BTreeSet<String> = args.exclude_nets.iter().cloned().collect();
+        let selection = PinSelection::new_select_all_except_nets(&board, &nets);
+        eprintln!(
+            "[topola] selected {} pins excluding {} nets",
+            selection.selectors().count(),
+            nets.len()
+        );
+        selection
+    } else {
+        PinSelection::new_select_layer(&board, 0)
+    }
+}
+
+fn make_planar_options(args: &Cli) -> PlanarAutorouteOptions {
+    PlanarAutorouteOptions {
+        principal_layer: 0,
+        presort_by: if args.escape_presort {
+            PresortBy::RatlineEscapeDensity
+        } else {
+            PresortBy::RatlineIntersectionCountAndLength
+        },
+        permutate: true,
+        reconfigure_by: Default::default(),
+        congestion_penalty: 500.0,
+        router: RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: args.multilayer,
+            routed_band_width: 100.0,
+        },
+        timeout: TimeoutOptions {
+            initial: 1.0,
+            progress_bonus: 0.005,
+        },
+        max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
+        improve_pad_entry: args.pad_entry,
+        pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+        escape_stubs: args.escape_stubs,
+        surgical_ripup: args.surgical_ripup,
+        shuffle_seed: 0,
+    }
+}
+
+fn make_command(
+    args: &Cli,
+    selection: PinSelection,
+    planar_options: PlanarAutorouteOptions,
+) -> Command {
+    if args.multilayer {
+        Command::MultilayerAutoroute(
+            selection,
+            MultilayerAutorouteOptions {
+                anterouter: AnterouterOptions {
+                    fanout_clearance: 200.0,
+                },
+                planar: planar_options,
+                timeout: TimeoutOptions {
+                    initial: 5.0,
+                    progress_bonus: 0.5,
+                },
+            },
+        )
+    } else {
+        Command::Autoroute(selection, planar_options)
+    }
+}
+
+/// Counts (routed, total) ratlines on the principal-layer ratsnest.
+fn routed_counts(autorouter: &Autorouter<SpecctraMesadata>) -> (usize, usize) {
+    let ratsnest = autorouter.ratsnests().on_principal_layer(0);
+    let total = ratsnest.graph().edge_indices().count();
+    let routed = ratsnest
+        .graph()
+        .edge_indices()
+        .filter(|edge| {
+            ratsnest
+                .graph()
+                .edge_weight(*edge)
+                .is_some_and(|weight| weight.band_termseg.is_some())
+        })
+        .count();
+    (routed, total)
+}
+
+/// Runs `args.jobs` independent routing attempts in parallel, each on
+/// its own board copy and with a different preconfiguration shuffle
+/// seed, then keeps the invoker that routed the most ratlines. The
+/// first attempt to route everything flags the others to finish early.
+fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::Error> {
+    let jobs = args.jobs.unwrap_or(1) as usize;
+    let stop = Arc::new(AtomicBool::new(false));
+    let template = make_planar_options(args);
+
+    eprintln!(
+        "[topola] running {} parallel routing attempts (best of {} kept)",
+        jobs, jobs
+    );
+
+    let mut handles = Vec::with_capacity(jobs);
+    for i in 0..jobs {
+        let input = args.input.clone();
+        let apply_shifts = args.apply_shifts.clone();
+        let nets = args.nets.clone();
+        let exclude_nets = args.exclude_nets.clone();
+        let multilayer = args.multilayer;
+        let max_seconds = args.max_seconds;
+        let stop = Arc::clone(&stop);
+        let mut planar_options = template;
+        planar_options.shuffle_seed = i as u64;
+
+        handles.push(std::thread::spawn(
+            move || -> Result<(usize, Invoker<SpecctraMesadata>), String> {
+                let design_file = File::open(&input).map_err(|e| e.to_string())?;
+                let design = SpecctraDesign::load(BufReader::new(design_file))
+                    .map_err(|e| format!("{:?}", e))?;
+                let mut board = design.make_board(&mut BoardEdit::new());
+                if let Some(report_filename) = &apply_shifts {
+                    apply_shift_report(&mut board, report_filename).map_err(|e| e.to_string())?;
+                }
+
+                let selection = if !nets.is_empty() {
+                    let net_set: BTreeSet<String> = nets.iter().cloned().collect();
+                    PinSelection::new_select_nets(&board, &net_set)
+                } else if !exclude_nets.is_empty() {
+                    let net_set: BTreeSet<String> = exclude_nets.iter().cloned().collect();
+                    PinSelection::new_select_all_except_nets(&board, &net_set)
+                } else {
+                    PinSelection::new_select_layer(&board, 0)
+                };
+                let command = if multilayer {
+                    Command::MultilayerAutoroute(
+                        selection,
+                        MultilayerAutorouteOptions {
+                            anterouter: AnterouterOptions {
+                                fanout_clearance: 200.0,
+                            },
+                            planar: planar_options,
+                            timeout: TimeoutOptions {
+                                initial: 5.0,
+                                progress_bonus: 0.5,
+                            },
+                        },
+                    )
+                } else {
+                    Command::Autoroute(selection, planar_options)
+                };
+
+                let mut invoker =
+                    Invoker::new(Autorouter::new(board).map_err(|e| format!("{:?}", e))?);
+                let mut execute = invoker
+                    .execute_stepper(command)
+                    .map_err(|e| format!("{:?}", e))?;
+
+                let start = Instant::now();
+                let deadline = max_seconds.map(|s| start + Duration::from_secs_f64(s));
+                let mut last_report = Instant::now();
+                let mut finished_early = false;
+
+                loop {
+                    let status = execute.step(&mut invoker).map_err(|e| format!("{:?}", e))?;
+                    if let ControlFlow::Break(..) = status {
+                        break;
+                    }
+
+                    if !finished_early
+                        && (deadline.is_some_and(|d| Instant::now() >= d)
+                            || stop.load(Ordering::Relaxed))
+                    {
+                        execute.finish_early(invoker.autorouter_mut());
+                        finished_early = true;
+                    }
+
+                    if last_report.elapsed() >= Duration::from_secs(2) {
+                        let progress = execute.estimate_progress();
+                        let value = *progress.value();
+                        let maximum = *progress.maximum();
+                        eprintln!(
+                            "[topola j{}] {} elapsed, routed {}/{} ({:.1}%)",
+                            i,
+                            humantime(start.elapsed()),
+                            value,
+                            maximum,
+                            if maximum > 0 {
+                                100.0 * value as f64 / maximum as f64
+                            } else {
+                                0.0
+                            }
+                        );
+                        last_report = Instant::now();
+                    }
+                }
+
+                // A full completion (no early finish) means this
+                // attempt routed everything — stop the sibling
+                // attempts, the winner is already decided.
+                if !finished_early {
+                    stop.store(true, Ordering::Relaxed);
+                }
+
+                let (routed, total) = routed_counts(invoker.autorouter());
+                eprintln!(
+                    "[topola j{}] done in {}: routed {}/{}",
+                    i,
+                    humantime(start.elapsed()),
+                    routed,
+                    total
+                );
+                Ok((routed, invoker))
+            },
+        ));
+    }
+
+    let mut best: Option<(usize, Invoker<SpecctraMesadata>)> = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(result)) => {
+                if best.as_ref().is_none_or(|(routed, _)| result.0 > *routed) {
+                    best = Some(result);
+                }
+            }
+            Ok(Err(err)) => eprintln!("[topola] parallel job failed: {}", err),
+            Err(_) => eprintln!("[topola] parallel job panicked"),
+        }
+    }
+
+    best.map(|(_, invoker)| invoker).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "all parallel routing jobs failed")
+    })
 }
 
 fn humantime(d: Duration) -> String {

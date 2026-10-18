@@ -158,6 +158,25 @@ fn autoroute_tht_db25_to_tht_db25(variant: &str) {
     common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
 }
 
+/// Exercises surgical rip-up on a board whose failures are actually
+/// caused by already-routed bands (not fixed pads): the DB25
+/// passthrough produces `surgical_ripups > 0` — verified via the
+/// `metrics` feature — while still completing every ratline.
+#[apply(test_master)]
+fn autoroute_tht_db25_to_tht_db25_surgical(variant: &str) {
+    let autorouter =
+        common::load_design("tests/unilayer/tht_db25_to_tht_db25/tht_db25_to_tht_db25.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+    common::replay_and_assert_and_report(
+        &mut invoker,
+        "tests/unilayer/tht_db25_to_tht_db25/autoroute_all_surgical.cmd",
+        variant,
+    );
+
+    let (mut autorouter, ..) = invoker.dissolve();
+    common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
 #[apply(test_master)]
 fn autoroute_tht_de9_to_tht_de9(variant: &str) {
     let autorouter =
