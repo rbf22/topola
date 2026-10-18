@@ -418,43 +418,48 @@ impl<
     }
 
     pub fn dot_weight(&self, dot: DI) -> DW {
-        self.primitive_weight(dot.index().into())
+        let index: usize = dot.index().into();
+        self.primitive_weight(index)
             .try_into()
-            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|_| panic!("index {index} no longer holds a dot"))
     }
 
     pub fn seg_weight(&self, seg: SI) -> SW {
-        self.primitive_weight(seg.index().into())
+        let index: usize = seg.index().into();
+        self.primitive_weight(index)
             .try_into()
-            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|_| panic!("index {index} no longer holds a seg"))
     }
 
     pub fn bend_weight(&self, bend: BI) -> BW {
-        self.primitive_weight(bend.index().into())
+        let index: usize = bend.index().into();
+        self.primitive_weight(index)
             .try_into()
-            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|_| panic!("index {index} no longer holds a bend"))
     }
 
     pub fn compound_weight(&self, compound: GenericIndex<CW>) -> &CW {
-        if let GenericNode::Compound(weight) =
-            self.graph.node_weight(compound.index().into()).unwrap()
-        {
-            weight
-        } else {
-            unreachable!()
+        let index: usize = compound.index().into();
+        match self.graph.node_weight(index.into()) {
+            Some(GenericNode::Compound(weight)) => weight,
+            Some(GenericNode::Primitive(_)) => {
+                panic!("index {index} holds a primitive, not a compound")
+            }
+            None => panic!("stale compound index {index}: slot is vacant"),
         }
     }
 
     fn core_weight(&self, bend: BI) -> DW {
+        let bend_index: usize = bend.index().into();
         self.graph
-            .edges_directed(bend.index().into(), Outgoing)
+            .edges_directed(bend_index.into(), Outgoing)
             .find(|edge| matches!(edge.weight(), GeometryLabel::Core))
             .map(|edge| {
                 self.primitive_weight(edge.target().index())
                     .try_into()
-                    .unwrap_or_else(|_| unreachable!())
+                    .unwrap_or_else(|_| panic!("core of bend {bend_index} no longer holds a dot"))
             })
-            .unwrap()
+            .unwrap_or_else(|| panic!("bend {bend_index} has no core edge"))
     }
 
     pub fn joineds(&self, node: PI) -> impl Iterator<Item = PI> + '_ {

@@ -146,6 +146,17 @@ impl PlanarAutorouteReconfigurator {
         self.reconfigurer.remap_terminating_dots(entries);
     }
 
+    /// Removes every terminating-dot remapping belonging to `ratlines`
+    /// from both the stepper's live configuration and the reconfigurer's
+    /// stored preconfiguration. Multilayer re-layering calls this for
+    /// ratlines whose fanout vias were removed — a retained entry would
+    /// point at a freed node slot that can be recycled as a compound,
+    /// and dereferencing it panics.
+    pub fn remove_terminating_dots(&mut self, ratlines: &[RatlineUid]) {
+        self.stepper.remove_terminating_dots(ratlines);
+        self.reconfigurer.remove_terminating_dots(ratlines);
+    }
+
     /// The live configuration of the inner stepper — the ratline order
     /// and terminating-dot map routing is currently working against.
     pub fn configuration(&self) -> &PlanarAutorouteConfiguration {
@@ -242,16 +253,12 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
         }
 
         match self.stepper.step(autorouter) {
-            Ok(ControlFlow::Break(maybe_edit)) => {
-                Ok(ControlFlow::Break(maybe_edit.map(|edit| {
-                    let mut merged = BoardEdit::new_from_edits(
-                        BoardDataEdit::new(),
-                        self.escape_stub_edit.clone(),
-                    );
-                    merged.merge(edit);
-                    merged
-                })))
-            }
+            Ok(ControlFlow::Break(maybe_edit)) => Ok(ControlFlow::Break(maybe_edit.map(|edit| {
+                let mut merged =
+                    BoardEdit::new_from_edits(BoardDataEdit::new(), self.escape_stub_edit.clone());
+                merged.merge(edit);
+                merged
+            }))),
             Ok(ControlFlow::Continue(status)) => {
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status)))
             }
@@ -276,11 +283,8 @@ impl<M: AccessMesadata> Abort<Autorouter<M>> for PlanarAutorouteReconfigurator {
     fn abort(&mut self, autorouter: &mut Autorouter<M>) {
         self.stepper.abort(autorouter);
         autorouter.board.apply_edit(
-            &BoardEdit::new_from_edits(
-                BoardDataEdit::new(),
-                self.escape_stub_edit.clone(),
-            )
-            .reverse(),
+            &BoardEdit::new_from_edits(BoardDataEdit::new(), self.escape_stub_edit.clone())
+                .reverse(),
         );
     }
 }

@@ -14,20 +14,13 @@ use crate::{
         edit::{BoardDataEdit, BoardEdit},
         AccessMesadata,
     },
-    drawing::{
-        band::BandTermsegIndex,
-        dot::FixedDotIndex,
-        graph::PrimitiveIndex,
-    },
+    drawing::{band::BandTermsegIndex, dot::FixedDotIndex, graph::PrimitiveIndex},
     geometry::{edit::Edit, primitive::PrimitiveShape},
     graph::MakeRef,
     layout::LayoutEdit,
     router::{
-        navcord::Navcord,
-        navmesh::Navmesh,
-        prenavmesh::PrenavmeshBases,
-        thetastar::ThetastarStepper,
-        RouteStepper, Router,
+        navcord::Navcord, navmesh::Navmesh, prenavmesh::PrenavmeshBases,
+        thetastar::ThetastarStepper, RouteStepper, Router,
     },
     stepper::{Abort, EstimateProgress, LinearScale, Reconfigure, Step},
 };
@@ -180,12 +173,9 @@ impl PlanarAutorouteExecutionStepper {
         origin: FixedDotIndex,
         destination: FixedDotIndex,
     ) -> Result<Navmesh, AutorouterError> {
-        Ok(self.prenavmesh_bases.navmesh(
-            layout,
-            origin,
-            destination,
-            self.options.router,
-        )?)
+        Ok(self
+            .prenavmesh_bases
+            .navmesh(layout, origin, destination, self.options.router)?)
     }
 
     fn start_routing_ratline(
@@ -320,11 +310,11 @@ impl PlanarAutorouteExecutionStepper {
                 .iter()
                 .position(|uid| uid == ratline)
                 .unwrap();
-            let (origin, destination) =
-                self.configuration.ratline_terminating_dots(autorouter, index);
+            let (origin, destination) = self
+                .configuration
+                .ratline_terminating_dots(autorouter, index);
 
-            let Some(band) = autorouter.board.band_between_nodes(origin, destination)
-            else {
+            let Some(band) = autorouter.board.band_between_nodes(origin, destination) else {
                 continue;
             };
 
@@ -384,7 +374,12 @@ impl PlanarAutorouteExecutionStepper {
                         .iter()
                         .position(|uid| *uid == ratline)
                 })
-                .unwrap_or_else(|| self.configuration.ratlines.len().saturating_sub(rip_up_count))
+                .unwrap_or_else(|| {
+                    self.configuration
+                        .ratlines
+                        .len()
+                        .saturating_sub(rip_up_count)
+                })
         };
 
         if self.curr_ratline_index < self.configuration.ratlines.len() {
@@ -402,7 +397,21 @@ impl PlanarAutorouteExecutionStepper {
         &mut self,
         entries: &BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
     ) {
-        self.configuration.terminating_dot_map.extend(entries.iter());
+        self.configuration
+            .terminating_dot_map
+            .extend(entries.iter());
+    }
+
+    /// Removes every terminating-dot remapping belonging to `ratlines`.
+    /// Multilayer re-layering calls this for ratlines whose fanout vias
+    /// were removed: without it the map keeps `FixedDotIndex`es of dead
+    /// dots whose node slots may be recycled as compound nodes, and the
+    /// next `ratline_terminating_dots` lookup dereferences a stale
+    /// index.
+    pub fn remove_terminating_dots(&mut self, ratlines: &[RatlineUid]) {
+        self.configuration
+            .terminating_dot_map
+            .retain(|(ratline, _), _| !ratlines.contains(ratline));
     }
 }
 
@@ -593,5 +602,107 @@ impl GetDebugOverlayData for PlanarAutorouteExecutionStepper {
 
     fn obstacles(&self) -> &[PrimitiveIndex] {
         self.route.as_ref().map_or(&[], |route| route.obstacles())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, fs::File, io::BufReader};
+
+    use petgraph::visit::EdgeIndexable;
+    use specctra_core::mesadata::SpecctraMesadata;
+
+    use super::*;
+    use crate::{
+        autorouter::{PresortBy, ReconfigureBy},
+        board::edit::BoardEdit,
+        drawing::dot::FixedDotIndex,
+        graph::GenericIndex,
+        router::RouterOptions,
+        specctra::design::SpecctraDesign,
+        stepper::TimeoutOptions,
+    };
+
+    fn autorouter_0603() -> Autorouter<SpecctraMesadata> {
+        let design_file = File::open("tests/unilayer/0603_breakout/0603_breakout.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+        Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+    }
+
+    /// A terminating-dot entry for a via that no longer exists must not
+    /// outlive the via: `remove_terminating_dots` purges it so the
+    /// ratline falls back to its endpoint dots instead of dereferencing
+    /// a node slot that a later `add_via` may have recycled as a
+    /// compound.
+    #[test]
+    fn remove_terminating_dots_drops_dead_via_entries() {
+        let mut autorouter = autorouter_0603();
+
+        let ratline = autorouter
+            .ratsnests()
+            .on_principal_layer(0)
+            .graph()
+            .edge_indices()
+            .next()
+            .map(|index| RatlineUid {
+                principal_layer: 0,
+                index,
+            })
+            .unwrap();
+        let endpoints = ratline.ref_(&autorouter).endpoint_dots();
+
+        let mut stepper = PlanarAutorouteExecutionStepper::new(
+            &mut autorouter,
+            PlanarAutorouteConfiguration {
+                ratlines: vec![ratline],
+                terminating_dot_map: BTreeMap::new(),
+                obstacle_penalties: BTreeMap::new(),
+                rip_up: vec![],
+            },
+            PlanarAutorouteOptions {
+                principal_layer: 0,
+                presort_by: PresortBy::RatlineIntersectionCountAndLength,
+                permutate: true,
+                reconfigure_by: ReconfigureBy::default(),
+                congestion_penalty: 500.0,
+                router: RouterOptions {
+                    wrap_around_bands: true,
+                    squeeze_through_under_bends: false,
+                    routed_band_width: 100.0,
+                },
+                timeout: TimeoutOptions {
+                    initial: 1.0,
+                    progress_bonus: 0.005,
+                },
+                max_reconfigurations: None,
+                improve_pad_entry: false,
+                pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+                escape_stubs: false,
+                surgical_ripup: false,
+                shuffle_seed: 0,
+            },
+        )
+        .unwrap();
+
+        // Simulate a fanout-via dot that has since been removed: an
+        // out-of-range index stands in for the recycled node slot.
+        let dead_dot = FixedDotIndex::new(1_000_000);
+        stepper.remap_terminating_dots(&BTreeMap::from([((ratline, endpoints.0), dead_dot)]));
+
+        assert_eq!(
+            stepper
+                .configuration()
+                .ratline_terminating_dots(&autorouter, 0),
+            (dead_dot, endpoints.1),
+        );
+
+        stepper.remove_terminating_dots(&[ratline]);
+
+        assert_eq!(
+            stepper
+                .configuration()
+                .ratline_terminating_dots(&autorouter, 0),
+            endpoints,
+        );
     }
 }

@@ -106,6 +106,24 @@ impl PlanarAutorouteReconfigurer {
                 .extend(entries.iter()),
         }
     }
+
+    /// Removes every terminating-dot remapping belonging to `ratlines`
+    /// from the stored preconfiguration; counterpart of
+    /// [`Self::remap_terminating_dots`]. Called when the vias those
+    /// remappings pointed at were removed, so emitted configurations
+    /// cannot reintroduce stale `FixedDotIndex`es.
+    pub fn remove_terminating_dots(&mut self, ratlines: &[RatlineUid]) {
+        match self {
+            Self::SccPermutations(reconfigurer) => reconfigurer
+                .preconfiguration
+                .terminating_dot_map
+                .retain(|(ratline, _), _| !ratlines.contains(ratline)),
+            Self::NegotiatedCongestion(reconfigurer) => reconfigurer
+                .preconfiguration
+                .terminating_dot_map
+                .retain(|(ratline, _), _| !ratlines.contains(ratline)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Getters)]

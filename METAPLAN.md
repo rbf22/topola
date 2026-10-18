@@ -321,3 +321,31 @@ dev-only test crates (`proptest`/`rstest`/`rstest_reuse`/`insta`).
 Caveat: `cargo fmt --check` reports pre-existing diffs in files
 untouched by this work — the tree was not fmt-clean before; only
 touched files were normalized.
+
+## Stale primitive index panic — diagnosed and fixed
+
+Reproduced on `test_astable_multivibrator` (nondeterministic, ~1 in 3
+runs): `primitive_weight` panicked on index 1214 whose slot had been
+recycled into a compound. Root cause: multilayer re-layering removed a
+ratline's fanout vias (`old_edit.reverse()` in
+`MultilayerAutorouteExecutionStepper::reconfigure` phase 2) but, when
+re-fanout to the new layer failed **and** restoring the old layer's
+fanout also failed, the configuration's `terminating_dot_map` kept the
+entry pointing at the dead via dot. `remap_terminating_dots` only ever
+extended the map, so the stale `FixedDotIndex` survived until the freed
+node slot was recycled by a later `add_via` compound — the next
+`ratline_terminating_dots`/`band_between_nodes` deref then hit the
+compound and panicked.
+
+Fix: `reconfigure` now tracks the `relayered` ratlines (every changed
+ratline that passed the `wrapped` check and had its old edit reversed)
+and calls the new `remove_terminating_dots` — plumbed through
+`PlanarAutorouteReconfigurator` to both the stepper's live
+configuration and the reconfigurer's stored preconfiguration — before
+`remap_terminating_dots` applies the fresh entries. Ratlines that kept
+their vias (`wrapped` load-bearing gears) keep their entries.
+
+Also: `dot_weight`/`seg_weight`/`bend_weight`/`compound_weight` and the
+bend `core_weight` lookup no longer panic bare — they report the
+offending index and what the slot actually holds, so any remaining
+stale-index path names itself.

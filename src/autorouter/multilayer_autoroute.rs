@@ -233,6 +233,12 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         let mut anterouter = Anterouter::new(new_configuration.plan.clone());
         let mut new_entries = BTreeMap::new();
         let mut layer_fixes = vec![];
+        // Ratlines whose old fanout vias are removed below. Their
+        // terminating-dot map entries must be purged: a retained
+        // `FixedDotIndex` points at a freed node slot that a later
+        // `add_via` may recycle as a compound — dereferencing it
+        // panics in `Geometry::primitive_weight`.
+        let mut relayered = vec![];
         for ratline in &changed {
             // The gears the old edit created — and that its reversal
             // therefore removes — must be free of foreign band
@@ -256,10 +262,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
                     let dot_ref = drawing.primitive_ref(dot);
                     let mut outwards = dot_ref.outwards();
                     outwards.walk_next(drawing).is_some()
-                        || dot_ref
-                            .segs()
-                            .iter()
-                            .any(|seg| !created_segs.contains(seg))
+                        || dot_ref.segs().iter().any(|seg| !created_segs.contains(seg))
                         || dot_ref
                             .bends()
                             .iter()
@@ -276,6 +279,8 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
                 layer_fixes.push((*ratline, self.plan.layer_map[ratline]));
                 continue;
             }
+
+            relayered.push(*ratline);
 
             if let Some(old_edit) = self.anteroute_edits.remove(ratline) {
                 autorouter.board.apply_edit(&old_edit.reverse());
@@ -336,9 +341,11 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
             self.anteroute_edits.insert(*ratline, ratline_edit);
         }
 
-        // Phase 3: point live and future configurations at the new
-        // terminating dots, then requeue the ripped ratlines right
-        // after the currently attempted one.
+        // Phase 3: drop the dead dots' remappings, then point live and
+        // future configurations at the new terminating dots, then
+        // requeue the ripped ratlines right after the currently
+        // attempted one.
+        self.planar.remove_terminating_dots(&relayered);
         self.planar.remap_terminating_dots(&new_entries);
 
         {
