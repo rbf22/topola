@@ -8,7 +8,6 @@ use std::fs::File;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Write;
-use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,7 +33,7 @@ use topola::drawing::graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex};
 use topola::router::RouterOptions;
 use topola::specctra::design::SpecctraDesign;
 use topola::specctra::mesadata::SpecctraMesadata;
-use topola::stepper::{EstimateProgress, Step, TimeoutOptions};
+use topola::stepper::{EstimateProgress, TimeoutOptions};
 
 pub mod cli;
 pub mod logger;
@@ -147,6 +146,7 @@ fn main() -> Result<(), std::io::Error> {
                 entry.command().clone(),
                 args.max_seconds.map(Duration::from_secs_f64),
                 args.max_steps,
+                || false,
                 |report| {
                     if let Some(csv) = progress_csv.as_mut() {
                         csv.write(report, start);
@@ -811,80 +811,50 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                         .autorouter_mut()
                         .seed_congestion(seed.iter().copied());
                 }
-                let mut execute = invoker
-                    .execute_stepper(command)
-                    .map_err(|e| format!("{:?}", e))?;
-
                 let start = Instant::now();
-                let deadline = max_seconds.map(|s| start + Duration::from_secs_f64(s));
                 let mut last_report = Instant::now();
-                let mut finished_early = false;
-                let mut steps = 0usize;
                 let mut csv = progress_csv
                     .as_deref()
                     .map(|path| ProgressCsv::new(&ProgressCsv::job_path(path, i)))
                     .transpose()
                     .map_err(|e| format!("{:?}", e))?;
 
-                loop {
-                    let step_start = Instant::now();
-                    let status = execute.step(&mut invoker).map_err(|e| format!("{:?}", e))?;
-                    let duration = step_start.elapsed();
-                    steps += 1;
-
-                    let kind = match status {
-                        ControlFlow::Break(..) => break,
-                        ControlFlow::Continue(kind) => kind,
-                    };
-
-                    topola::metrics::record_step(kind, duration);
-
-                    if !finished_early
-                        && (deadline.is_some_and(|d| Instant::now() >= d)
-                            || max_steps.is_some_and(|max| steps >= max)
-                            || stop.load(Ordering::Relaxed))
-                    {
-                        execute.finish_early(invoker.autorouter_mut());
-                        finished_early = true;
-                    }
-
-                    if let Some(csv) = csv.as_mut() {
-                        csv.write(
-                            &StepReport {
-                                invoker: &invoker,
-                                stepper: &execute,
-                                index: steps,
-                                duration,
-                                kind,
-                            },
-                            start,
-                        );
-                    }
-
-                    if last_report.elapsed() >= Duration::from_secs(2) {
-                        let progress = execute.estimate_progress();
-                        let value = *progress.value();
-                        let maximum = *progress.maximum();
-                        eprintln!(
-                            "[topola j{}] {} elapsed, routed {}/{} ({:.1}%)",
-                            i,
-                            humantime(start.elapsed()),
-                            value,
-                            maximum,
-                            if maximum > 0 {
-                                100.0 * value as f64 / maximum as f64
-                            } else {
-                                0.0
+                let timed_out = invoker
+                    .execute_with_timeout(
+                        command,
+                        max_seconds.map(Duration::from_secs_f64),
+                        max_steps,
+                        || stop.load(Ordering::Relaxed),
+                        |report| {
+                            if let Some(csv) = csv.as_mut() {
+                                csv.write(report, start);
                             }
-                        );
-                        last_report = Instant::now();
-                    }
-                }
+                            if last_report.elapsed() >= Duration::from_secs(2) {
+                                let progress = report.stepper.estimate_progress();
+                                let value = *progress.value();
+                                let maximum = *progress.maximum();
+                                eprintln!(
+                                    "[topola j{}] {} elapsed, routed {}/{} ({:.1}%)",
+                                    i,
+                                    humantime(start.elapsed()),
+                                    value,
+                                    maximum,
+                                    if maximum > 0 {
+                                        100.0 * value as f64 / maximum as f64
+                                    } else {
+                                        0.0
+                                    }
+                                );
+                                last_report = Instant::now();
+                            }
+                        },
+                    )
+                    .map_err(|e| format!("{:?}", e))?;
 
                 // A full completion (no early finish) means this
                 // attempt routed everything — stop the sibling
                 // attempts, the winner is already decided.
-                if !finished_early {
+                if !timed_out {
                     stop.store(true, Ordering::Relaxed);
                 }
 

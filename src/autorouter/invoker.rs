@@ -207,17 +207,19 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
     }
 
     /// Executes a command like [`Invoker::execute_with_progress`], but
-    /// finishes it early once `timeout` has elapsed or `max_steps` steps
-    /// have been taken. Early finishing keeps already routed bands and
-    /// undoes only in-flight partial work.
+    /// finishes it early once `timeout` has elapsed, `max_steps` steps
+    /// have been taken, or `should_stop` reports true. Early finishing
+    /// keeps already routed bands and undoes only in-flight partial
+    /// work; a panicking step is salvaged the same way.
     ///
     /// Returns `true` when the command was finished early due to the
-    /// timeout or step budget.
+    /// timeout, step budget, stop condition, or a salvaged panic.
     pub fn execute_with_timeout(
         &mut self,
         command: Command,
         timeout: Option<Duration>,
         max_steps: Option<usize>,
+        mut should_stop: impl FnMut() -> bool,
         mut on_progress: impl FnMut(&StepReport<M>),
     ) -> Result<bool, InvokerError> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -261,7 +263,8 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
 
             if !timed_out
                 && (deadline.is_some_and(|deadline| Instant::now() >= deadline)
-                    || max_steps.is_some_and(|max_steps| index >= max_steps))
+                    || max_steps.is_some_and(|max_steps| index >= max_steps)
+                    || should_stop())
             {
                 execute.finish_early(&mut self.autorouter);
                 timed_out = true;

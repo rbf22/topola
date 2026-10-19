@@ -51,7 +51,7 @@ fn zero_timeout_reverts_in_flight_work() {
     let command = autoroute_command(invoker.autorouter().board());
 
     let timed_out = invoker
-        .execute_with_timeout(command, Some(Duration::ZERO), None, |_| {})
+        .execute_with_timeout(command, Some(Duration::ZERO), None, || false, |_| {})
         .unwrap();
     assert!(timed_out);
 
@@ -73,7 +73,13 @@ fn generous_timeout_completes_normally() {
     let command = autoroute_command(invoker.autorouter().board());
 
     let timed_out = invoker
-        .execute_with_timeout(command, Some(Duration::from_secs(120)), None, |_| {})
+        .execute_with_timeout(
+            command,
+            Some(Duration::from_secs(120)),
+            None,
+            || false,
+            |_| {},
+        )
         .unwrap();
     assert!(!timed_out);
 
@@ -97,6 +103,7 @@ fn zero_reconfigurations_completes_normally() {
             Command::Autoroute(selection, options),
             Some(Duration::from_secs(120)),
             None,
+            || false,
             |_| {},
         )
         .unwrap();
@@ -116,7 +123,7 @@ fn max_steps_terminates_early_and_keeps_geometry_clean() {
 
     let mut steps = 0usize;
     let timed_out = invoker
-        .execute_with_timeout(command, None, Some(1), |_| steps += 1)
+        .execute_with_timeout(command, None, Some(1), || false, |_| steps += 1)
         .unwrap();
     assert!(timed_out);
     assert_eq!(steps, 1);
@@ -157,6 +164,7 @@ fn seeded_run_is_deterministic_across_invokers() {
                 Command::Autoroute(selection, options),
                 None,
                 Some(1000),
+                || false,
                 |report| kinds.push(report.kind),
             )
             .unwrap();
@@ -171,6 +179,42 @@ fn seeded_run_is_deterministic_across_invokers() {
     let (kinds_b, nodes_b) = run();
     assert_eq!(kinds_a, kinds_b);
     assert_eq!(nodes_a, nodes_b);
+}
+
+#[test]
+fn should_stop_predicate_terminates_early() {
+    // Models the --jobs sibling-stop flag: an external predicate ends
+    // the run without any timeout or step budget.
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+
+    let initial_node_count = invoker.autorouter().board().layout().drawing().node_count();
+    let command = autoroute_command(invoker.autorouter().board());
+
+    let mut polls = 0usize;
+    let mut steps = 0usize;
+    let timed_out = invoker
+        .execute_with_timeout(
+            command,
+            None,
+            None,
+            || {
+                polls += 1;
+                polls >= 3
+            },
+            |_| steps += 1,
+        )
+        .unwrap();
+    assert!(timed_out);
+    // Polled once per step: the predicate trips after step 3.
+    assert_eq!(steps, 3);
+
+    assert_eq!(
+        invoker.autorouter().board().layout().drawing().node_count(),
+        initial_node_count,
+    );
+    common::assert_no_loose_nodes(invoker.autorouter());
+    invoker.undo().unwrap();
 }
 
 #[test]
