@@ -9,6 +9,9 @@ pub mod navmesh;
 pub mod ng;
 pub mod prenavmesh;
 mod route;
+// `crate::router::router` is a deliberate layout: the inner module
+// holds the module's central type alongside sibling submodules.
+#[allow(clippy::module_inception)]
 mod router;
 pub mod thetastar;
 

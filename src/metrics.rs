@@ -124,6 +124,16 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
+                    "anneal: {:.1}ms, accepted {} rejected {}, crossings {}, splits {}, energy {:.3}",
+                    ms(self.anneal_nanos.load(Ordering::Relaxed)),
+                    self.anneal_accepted.load(Ordering::Relaxed),
+                    self.anneal_rejected.load(Ordering::Relaxed),
+                    self.anneal_crossings.load(Ordering::Relaxed),
+                    self.anneal_splits.load(Ordering::Relaxed),
+                    self.anneal_energy_milliunits.load(Ordering::Relaxed) as f64 / 1000.0,
+                )?;
+                writeln!(
+                    f,
                     "geometry: pending joins recorded {}, pending-wrapped holds {}, dedup truncations {}",
                     self.pending_joins_recorded.load(Ordering::Relaxed),
                     self.pending_joiners_held.load(Ordering::Relaxed),
@@ -254,6 +264,13 @@ metrics_struct!(
     reconfig_dedup_truncations,
     protected_rip_skips,
     protection_desperations,
+    // Annealing pre-planner
+    anneal_nanos,
+    anneal_accepted,
+    anneal_rejected,
+    anneal_crossings,
+    anneal_splits,
+    anneal_energy_milliunits,
     // Geometry draw/undraw — the suspected hot path
     step_to_ok,
     step_to_err,

@@ -129,7 +129,7 @@ pub fn bitangent(
     circle2: Circle,
     maybe_sense2: Option<RotationSense>,
 ) -> Result<Line, NoBitangents> {
-    Ok(bitangents(circle1, maybe_sense1, circle2, maybe_sense2)?
+    bitangents(circle1, maybe_sense1, circle2, maybe_sense2)?
         .next()
-        .ok_or(NoBitangents(circle1, circle2))?)
+        .ok_or(NoBitangents(circle1, circle2))
 }

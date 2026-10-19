@@ -125,6 +125,13 @@ fn clearing_shift(
     Some((n.0 * sign * magnitude, n.1 * sign * magnitude))
 }
 
+/// A probe's product: the band's waypoint polyline when it
+/// routed, or the terminal blocker when it failed.
+type ProbeOutcome = (
+    Vec<(Point, usize)>,
+    Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>,
+);
+
 impl ChannelProbe {
     /// The channel's blockers: primitives lying inside the probe's
     /// demand corridor at real clearance, each with the smallest
@@ -451,10 +458,7 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         destination: FixedDotIndex,
         router_options: RouterOptions,
         prenavmesh_bases: &mut PrenavmeshBases,
-    ) -> (
-        Vec<(Point, usize)>,
-        Option<(PrimitiveShape, PrimitiveShape, PrimitiveIndex)>,
-    ) {
+    ) -> ProbeOutcome {
         let Ok(navmesh) =
             prenavmesh_bases.navmesh(self.board.layout(), origin, destination, router_options)
         else {
@@ -462,32 +466,34 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
             return (vec![], None);
         };
 
-        let mut router = Router::new(self.board.layout_mut(), router_options);
-        let mut route = RouteStepper::new_from_navmesh(
-            &mut router,
-            LayoutEdit::new(),
-            navmesh,
-            router_options.routed_band_width,
-        );
+        // The router borrows the layout mutably, so scope it: `route`
+        // is self-contained and survives to be read after the borrow
+        // ends and the probe band is reverted.
+        let (route, termseg) = {
+            let mut router = Router::new(self.board.layout_mut(), router_options);
+            let mut route = RouteStepper::new_from_navmesh(
+                &mut router,
+                LayoutEdit::new(),
+                navmesh,
+                router_options.routed_band_width,
+            );
 
-        let mut termseg = None;
-        loop {
-            match route.step(&mut router) {
-                Ok(ControlFlow::Continue(())) => {}
-                Ok(ControlFlow::Break(done)) => {
-                    termseg = Some(done);
-                    break;
-                }
-                Err(err) => {
-                    log::debug!("probe: route step error: {err}");
-                    break;
+            let mut termseg = None;
+            loop {
+                match route.step(&mut router) {
+                    Ok(ControlFlow::Continue(())) => {}
+                    Ok(ControlFlow::Break(done)) => {
+                        termseg = Some(done);
+                        break;
+                    }
+                    Err(err) => {
+                        log::debug!("probe: route step error: {err}");
+                        break;
+                    }
                 }
             }
-        }
-
-        // `route` is self-contained; the router borrow ends here so the
-        // drawing can be read and the probe band reverted.
-        drop(router);
+            (route, termseg)
+        };
 
         if termseg.is_none() {
             log::debug!(

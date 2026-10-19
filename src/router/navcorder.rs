@@ -16,7 +16,7 @@ use super::{
     navmesh::{Navmesh, NavnodeIndex},
 };
 
-#[derive(Error, Debug, Clone, Copy)]
+#[derive(Error, Debug, Clone)]
 pub enum NavcorderException {
     #[error(transparent)]
     CannotDraw(#[from] DrawException),
@@ -92,7 +92,7 @@ impl<R: AccessRules> Navcorder for Layout<R> {
         path: &[NavnodeIndex],
     ) -> Result<(), NavcorderException> {
         debug_assert!(path[0] == navcord.path[0]);
-        let __ret = (|| -> Result<(), NavcorderException> {
+        let __ret = {
             crate::metrics::incr(&crate::metrics::METRICS.rework_path_calls);
             let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.rework_path_nanos);
 
@@ -115,8 +115,8 @@ impl<R: AccessRules> Navcorder for Layout<R> {
             self.undo_path(navcord, length - prefix_length);
             // XXX: If this fails now, there may be a race condition.
             self.path(navmesh, navcord, &path[prefix_length..])
-        })();
-        debug_assert!(!__ret.is_ok() || navcord.path.len() == path.len());
+        };
+        debug_assert!(__ret.is_err() || navcord.path.len() == path.len());
         __ret
     }
 
@@ -137,7 +137,7 @@ impl<R: AccessRules> Navcorder for Layout<R> {
 
             Ok(())
         })();
-        debug_assert!(!__ret.is_ok() || navcord.path.len() == __old_len);
+        debug_assert!(__ret.is_err() || navcord.path.len() == __old_len);
         __ret
     }
 

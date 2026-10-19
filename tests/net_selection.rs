@@ -20,10 +20,10 @@ fn select_pins_by_netname() {
     let board = autorouter.board();
 
     let named = BTreeSet::from(["Net-(J1-Pin_1)".to_string()]);
-    assert!(!PinSelection::new_select_nets(board, &named)
+    assert!(PinSelection::new_select_nets(board, &named)
         .selectors()
         .next()
-        .is_none());
+        .is_some());
 
     let absent = BTreeSet::from(["NoSuchNet".to_string()]);
     assert!(PinSelection::new_select_nets(board, &absent)

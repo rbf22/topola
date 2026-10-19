@@ -104,14 +104,13 @@ impl<
         self.add_vertex(from)?;
         self.add_vertex(to)?;
 
-        Ok(self
+        Ok(!self
             .cdt
             .try_add_constraint(
                 self.trianvertex_to_handle[from_index].unwrap(),
                 self.trianvertex_to_handle[to_index].unwrap(),
             )
-            .len()
-            > 0)
+            .is_empty())
     }
 
     pub fn exists_constraint(&self, from: I, to: I) -> bool {

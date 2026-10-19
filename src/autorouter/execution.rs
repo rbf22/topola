@@ -116,10 +116,10 @@ fn critical_autoroute_kind(status: CriticalAutorouteStatus) -> StepKind {
 
 #[enum_dispatch(GetDebugOverlayData)]
 pub enum ExecutionStepper<M> {
-    MultilayerAutoroute(MultilayerAutorouteReconfigurator),
-    PlanarAutoroute(PlanarAutorouteReconfigurator),
-    CriticalAutoroute(CriticalAutorouteExecutionStepper),
-    TopoAutoroute(ng::AutorouteExecutionStepper<M>),
+    MultilayerAutoroute(Box<MultilayerAutorouteReconfigurator>),
+    PlanarAutoroute(Box<PlanarAutorouteReconfigurator>),
+    CriticalAutoroute(Box<CriticalAutorouteExecutionStepper>),
+    TopoAutoroute(Box<ng::AutorouteExecutionStepper<M>>),
     PlaceVia(PlaceViaExecutionStepper),
     ShiftComponents(ShiftComponentsExecutionStepper),
     RemoveBands(RemoveBandsExecutionStepper),

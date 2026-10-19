@@ -52,7 +52,7 @@ impl<'a> TryFrom<&'a RelaxedPath<EtchedPath, ()>> for Etched {
     fn try_from(x: &'a RelaxedPath<EtchedPath, ()>) -> Result<Etched, ()> {
         match x {
             RelaxedPath::Weak(()) => Err(()),
-            RelaxedPath::Normal(ep) => Ok(Etched::Path(ep.clone())),
+            RelaxedPath::Normal(ep) => Ok(Etched::Path(*ep)),
         }
     }
 }
@@ -99,7 +99,7 @@ impl AstarContext {
 
         debug_assert_eq!(
             edge_paths.as_ref()[ins_info.intro],
-            RelaxedPath::Normal(sub.label.clone())
+            RelaxedPath::Normal(sub.label)
         );
 
         let to_pos = navmesh.node_data(&end_idx).unwrap().pos;
@@ -164,7 +164,7 @@ impl AstarContext {
                 };
                 let mut bands = ctx.bands.clone();
                 bands.insert(
-                    sub.label.clone(),
+                    sub.label,
                     layout
                         .drawing()
                         .find_loose_band_uid(fin.into())
@@ -214,9 +214,7 @@ impl AstarContext {
                     },
                 );
 
-                if lhs == Some(Etched::Path(sub.label.clone()))
-                    || rhs == Some(Etched::Path(sub.label.clone()))
-                {
+                if lhs == Some(Etched::Path(sub.label)) || rhs == Some(Etched::Path(sub.label)) {
                     return Err(EvalException::RouteBouncedBack);
                 }
 
@@ -224,8 +222,8 @@ impl AstarContext {
                     (Some(lhs), Some(rhs)) => Some(FloatingRouting::new(
                         &layout,
                         sub.active_head.face(),
-                        lhs.primitive_ref(&layout.drawing()).shape().center(),
-                        rhs.primitive_ref(&layout.drawing()).shape().center(),
+                        lhs.primitive_ref(layout.drawing()).shape().center(),
+                        rhs.primitive_ref(layout.drawing()).shape().center(),
                     )),
                     _ => None,
                 };

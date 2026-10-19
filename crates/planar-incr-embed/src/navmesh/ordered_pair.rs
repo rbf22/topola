@@ -53,18 +53,9 @@ impl<T: serde::Serialize> serde::Serialize for OrderedPair<T> {
     #[inline]
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeTuple;
-        let mut tuple = match serializer.serialize_tuple(2) {
-            Ok(x) => x,
-            Err(e) => return Err(e),
-        };
-        match tuple.serialize_element(&self.0) {
-            Ok(x) => x,
-            Err(e) => return Err(e),
-        }
-        match tuple.serialize_element(&self.1) {
-            Ok(x) => x,
-            Err(e) => return Err(e),
-        }
+        let mut tuple = serializer.serialize_tuple(2)?;
+        tuple.serialize_element(&self.0)?;
+        tuple.serialize_element(&self.1)?;
         tuple.end()
     }
 }

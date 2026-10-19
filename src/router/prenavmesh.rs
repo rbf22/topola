@@ -508,26 +508,23 @@ impl Prenavmesh {
                 // time, after all the constraint edges from bands have been
                 // placed, and only then add constraint edges created from
                 // fixed segs that do not cause an intersection.
-                match node {
-                    PrimitiveIndex::FixedSeg(seg) => {
-                        let (from_dot, to_dot) = layout.drawing().primitive_ref(seg).joints();
+                if let PrimitiveIndex::FixedSeg(seg) = node {
+                    let (from_dot, to_dot) = layout.drawing().primitive_ref(seg).joints();
 
-                        if Self::is_fixed_dot_filleted(layout, from_dot)
-                            && Self::is_fixed_dot_filleted(layout, to_dot)
-                        {
-                            continue;
-                        }
-
-                        let constraint = PrenavmeshConstraint::new_from_fixed_seg(layout, seg);
-
-                        if !self
-                            .triangulation
-                            .intersects_constraint(&constraint.0, &constraint.1)
-                        {
-                            self.add_constraint(constraint).ok();
-                        }
+                    if Self::is_fixed_dot_filleted(layout, from_dot)
+                        && Self::is_fixed_dot_filleted(layout, to_dot)
+                    {
+                        continue;
                     }
-                    _ => (),
+
+                    let constraint = PrenavmeshConstraint::new_from_fixed_seg(layout, seg);
+
+                    if !self
+                        .triangulation
+                        .intersects_constraint(&constraint.0, &constraint.1)
+                    {
+                        self.add_constraint(constraint).ok();
+                    }
                 }
             }
         }
@@ -712,6 +709,10 @@ type NavmeshKey = (
     bool,
 );
 
+/// Per-prenavnode overlapee list, the payload of the
+/// layer-keyed fingerprint-guarded cache below.
+type OverlapeeDots = HashMap<PrenavnodeNodeIndex, Arc<Vec<FixedDotIndex>>>;
+
 /// Cache of prenavmesh bases keyed by `(net, layer)`. The vertex
 /// triangulation only depends on the board's fixed primitives and is
 /// built once per net; constrained bases and whole navmeshes are kept
@@ -735,7 +736,7 @@ pub struct PrenavmeshBases {
     /// layer's fixed fingerprint: a matching fingerprint proves the
     /// fixed geometry (and hence every cached overlapee list) is
     /// identical.
-    overlapee_dots: HashMap<usize, (u64, HashMap<PrenavnodeNodeIndex, Arc<Vec<FixedDotIndex>>>)>,
+    overlapee_dots: HashMap<usize, (u64, OverlapeeDots)>,
 }
 
 /// Bounds the number of constrained bases kept per `(net, layer)`.

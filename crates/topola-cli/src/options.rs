@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 
+use topola::autorouter::anneal::{AnnealMode, AnnealOptions};
 use topola::autorouter::anterouter::AnterouterOptions;
 use topola::autorouter::critical_autoroute::CriticalAutorouteOptions;
 use topola::autorouter::execution::Command;
@@ -21,7 +22,7 @@ use topola::router::RouterOptions;
 use topola::specctra::mesadata::SpecctraMesadata;
 use topola::stepper::TimeoutOptions;
 
-use crate::cli::Cli;
+use crate::cli::{AnnealModeArg, Cli};
 
 pub fn make_selection(
     board: &Board<SpecctraMesadata>,
@@ -36,7 +37,7 @@ pub fn make_selection(
                 eprintln!("[topola] warning: net '{}' not found", net);
             }
         }
-        let selection = PinSelection::new_select_nets(&board, &nets);
+        let selection = PinSelection::new_select_nets(board, &nets);
         eprintln!(
             "[topola] selected {} pins across {} requested nets",
             selection.selectors().count(),
@@ -45,7 +46,7 @@ pub fn make_selection(
         selection
     } else if !exclude_nets.is_empty() {
         let nets: BTreeSet<String> = exclude_nets.iter().cloned().collect();
-        let selection = PinSelection::new_select_all_except_nets(&board, &nets);
+        let selection = PinSelection::new_select_all_except_nets(board, &nets);
         eprintln!(
             "[topola] selected {} pins excluding {} nets",
             selection.selectors().count(),
@@ -57,14 +58,14 @@ pub fn make_selection(
         // compound pads and unnamed net-bearing primitives that carry
         // no pin selector. "All except no nets" selects them through
         // the net-membership path in `PinSelection::contains_node`.
-        let selection = PinSelection::new_select_all_except_nets(&board, &BTreeSet::new());
+        let selection = PinSelection::new_select_all_except_nets(board, &BTreeSet::new());
         eprintln!(
             "[topola] selected {} pins across all layers",
             selection.selectors().count()
         );
         selection
     } else {
-        PinSelection::new_select_layer(&board, 0)
+        PinSelection::new_select_layer(board, 0)
     }
 }
 
@@ -140,10 +141,27 @@ fn fanout_clearance(board: &Board<SpecctraMesadata>) -> f64 {
     mesadata.via_radius() + 1.05 * mesadata.structure_rule().clearance
 }
 
+/// `--anneal` flag → `AnnealOptions`: the CLI exposes mode, seed,
+/// sweep count, and corridor carving; the rest stay at the
+/// calibrated defaults.
+pub fn make_anneal_options(args: &Cli) -> Option<AnnealOptions> {
+    args.anneal.then(|| AnnealOptions {
+        mode: match args.anneal_mode.unwrap_or_default() {
+            AnnealModeArg::Continuous => AnnealMode::Continuous,
+            AnnealModeArg::Discrete => AnnealMode::Discrete,
+        },
+        seed: args.anneal_seed.unwrap_or(0),
+        iterations: args.anneal_iterations.unwrap_or(300),
+        carve_top_k: args.anneal_carve_top_k.unwrap_or(0),
+        ..AnnealOptions::default()
+    })
+}
+
 fn make_multilayer_options(
     deterministic: bool,
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
+    anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> MultilayerAutorouteOptions {
     MultilayerAutorouteOptions {
@@ -160,9 +178,11 @@ fn make_multilayer_options(
             0.05,
         ),
         layer_seed,
+        anneal,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn make_command(
     critical_first: bool,
     multilayer: bool,
@@ -170,6 +190,7 @@ pub fn make_command(
     selection: PinSelection,
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
+    anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> Command {
     if critical_first {
@@ -178,7 +199,13 @@ pub fn make_command(
             CriticalAutorouteOptions {
                 planar: planar_options,
                 multilayer: multilayer.then(|| {
-                    make_multilayer_options(deterministic, planar_options, layer_seed, board)
+                    make_multilayer_options(
+                        deterministic,
+                        planar_options,
+                        layer_seed,
+                        anneal,
+                        board,
+                    )
                 }),
                 critical_quantile: 0.75,
                 carve: true,
@@ -192,7 +219,7 @@ pub fn make_command(
     } else if multilayer {
         Command::MultilayerAutoroute(
             selection,
-            make_multilayer_options(deterministic, planar_options, layer_seed, board),
+            make_multilayer_options(deterministic, planar_options, layer_seed, anneal, board),
         )
     } else {
         Command::Autoroute(selection, planar_options)

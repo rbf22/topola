@@ -29,7 +29,7 @@ use super::{
     navcorder::{Navcorder, NavcorderException},
     navmesh::{Navmesh, NavmeshError, NavnodeIndex},
     route::RouteStepper,
-    thetastar::{PathTracker, ThetastarStrategy},
+    thetastar::{PathTracker, ThetastarStrategy, VisitRejected},
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -76,7 +76,7 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         navmesh: &Navmesh,
         navnode: NavnodeIndex,
         tracker: &PathTracker<Navmesh>,
-    ) -> Result<Option<BandTermsegIndex>, ()> {
+    ) -> Result<Option<BandTermsegIndex>, VisitRejected> {
         crate::metrics::incr(&crate::metrics::METRICS.visit_navnode_calls);
         tracker.reconstruct_path_into(&mut self.path_scratch, navnode);
         let new_path = self.path_scratch.as_slice();
@@ -84,29 +84,29 @@ impl<R: AccessRules> ThetastarStrategy<Navmesh, f64, BandTermsegIndex>
         if navnode == navmesh.destination_navnode() {
             self.layout
                 .rework_path(navmesh, self.navcord, &new_path[..new_path.len() - 1])
-                .map_err(|_| ())?;
+                .map_err(|_| VisitRejected)?;
 
             // The path was explored purely virtually; now that it is
             // being committed, draw its canes into the board for real
             // and then finish the band.
             self.navcord
                 .materialize(self.layout, navmesh)
-                .map_err(|_| ())?;
+                .map_err(|_| VisitRejected)?;
 
             // Set navcord members for consistency. The code would probably work
             // without this, since A* will terminate now anyway.
             self.navcord.maybe_final_termseg = Some(
                 self.layout
                     .finish(navmesh, self.navcord, self.destination)
-                    .map_err(|_| ())?,
+                    .map_err(|_| VisitRejected)?,
             );
             self.navcord.push_path(navnode);
 
             Ok(self.navcord.maybe_final_termseg)
         } else {
             self.layout
-                .rework_path(navmesh, self.navcord, &new_path[..])
-                .map_or(Err(()), |_| Ok(None))
+                .rework_path(navmesh, self.navcord, new_path)
+                .map_or(Err(VisitRejected), |_| Ok(None))
         }
     }
 

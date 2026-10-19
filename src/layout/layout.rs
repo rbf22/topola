@@ -221,11 +221,11 @@ impl<R: AccessRules> Layout<R> {
                 Ok((GenericIndex::<ViaWeight>::new(compound.index()), dots))
             })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.drawing.node_count()
                     == __old_node_count + weight.to_layer - weight.from_layer + 2
         );
-        debug_assert!(!__ret.is_err() || self.drawing.node_count() == __old_node_count);
+        debug_assert!(__ret.is_ok() || self.drawing.node_count() == __old_node_count);
         __ret
     }
 

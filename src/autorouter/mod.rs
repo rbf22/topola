@@ -2,7 +2,11 @@
 //
 // SPDX-License-Identifier: MIT
 
+pub mod anneal;
 pub mod anterouter;
+// `crate::autorouter::autorouter` is a deliberate layout: the inner module
+// holds the module's central type alongside sibling submodules.
+#[allow(clippy::module_inception)]
 mod autorouter;
 pub mod carve;
 pub mod compass_direction;

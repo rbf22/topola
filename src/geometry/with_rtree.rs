@@ -662,7 +662,7 @@ impl<
         }
 
         for (bend, (.., maybe_new_data)) in &edit.bends {
-            if let Some(..) = maybe_new_data {
+            if maybe_new_data.is_some() {
                 self.init_bend_bbox(*bend);
             }
         }

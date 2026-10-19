@@ -36,4 +36,8 @@ impl ListToken {
             Self::End => 1,
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

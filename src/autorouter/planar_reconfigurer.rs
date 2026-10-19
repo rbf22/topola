@@ -40,11 +40,25 @@ pub trait MakeNextPlanarAutorouteConfiguration {
     ) -> Option<PlanarAutorouteConfiguration>;
 }
 
+/// The reconfigurer enum boxes its variants, so the trait must
+/// delegate through `Box` for `enum_dispatch` to see them.
+impl<T: MakeNextPlanarAutorouteConfiguration + ?Sized> MakeNextPlanarAutorouteConfiguration
+    for Box<T>
+{
+    fn next_configuration(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        stepper: &PlanarAutorouteExecutionStepper,
+    ) -> Option<PlanarAutorouteConfiguration> {
+        (**self).next_configuration(autorouter, stepper)
+    }
+}
+
 #[enum_dispatch(MakeNextPlanarAutorouteConfiguration)]
 pub enum PlanarAutorouteReconfigurer {
     //RatlineCuts(RatlineCutsPlanarAutorouteReconfigurer),
-    SccPermutations(SccPermutationsPlanarAutorouteReconfigurer),
-    NegotiatedCongestion(NegotiatedCongestionPlanarAutorouteReconfigurer),
+    SccPermutations(Box<SccPermutationsPlanarAutorouteReconfigurer>),
+    NegotiatedCongestion(Box<NegotiatedCongestionPlanarAutorouteReconfigurer>),
 }
 
 impl PlanarAutorouteReconfigurer {
@@ -56,22 +70,22 @@ impl PlanarAutorouteReconfigurer {
     ) -> Self {
         match options.reconfigure_by {
             ReconfigureBy::SccPermutations => PlanarAutorouteReconfigurer::SccPermutations(
-                SccPermutationsPlanarAutorouteReconfigurer::new(
+                Box::new(SccPermutationsPlanarAutorouteReconfigurer::new(
                     autorouter,
                     preconfiguration,
                     presorter,
                     options,
-                ),
+                )),
             ),
             ReconfigureBy::NegotiatedCongestion => {
-                PlanarAutorouteReconfigurer::NegotiatedCongestion(
+                PlanarAutorouteReconfigurer::NegotiatedCongestion(Box::new(
                     NegotiatedCongestionPlanarAutorouteReconfigurer::new(
                         autorouter,
                         preconfiguration,
                         presorter,
                         options,
                     ),
-                )
+                ))
             }
         }
     }

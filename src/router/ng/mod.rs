@@ -604,10 +604,7 @@ fn cane_around<R: AccessRules>(
                     width,
                 )
             } else {
-                return Err(EvalException::BendNotFound {
-                    core: core,
-                    uid: inner,
-                });
+                return Err(EvalException::BendNotFound { core, uid: inner });
             }
         }
     }?;

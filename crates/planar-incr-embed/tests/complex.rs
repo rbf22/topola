@@ -70,7 +70,7 @@ fn tht_3pin_xlr_to_tht_3pin_xlr() {
         .1;
     let mut tmp = navmesh.as_mut();
     tmp.edge_data_mut(d6, p2).unwrap().with_borrow_mut(|mut j| {
-        j.insert(0, label.clone());
+        j.insert(0, label);
     });
     let next_pos = tmp.edge_data_mut(d6, d5).unwrap().with_borrow_mut(|mut j| {
         j.insert(next_pos.insert_pos, label);

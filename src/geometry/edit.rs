@@ -48,19 +48,20 @@ pub trait ApplyGeometryEdit<
     fn apply(&mut self, edit: &GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>);
 }
 
+/// `(old, new)` payload of one recorded primitive change — `None` on
+/// a side means the primitive did not exist there, so reversing the
+/// edit inserts or removes it.
+type EditValue<T> = (Option<T>, Option<T>);
+type SegEditValue<DI, SW> = EditValue<((DI, DI), SW)>;
+type BendEditValue<DI, BI, BW> = EditValue<((DI, DI, DI, Option<BI>), BW)>;
+type CompoundEditValue<Cel, PI, CW> = EditValue<(Vec<(Cel, PI)>, CW)>;
+
 #[derive(Clone, Debug)]
 pub struct GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI> {
-    pub(super) dots: BTreeMap<DI, (Option<DW>, Option<DW>)>,
-    pub(super) segs: BTreeMap<SI, (Option<((DI, DI), SW)>, Option<((DI, DI), SW)>)>,
-    pub(super) bends: BTreeMap<
-        BI,
-        (
-            Option<((DI, DI, DI, Option<BI>), BW)>,
-            Option<((DI, DI, DI, Option<BI>), BW)>,
-        ),
-    >,
-    pub(super) compounds:
-        BTreeMap<GenericIndex<CW>, (Option<(Vec<(Cel, PI)>, CW)>, Option<(Vec<(Cel, PI)>, CW)>)>,
+    pub(super) dots: BTreeMap<DI, EditValue<DW>>,
+    pub(super) segs: BTreeMap<SI, SegEditValue<DI, SW>>,
+    pub(super) bends: BTreeMap<BI, BendEditValue<DI, BI, BW>>,
+    pub(super) compounds: BTreeMap<GenericIndex<CW>, CompoundEditValue<Cel, PI, CW>>,
 }
 
 impl<DW, SW, BW, CW, Cel, PI, DI, SI, BI> Default

@@ -132,7 +132,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         self.primitive_ref(joints.0)
             .seg()
             .into_iter()
-            .chain(self.primitive_ref(joints.1).seg().into_iter())
+            .chain(self.primitive_ref(joints.1).seg())
     }
 
     pub fn cut(
@@ -158,10 +158,8 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                     None
                 }
             })
-            .filter_map(move |primitive_node| {
-                limiting_shape
-                    .intersects(&primitive_node.primitive_ref(self).shape())
-                    .then_some(primitive_node)
+            .filter(move |primitive_node| {
+                limiting_shape.intersects(&primitive_node.primitive_ref(self).shape())
             })
     }
 
@@ -206,7 +204,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 // line-of-sight paths.
                 .filter(|&infringee| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
                 .filter(move |&infringee| !self.are_connectable(infringer, infringee))
-                .filter(move |infringee| predicate(&self, infringer, *infringee)),
+                .filter(move |infringee| predicate(self, infringer, *infringee)),
         )
     }
 
@@ -231,11 +229,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
     /// candidate.
     pub(crate) fn overlapee_limbs(&self, node: PrimitiveIndex) -> Vec<PrimitiveIndex> {
         self.overlapees(node)
-            .flat_map(|overlapee| {
-                PrimitiveIndex::from(overlapee.2)
-                    .primitive_ref(self)
-                    .limbs()
-            })
+            .flat_map(|overlapee| overlapee.2.primitive_ref(self).limbs())
             .collect()
     }
 
@@ -278,9 +272,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 intersector_shape.inflate(match (&conditions, infringee_conditions) {
                     (None, _) | (_, None) => return None,
                     (Some(lhs), Some(rhs)) => {
-                        let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
-                            return None;
-                        };
+                        let clearance = self.rules().clearance(lhs, &rhs)?;
 
                         // Note the epsilon comparison.
                         // XXX: Epsilon is probably too large. But what should
@@ -294,8 +286,8 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             inflated_infringer_shape
                 .intersects(&infringee_shape)
                 .then_some(Infringement(
-                    inflated_infringer_shape,
-                    infringee_shape,
+                    Box::new(inflated_infringer_shape),
+                    Box::new(infringee_shape),
                     primitive_node,
                 ))
         })
@@ -353,7 +345,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                         && (matches!(collidee, PrimitiveIndex::LoneLooseSeg(..))
                             || matches!(collidee, PrimitiveIndex::SeqLooseSeg(..))))
             })
-            .filter(|collidee| predicate(&self, collider, *collidee))
+            .filter(|collidee| predicate(self, collider, *collidee))
             .find_map(|collidee| {
                 let collidee_primitive = collidee.primitive_ref(self);
 
@@ -364,7 +356,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 let collidee_shape = collidee_primitive.shape();
 
                 if collider_shape.intersects(&collidee_shape) {
-                    Some(Collision(collider_shape, collidee_shape, collidee))
+                    Some(Collision(
+                        Box::new(collider_shape),
+                        Box::new(collidee_shape),
+                        collidee,
+                    ))
                 } else {
                     None
                 }
@@ -471,9 +467,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             shape.inflate(match (intersector_conditions, infringee_conditions) {
                 (None, _) | (_, None) => return None,
                 (Some(lhs), Some(rhs)) => {
-                    let Some(clearance) = self.rules().clearance(lhs, &rhs) else {
-                        return None;
-                    };
+                    let clearance = self.rules().clearance(lhs, &rhs)?;
 
                     // Note the epsilon comparison.
                     // XXX: Epsilon is probably too large. But what
@@ -487,8 +481,8 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         inflated_infringer_shape
             .intersects(&infringee_shape)
             .then_some(Infringement(
-                inflated_infringer_shape,
-                infringee_shape,
+                Box::new(inflated_infringer_shape),
+                Box::new(infringee_shape),
                 infringee,
             ))
     }
@@ -547,8 +541,8 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 let collidee_shape = collidee_primitive.shape();
 
                 shape.intersects(&collidee_shape).then_some(Collision(
-                    shape,
-                    collidee_shape,
+                    Box::new(shape),
+                    Box::new(collidee_shape),
                     collidee,
                 ))
             })

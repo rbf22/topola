@@ -203,7 +203,7 @@ impl PlanarAutorouteExecutionStepper {
         }
 
         self.curr_ratline_index = index;
-        Ok(self.start_routing_ratline(autorouter)?)
+        self.start_routing_ratline(autorouter)
     }
 
     /// Builds the ratline's navmesh, reusing a cached per-net

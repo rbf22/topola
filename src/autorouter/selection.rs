@@ -31,6 +31,19 @@ impl PinSelector {
     ) -> Option<PinSelector> {
         let layer = match node {
             NodeIndex::Primitive(primitive) => {
+                // The slot may hold a removal tombstone — e.g. a weave
+                // continuation's ratvertex still references a via dot
+                // the command's undo removed, and the ratsnest is not
+                // covered by `BoardEdit`. Dead endpoints match no pin
+                // selector.
+                if !board
+                    .layout()
+                    .drawing()
+                    .geometry()
+                    .has_primitive(primitive.index())
+                {
+                    return None;
+                }
                 primitive.primitive_ref(board.layout().drawing()).layer()
             }
             NodeIndex::Compound(compound) => {
@@ -501,7 +514,7 @@ mod tests {
         let autorouter = Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap();
 
         let selection =
-            PinSelection::new_select_all_except_nets(&autorouter.board(), &BTreeSet::new());
+            PinSelection::new_select_all_except_nets(autorouter.board(), &BTreeSet::new());
         let ratsnest = autorouter.ratsnests().on_principal_layer(0);
 
         let mut covered = 0usize;
@@ -509,7 +522,7 @@ mod tests {
         for edge in ratsnest.graph().edge_indices() {
             let (source, target) = ratsnest.graph().edge_endpoints(edge).unwrap();
             let source_ok = selection.contains_node(
-                &autorouter.board(),
+                autorouter.board(),
                 ratsnest
                     .graph()
                     .node_weight(source)
@@ -518,7 +531,7 @@ mod tests {
                     .into(),
             );
             let target_ok = selection.contains_node(
-                &autorouter.board(),
+                autorouter.board(),
                 ratsnest
                     .graph()
                     .node_weight(target)

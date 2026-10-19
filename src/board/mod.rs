@@ -250,7 +250,7 @@ impl<M: AccessMesadata> Board<M> {
         self.pinname_nodes
             .get_values(pinname)
             .into_iter()
-            .flat_map(|set| set.iter().map(|node| *node))
+            .flat_map(|set| set.iter().copied())
     }
 
     /// Returns the pin name associated with a given node.
@@ -324,13 +324,10 @@ impl<M: AccessMesadata> Board<M> {
 
     /// Returns the apex belonging to a given pin, if there is any.
     pub fn pin_apex(&self, pin: &str, layer: usize) -> Option<(FixedDotIndex, Point)> {
-        self.pinname_nodes
-            .get_values(pin)
-            .map(|node| {
-                node.iter()
-                    .find_map(|node| self.layout().apex_of_compoundless_node(*node, layer))
-            })
-            .flatten()
+        self.pinname_nodes.get_values(pin).and_then(|node| {
+            node.iter()
+                .find_map(|node| self.layout().apex_of_compoundless_node(*node, layer))
+        })
     }
 
     /// Returns the band name associated with a given band.

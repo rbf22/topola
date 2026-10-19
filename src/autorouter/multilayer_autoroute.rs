@@ -13,6 +13,7 @@ use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
     autorouter::{
+        anneal::handoff::PlannedWeave,
         anterouter::{Anterouter, AnterouterOptions, AnterouterPlan},
         invoker::GetDebugOverlayData,
         planar_autoroute::PlanarAutorouteConfiguration,
@@ -59,6 +60,12 @@ pub struct MultilayerAutorouteOptions {
     /// different seeds to explore different layer assignments.
     #[serde(default)]
     pub layer_seed: u64,
+    /// Optional simulated-annealing pre-plan: when set, a global
+    /// annealer decides layer assignments, mid-route layer hops,
+    /// routing order, congestion seed, and carved corridors before
+    /// anterouting instead of `layer_seed`'s heuristic assignment.
+    #[serde(default)]
+    pub anneal: Option<crate::autorouter::anneal::AnnealOptions>,
 }
 
 /// Bookkeeping for one mid-route via weave, kept so the weave can be
@@ -172,7 +179,7 @@ impl MultilayerAutorouteExecutionStepper {
                         &mut terminating_dot_map,
                     )
                 });
-            if matches!(placed, Err(Err(()))) {
+            if matches!(placed, Err(Err(_))) {
                 // No room for a fanout via on either layer — drop the
                 // ratline from this configuration's work list instead of
                 // panicking the whole run.
@@ -209,8 +216,122 @@ impl MultilayerAutorouteExecutionStepper {
             woven: BTreeSet::new(),
             weaves: BTreeMap::new(),
             weave_exhausted: BTreeSet::new(),
-            options: options.clone(),
+            options,
         })
+    }
+
+    /// Commits a pre-planned weave — an annealer-placed split via —
+    /// into the stepper's bookkeeping so the woven halves anchor
+    /// against layer rotation and a broken chain unweaves cleanly,
+    /// exactly like a `weave_ratline` weave. The via edit merges under
+    /// the continuation's anteroute edits (it owns the via) and into
+    /// the chronological record; the pre-routing edits (carves)
+    /// merge into the record as well.
+    pub fn adopt_planned_weaves(
+        &mut self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        pre_edit: BoardEdit,
+        weaves: Vec<PlannedWeave>,
+    ) {
+        // The via placements and corridor carves were applied before
+        // the anteroute's fanout edits, so their records must precede
+        // them in the merged history — a plain `merge` would append
+        // them last and undo would tombstone via dots still
+        // referenced by later-created geometry.
+        let mut merged = pre_edit;
+        merged.merge(std::mem::replace(
+            &mut self.anteroute_edit,
+            BoardEdit::new(),
+        ));
+        self.anteroute_edit = merged;
+        let drawing = autorouter.board().layout().drawing();
+        for weave in weaves {
+            // The layer the previous half actually terminates on. The
+            // anteroute may have fallen back to a preferred layer when
+            // the split's assumed layer had no room for a fanout — the
+            // remap must land on the layer it really got, or the
+            // halves would be anchored to different layers and the
+            // navmesh assert fires.
+            let parent_destination_entry = self
+                .planar
+                .configuration()
+                .terminating_dot_map
+                .get(&(weave.parent, weave.destination_dot))
+                .copied();
+            let near_dot = parent_destination_entry
+                .map(|dot| dot.primitive_ref(drawing).layer())
+                .and_then(|layer| {
+                    weave
+                        .via_dots
+                        .iter()
+                        .copied()
+                        .find(|dot| dot.primitive_ref(drawing).layer() == layer)
+                });
+            let Some(near_dot) = near_dot else {
+                // The previous half landed outside the via's span (or
+                // was unplaceable and dropped): degrade the link —
+                // the parent keeps its ordinary terminating dot, the
+                // continuation leaves every ordering and map, and the
+                // via remains as dead-end same-net copper, exactly
+                // like an unweave leaves it.
+                self.plan.layer_map.remove(&weave.continuation);
+                self.plan.static_terminating_dot_map.remove(&(
+                    weave.continuation,
+                    weave.via_dot_target,
+                    weave.target_layer,
+                ));
+                self.planar.remove_ratline(weave.continuation);
+                self.planar.remove_terminating_dots(&[weave.continuation]);
+                self.planar
+                    .configuration_mut()
+                    .ratlines
+                    .retain(|uid| *uid != weave.continuation);
+                self.planar
+                    .configuration_mut()
+                    .terminating_dot_map
+                    .retain(|(ratline, _), _| *ratline != weave.continuation);
+                continue;
+            };
+            self.woven.insert(weave.parent);
+            self.woven.insert(weave.continuation);
+            {
+                // Same ordering rule: the via was placed before the
+                // continuation's fanout, so its edit precedes the
+                // ratline's recorded anteroute edit.
+                let entry = self.anteroute_edits.entry(weave.continuation).or_default();
+                let mut merged = weave.via_edit;
+                merged.merge(std::mem::take(entry));
+                *entry = merged;
+            }
+            // Retarget the parent's destination endpoint at the via's
+            // dot on its landed layer — the same
+            // `remap_terminating_dots` weave commits mid-route,
+            // capturing the ordinary anteroute result first so an
+            // unweave restores a reachable, same-layer terminating
+            // dot instead of dropping the endpoint back onto its
+            // possibly-foreign-layer pad.
+            self.planar.remap_terminating_dots(
+                &[((weave.parent, weave.destination_dot), near_dot)]
+                    .into_iter()
+                    .collect(),
+            );
+            // Planned continuations already live in the stored
+            // preconfigurations — they were present in
+            // `input.ratlines` at preconfiguration time — so no
+            // `insert_ratline_after` (it would duplicate them).
+            self.weaves.insert(
+                weave.parent,
+                WeaveRecord {
+                    continuation: weave.continuation,
+                    via_vertex: weave.via_vertex,
+                    via_dot_source: near_dot,
+                    via_dot_target: weave.via_dot_target,
+                    target_layer: weave.target_layer,
+                    parent_destination_entry,
+                    destination_dot: weave.destination_dot,
+                },
+            );
+        }
     }
 
     /// Mutable access to the inner planar reconfigurator — for the
@@ -581,6 +702,7 @@ impl MultilayerAutorouteExecutionStepper {
         ));
         self.woven.remove(&parent);
         self.woven.remove(&child);
+        Self::drop_dead_ratline_refs(autorouter, child);
         // The site sampling is deterministic — a second weave of this
         // ratline would place the same via and fail identically.
         self.weave_exhausted.insert(parent);
@@ -636,6 +758,55 @@ impl MultilayerAutorouteExecutionStepper {
         log::debug!("unweave: ratline {:?} restored", parent.index);
         Ok(())
     }
+
+    /// Removes the synthetic continuation edges surviving weaves left
+    /// in the ratsnest once routing is done, scrubbing them from
+    /// every ordering and map along the way. Their vertices reference
+    /// via dots that undo tombstones — `BoardEdit` covers the board,
+    /// not the ratsnest — and later passes iterate all ratsnest
+    /// edges (`selected_ratlines`, connectivity asserts), where a
+    /// dead vertex would panic the dereference. The bands are real
+    /// geometry by then, so the demand edges are dead bookkeeping.
+    pub fn remove_continuations(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        for record in std::mem::take(&mut self.weaves).into_values() {
+            let child = record.continuation;
+            autorouter
+                .ratsnests
+                .on_principal_layer_mut(child.principal_layer)
+                .remove_continuation(record.via_vertex, child.index);
+            self.plan.layer_map.remove(&child);
+            self.plan.static_terminating_dot_map.remove(&(
+                child,
+                record.via_dot_target,
+                record.target_layer,
+            ));
+            self.planar.remove_ratline(child);
+            self.planar.remove_terminating_dots(&[child]);
+            self.planar
+                .configuration_mut()
+                .ratlines
+                .retain(|uid| *uid != child);
+            self.planar
+                .configuration_mut()
+                .terminating_dot_map
+                .retain(|(ratline, _), _| *ratline != child);
+            Self::drop_dead_ratline_refs(autorouter, child);
+        }
+        self.woven.clear();
+    }
+
+    /// Drops failure-attribution records that name a ratsnest edge
+    /// which no longer exists. `BlockerRecord`s persist on the
+    /// `Autorouter` past the continuation edges they reference, and
+    /// the report path dereferences them unconditionally.
+    fn drop_dead_ratline_refs(
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        removed: RatlineUid,
+    ) {
+        autorouter
+            .blocker_log
+            .retain(|rec| rec.failed != removed && rec.blocker != Some(removed));
+    }
 }
 
 impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteReconfiguratorStatus>
@@ -664,6 +835,10 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
 
 impl<M: AccessMesadata> Abort<Autorouter<M>> for MultilayerAutorouteExecutionStepper {
     fn abort(&mut self, autorouter: &mut Autorouter<M>) {
+        // Abandoned mid-route weaves' continuations leave the same
+        // dead vertices `remove_continuations` handles at a clean
+        // finish.
+        self.remove_continuations(autorouter);
         self.planar.abort(autorouter)
     }
 }
@@ -675,8 +850,27 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
     fn reconfigure(
         &mut self,
         autorouter: &mut Autorouter<M>,
-        new_configuration: MultilayerAutorouteConfiguration,
+        mut new_configuration: MultilayerAutorouteConfiguration,
     ) -> Result<(), AutorouterError> {
+        // Scrub stale continuations: queued search nodes snapshot the
+        // plan when pushed, so a popped configuration can still carry
+        // a continuation edge an unweave (or a degraded planned split)
+        // has since removed. Anything the live plan no longer carries
+        // is dead — leaving it in the diff would re-anteroute a
+        // dangling ratsnest edge and panic in `edge_endpoints`.
+        new_configuration
+            .plan
+            .layer_map
+            .retain(|ratline, _| self.plan.layer_map.contains_key(ratline));
+        new_configuration
+            .plan
+            .static_terminating_dot_map
+            .retain(|(ratline, _, _), _| self.plan.layer_map.contains_key(ratline));
+        new_configuration
+            .planar
+            .ratlines
+            .retain(|ratline| self.plan.layer_map.contains_key(ratline));
+
         // Surgical re-layering: only the ratlines whose layer
         // assignment changed need their bands ripped and their fanout
         // vias swapped; every other routed band survives.
@@ -1005,6 +1199,7 @@ mod tests {
                 progress_bonus: 0.0,
             },
             layer_seed: 0,
+            anneal: None,
         };
 
         let plan = MultilayerPreconfigurer::new(

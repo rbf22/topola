@@ -42,6 +42,15 @@ pub struct MultilayerPreconfigurer {
 }
 
 impl MultilayerPreconfigurer {
+    /// Mutable access to the plan — the annealing handoff extends
+    /// `static_terminating_dot_map` with via-dot entries the pinname
+    /// scan cannot find.
+    pub fn plan_mut(&mut self) -> &mut AnterouterPlan {
+        &mut self.plan
+    }
+}
+
+impl MultilayerPreconfigurer {
     pub fn new(
         autorouter: &Autorouter<impl AccessMesadata>,
         input: MultilayerAutoroutePreconfigurerInput,
@@ -141,7 +150,7 @@ impl MultilayerPreconfigurer {
         for (i, (_, line)) in corridors.iter().enumerate() {
             for hit in tree.locate_in_envelope_intersecting(&envelopes[i].envelope()) {
                 let j = hit.data;
-                if j != i && Euclidean::distance(&*line, &corridors[j].1) < corridor_margin {
+                if j != i && Euclidean::distance(line, &corridors[j].1) < corridor_margin {
                     conflicts[i].insert(j);
                     conflicts[j].insert(i);
                 }

@@ -337,7 +337,7 @@ impl<
     pub fn has_pending_joiners(&self, endpoint: usize) -> bool {
         self.pending_joiners
             .get(&endpoint)
-            .map_or(false, |joiners| !joiners.is_empty())
+            .is_some_and(|joiners| !joiners.is_empty())
     }
 
     /// A `*_at_index` joint endpoint must hold a dot, else
@@ -453,7 +453,7 @@ impl<
             GenericNode::Primitive(prim) => self
                 .graph
                 .find_edge_undirected(seg.index().into(), prim.index().into())
-                .map_or(false, |(eidx, _direction)| {
+                .is_some_and(|(eidx, _direction)| {
                     matches!(self.graph.edge_weight(eidx).unwrap(), GeometryLabel::Joined)
                 }),
             GenericNode::Removed => false,
@@ -656,7 +656,7 @@ impl<
         PrimitiveShape::Seg(SegShape {
             from: self.dot_weight(from).pos(),
             to: self.dot_weight(to).pos(),
-            width: self.primitive_weight(seg.index().into()).width(),
+            width: self.primitive_weight(seg.index()).width(),
         })
     }
 
@@ -670,7 +670,7 @@ impl<
                 pos: core_weight.pos(),
                 r: self.inner_radius(bend),
             },
-            width: self.primitive_weight(bend.index().into()).width(),
+            width: self.primitive_weight(bend.index()).width(),
         })
     }
 
@@ -688,28 +688,28 @@ impl<
     }
 
     pub fn dot_weight(&self, dot: DI) -> DW {
-        let index: usize = dot.index().into();
+        let index: usize = dot.index();
         self.primitive_weight(index)
             .try_into()
             .unwrap_or_else(|_| panic!("index {index} no longer holds a dot"))
     }
 
     pub fn seg_weight(&self, seg: SI) -> SW {
-        let index: usize = seg.index().into();
+        let index: usize = seg.index();
         self.primitive_weight(index)
             .try_into()
             .unwrap_or_else(|_| panic!("index {index} no longer holds a seg"))
     }
 
     pub fn bend_weight(&self, bend: BI) -> BW {
-        let index: usize = bend.index().into();
+        let index: usize = bend.index();
         self.primitive_weight(index)
             .try_into()
             .unwrap_or_else(|_| panic!("index {index} no longer holds a bend"))
     }
 
     pub fn compound_weight(&self, compound: GenericIndex<CW>) -> &CW {
-        let index: usize = compound.index().into();
+        let index: usize = compound.index();
         match self.graph.node_weight(index.into()) {
             Some(GenericNode::Compound(weight)) => weight,
             Some(GenericNode::Primitive(_)) => {
@@ -723,7 +723,7 @@ impl<
     }
 
     fn core_weight(&self, bend: BI) -> DW {
-        let bend_index: usize = bend.index().into();
+        let bend_index: usize = bend.index();
         self.graph
             .edges_directed(bend_index.into(), Outgoing)
             .find(|edge| matches!(edge.weight(), GeometryLabel::Core))

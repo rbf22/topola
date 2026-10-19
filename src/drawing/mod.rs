@@ -8,6 +8,9 @@ pub mod band;
 pub mod bend;
 mod cane;
 pub mod dot;
+// `crate::drawing::drawing` is a deliberate layout: the inner module
+// holds the module's central type alongside sibling submodules.
+#[allow(clippy::module_inception)]
 mod drawing;
 pub mod gear;
 pub mod guide;

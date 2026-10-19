@@ -866,7 +866,11 @@ impl SpecctraDesign {
 
     fn pos(place: PointWithRotation, pin: PointWithRotation, x: f64, y: f64, flip: bool) -> Point {
         let pos = (Point::new(x, y) + pin.pos).rotate_around_point(pin.rot, pin.pos);
-        (place.pos + flip.then_some(Point::new(-pos.x(), pos.y())).unwrap_or(pos))
-            .rotate_around_point(place.rot, place.pos)
+        let pos = if flip {
+            Point::new(-pos.x(), pos.y())
+        } else {
+            pos
+        };
+        (place.pos + pos).rotate_around_point(place.rot, place.pos)
     }
 }

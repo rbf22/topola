@@ -43,7 +43,7 @@ use crate::{
 
 use super::gear::{GetOuterGears, WalkOutwards};
 
-#[derive(Clone, Copy, Error)]
+#[derive(Clone, Error)]
 pub enum DrawingException {
     #[error(transparent)]
     NoTangents(#[from] NoBitangents),
@@ -90,9 +90,13 @@ impl DrawingException {
 ///
 /// Infringement exceptions are never raised for two same-net primitives, since
 /// having the same net implies being connectable.
-#[derive(Error, Debug, Clone, Copy)]
+#[derive(Error, Debug, Clone)]
 #[error("{0:?} infringes on {1:?}")]
-pub struct Infringement(pub PrimitiveShape, pub PrimitiveShape, pub PrimitiveIndex);
+pub struct Infringement(
+    pub Box<PrimitiveShape>,
+    pub Box<PrimitiveShape>,
+    pub PrimitiveIndex,
+);
 
 /// A collision is a special case of infringement where the uninflated shapes of
 /// two primitives themselves intersect. In other words, collision detection is
@@ -111,9 +115,13 @@ pub struct Infringement(pub PrimitiveShape, pub PrimitiveShape, pub PrimitiveInd
 /// forms a self-intersecting loop. An infringement exception cannot be raised
 /// in such case because the primitives of a single band all belong to the same
 /// net, making them connectable and thus uninfringable.
-#[derive(Error, Debug, Clone, Copy)]
+#[derive(Error, Debug, Clone)]
 #[error("{0:?} collides with {1:?}")]
-pub struct Collision(pub PrimitiveShape, pub PrimitiveShape, pub PrimitiveIndex);
+pub struct Collision(
+    pub Box<PrimitiveShape>,
+    pub Box<PrimitiveShape>,
+    pub PrimitiveIndex,
+);
 
 #[derive(Error, Debug, Clone, Copy)]
 #[error("{1:?} is already connected to net {0}")]
@@ -313,11 +321,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         let __old_node_count = self.recording_geometry_with_rtree.node_count();
         let __ret = self.add_dot(recorder, weight, &|_drawing, _infringer, _infringee| true);
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -356,11 +364,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(dot)
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -381,11 +389,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             &|_drawing, _infringer, _infringee| true,
         );
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -419,11 +427,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             &|_drawing, _infringer, _infringee| true,
         );
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -444,11 +452,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             &|_drawing, _infringer, _infringee| true,
         );
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -523,11 +531,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(seg)
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -575,11 +583,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             }
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -610,11 +618,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(bend)
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -648,11 +656,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(bend)
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 1
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -719,11 +727,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(cane)
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 4
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -886,11 +894,11 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             })
         })();
         debug_assert!(
-            !__ret.is_ok()
+            __ret.is_err()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count + 4
         );
         debug_assert!(
-            !__ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         __ret
     }
@@ -1345,10 +1353,10 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             Ok(())
         })();
         debug_assert!(
-            !__ret.is_ok() || self.recording_geometry_with_rtree.node_count() == __old_node_count
+            __ret.is_err() || self.recording_geometry_with_rtree.node_count() == __old_node_count
         );
         debug_assert!(
-            !__ret.is_err()
+            __ret.is_ok()
                 || self.recording_geometry_with_rtree.node_count() == __old_node_count - 1
         );
         __ret

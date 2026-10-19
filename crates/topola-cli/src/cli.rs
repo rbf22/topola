@@ -2,8 +2,22 @@
 //
 // SPDX-License-Identifier: MIT
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+/// Which annealer formulation `--anneal` runs (mirrors
+/// `topola::autorouter::anneal::AnnealMode`; clap's `ValueEnum` cannot
+/// be derived on a foreign type).
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum AnnealModeArg {
+    /// Parametric 3D curves annealed under soft-core repulsion — the
+    /// full continuous-3D formulation.
+    #[default]
+    Continuous,
+    /// SA directly over (layer assignment, route order) — the
+    /// comparison baseline.
+    Discrete,
+}
 
 #[derive(Parser, Debug, Default)]
 #[command(about, version)]
@@ -113,6 +127,41 @@ pub struct Cli {
         help = "Route across all layers, fanning out to vias (multilayer autorouting)"
     )]
     pub multilayer: bool,
+    #[arg(
+        long,
+        requires = "multilayer",
+        help = "Run a simulated-annealing global pre-planner before multilayer routing: it anneals layer assignments, route order, congestion seeding, and (in continuous mode) mid-route layer hops under a bounded soft-core potential"
+    )]
+    pub anneal: bool,
+    #[arg(
+        long,
+        value_enum,
+        value_name = "MODE",
+        requires = "anneal",
+        help = "Annealer formulation: continuous 3D curves, or the discrete layer/order comparison baseline"
+    )]
+    pub anneal_mode: Option<AnnealModeArg>,
+    #[arg(
+        long,
+        value_name = "SEED",
+        requires = "anneal",
+        help = "Deterministic seed for the annealer (single-run only; --jobs derives seeds per worker)"
+    )]
+    pub anneal_seed: Option<u64>,
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "anneal",
+        help = "Number of cooling sweeps for the annealer (default 300)"
+    )]
+    pub anneal_iterations: Option<usize>,
+    #[arg(
+        long,
+        value_name = "K",
+        requires = "anneal",
+        help = "Carve demand corridors for the K most-contested ratlines after annealing (default 0, off)"
+    )]
+    pub anneal_carve_top_k: Option<usize>,
     #[arg(
         long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"

@@ -44,10 +44,7 @@ impl<K: Eq + Ord + Clone, V: Eq + Ord + Clone> BiBTreeMapSet<K, V> {
         }
 
         // Insert value into the new key's set of values.
-        self.key_to_values
-            .entry(key)
-            .or_insert_with(BTreeSet::new)
-            .insert(value);
+        self.key_to_values.entry(key).or_default().insert(value);
     }
 
     /// Gets the set of values associated with the given key.

@@ -92,18 +92,47 @@ impl MultilayerAutorouteReconfigurator {
     /// on the assigned layers, and seed the protected set.
     pub fn new_with_planar_override<M: AccessMesadata>(
         autorouter: &mut Autorouter<M>,
-        input: MultilayerAutoroutePreconfigurerInput,
+        mut input: MultilayerAutoroutePreconfigurerInput,
         options: MultilayerAutorouteOptions,
         planar_override: impl FnOnce(&mut Autorouter<M>, &mut PlanarAutorouteConfiguration),
     ) -> Result<Self, AutorouterError> {
-        // One band width: demand corridors closer than that cannot
-        // both fit on one layer without a detour.
-        let preconfigurer = MultilayerPreconfigurer::new_seeded(
-            autorouter,
-            input.clone(),
-            options.layer_seed,
-            options.planar.router.routed_band_width,
-        );
+        // Optional simulated-annealing pre-plan: a global annealer
+        // decides layer assignments, planned mid-route layer hops
+        // (committed as ordinary weaves), the contestedness order, the
+        // congestion seed, and carved corridors. Everything it
+        // produces is validated before it lands — an unplaceable via
+        // degrades its split to a plain layer assignment.
+        let mut annealed = None;
+        let preconfigurer = if let Some(anneal_options) = options.anneal {
+            let plan = crate::autorouter::anneal::run(
+                autorouter,
+                &input.ratlines,
+                &anneal_options,
+                options.planar.router.routed_band_width,
+            );
+            let handoff = crate::autorouter::anneal::handoff::apply(
+                autorouter,
+                &mut input.ratlines,
+                plan,
+                &options,
+            );
+            let preconfigurer = MultilayerPreconfigurer::new_from_layer_map(
+                autorouter,
+                &input.ratlines,
+                handoff.layer_map.clone(),
+            );
+            annealed = Some(handoff);
+            preconfigurer
+        } else {
+            // One band width: demand corridors closer than that cannot
+            // both fit on one layer without a detour.
+            MultilayerPreconfigurer::new_seeded(
+                autorouter,
+                input.clone(),
+                options.layer_seed,
+                options.planar.router.routed_band_width,
+            )
+        };
 
         let preconfiguration = MultilayerAutorouteConfiguration {
             plan: preconfigurer.plan().clone(),
@@ -120,13 +149,33 @@ impl MultilayerAutorouteReconfigurator {
             ),
         );
 
+        let order = annealed.as_ref().map(|handoff| handoff.order.clone());
+        let mut stepper = MultilayerAutorouteExecutionStepper::new_with_planar_override(
+            autorouter,
+            preconfiguration,
+            options,
+            |autorouter, configuration| {
+                if let Some(order) = &order {
+                    // The annealed contestedness order: every ratline
+                    // the plan did not rank keeps its preset position.
+                    let rank: BTreeMap<RatlineUid, usize> = order
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, ratline)| (*ratline, rank))
+                        .collect();
+                    configuration
+                        .ratlines
+                        .sort_by_key(|ratline| rank.get(ratline).copied().unwrap_or(usize::MAX));
+                }
+                planar_override(autorouter, configuration);
+            },
+        )?;
+        if let Some(handoff) = annealed {
+            stepper.adopt_planned_weaves(autorouter, handoff.edit, handoff.weaves);
+        }
+
         Ok(Self {
-            stepper: MultilayerAutorouteExecutionStepper::new_with_planar_override(
-                autorouter,
-                preconfiguration,
-                options,
-                planar_override,
-            )?,
+            stepper,
             timeout: TimeVsProgressAccumulatorTimeout::new_from_options(options.timeout),
             reconfigurer,
             options,
@@ -252,14 +301,17 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                     })
                 };
 
-                if frontier.is_some() && !self.finished && !self.reconfiguration_budget_exhausted()
-                {
+                if let (Some(frontier), false, false) = (
+                    frontier,
+                    self.finished,
+                    self.reconfiguration_budget_exhausted(),
+                ) {
                     self.reconfigurer.process_planar_result(
                         autorouter,
                         Ok(PlanarAutorouteConfigurationStatus {
                             configuration: self.stepper.planar().configuration().clone(),
                             costs: PlanarAutorouteCosts {
-                                lengths: vec![0.0; frontier.unwrap()],
+                                lengths: vec![0.0; frontier],
                             },
                         }),
                         self.stepper.planar().blockers(),
@@ -270,6 +322,10 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                         return Ok(ret);
                     }
                 }
+                // The command is really done — surviving weave
+                // continuations leave the ratsnest before history
+                // and undo can see their dead-end vertices.
+                self.stepper.remove_continuations(autorouter);
                 Ok(ControlFlow::Break(maybe_edit))
             }
             Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status))) => {

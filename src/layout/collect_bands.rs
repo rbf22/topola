@@ -253,10 +253,8 @@ impl<R: AccessRules> Layout<R> {
 
                 alignment_idx += alignment_incr;
 
-                iter::repeat_n(RelaxedPath::Weak(()), alignment_incr.into()).chain(
-                    item.map(|(band_uid, _)| RelaxedPath::Normal(band_uid))
-                        .into_iter(),
-                )
+                iter::repeat_n(RelaxedPath::Weak(()), alignment_incr.into())
+                    .chain(item.map(|(band_uid, _)| RelaxedPath::Normal(band_uid)))
             })
     }
 }

@@ -13,3 +13,5 @@ tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer	30
 tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn	--multilayer	30000	0	0	0	15	6e4659759826	0.021	ok
 /Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn		100000	0	2365	7472	2403	a8b7a65e9cea	4.068	ok
 /Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn	--critical-first	100000	0	2383	7484	2403	08dd2e8dd33d	84.344	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode continuous	30000	0	5	12	16	1a3c320c71d0	2.980	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	1	14	16	15ebf4beec51	0.160	ok

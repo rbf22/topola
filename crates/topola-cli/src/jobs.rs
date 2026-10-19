@@ -21,7 +21,7 @@ use topola::specctra::mesadata::SpecctraMesadata;
 use topola::stepper::EstimateProgress;
 
 use crate::cli::Cli;
-use crate::options::{make_command, make_planar_options, make_selection};
+use crate::options::{make_anneal_options, make_command, make_planar_options, make_selection};
 use crate::preprobe::preprobe_blockers;
 use crate::report::{humantime, routed_counts, ProgressCsv};
 use crate::suggest;
@@ -81,6 +81,12 @@ pub fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::i
         let preprobe_seed = preprobe_seed.clone();
         let mut planar_options = template;
         planar_options.shuffle_seed = i as u64;
+        // Each worker explores a different annealing trajectory —
+        // same derivation convention as `shuffle_seed`.
+        let mut anneal = make_anneal_options(args);
+        if let Some(anneal) = &mut anneal {
+            anneal.seed = anneal.seed.wrapping_add(i as u64);
+        }
 
         handles.push(std::thread::spawn(
             move || -> Result<(usize, Invoker<SpecctraMesadata>), String> {
@@ -101,6 +107,7 @@ pub fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::i
                     selection,
                     planar_options,
                     i as u64,
+                    anneal,
                     &board,
                 );
 
@@ -184,10 +191,6 @@ pub fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::i
         }
     }
 
-    best.map(|(_, invoker)| invoker).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "all parallel routing jobs failed",
-        )
-    })
+    best.map(|(_, invoker)| invoker)
+        .ok_or_else(|| std::io::Error::other("all parallel routing jobs failed"))
 }

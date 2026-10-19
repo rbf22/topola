@@ -97,6 +97,47 @@ pub trait GetDebugOverlayData {
     }
 }
 
+/// `ExecutionStepper` and `ActivityStepper` box their large variants,
+/// so the trait must delegate through `Box` for `enum_dispatch` to
+/// see them.
+impl<T: GetDebugOverlayData + ?Sized> GetDebugOverlayData for Box<T> {
+    fn maybe_thetastar(&self) -> Option<&ThetastarStepper<Navmesh, f64>> {
+        (**self).maybe_thetastar()
+    }
+
+    fn maybe_topo_navmesh(&self) -> Option<ng::pie::navmesh::NavmeshRef<'_, ng::PieNavmeshBase>> {
+        (**self).maybe_topo_navmesh()
+    }
+
+    fn maybe_navcord(&self) -> Option<&Navcord> {
+        (**self).maybe_navcord()
+    }
+
+    fn active_polygons(&self) -> &[GenericIndex<PolyWeight>] {
+        (**self).active_polygons()
+    }
+
+    fn ghosts(&self) -> &[PrimitiveShape] {
+        (**self).ghosts()
+    }
+
+    fn obstacles(&self) -> &[PrimitiveIndex] {
+        (**self).obstacles()
+    }
+
+    fn polygonal_blockers(&self) -> &[LineString] {
+        (**self).polygonal_blockers()
+    }
+
+    fn navnode_debug_text(&self, navnode: NavnodeIndex) -> Option<&str> {
+        (**self).navnode_debug_text(navnode)
+    }
+
+    fn navedge_debug_text(&self, navedge: (NavnodeIndex, NavnodeIndex)) -> Option<&str> {
+        (**self).navedge_debug_text(navedge)
+    }
+}
+
 /// Error types that can occur during the invocation of commands.
 #[derive(Error, Debug, Clone)]
 pub enum InvokerError {
@@ -296,16 +337,16 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
     fn dispatch_command(&mut self, command: &Command) -> Result<ExecutionStepper<M>, InvokerError> {
         debug_assert!(self.ongoing_command.is_none());
         Ok(match command {
-            Command::Autoroute(selection, options) => ExecutionStepper::PlanarAutoroute(
+            Command::Autoroute(selection, options) => ExecutionStepper::PlanarAutoroute(Box::new(
                 self.autorouter.planar_autoroute(selection, *options)?,
-            ),
+            )),
             Command::MultilayerAutoroute(selection, options) => {
-                ExecutionStepper::MultilayerAutoroute(
+                ExecutionStepper::MultilayerAutoroute(Box::new(
                     self.autorouter.multilayer_autoroute(selection, *options)?,
-                )
+                ))
             }
             Command::CriticalAutoroute(selection, options) => ExecutionStepper::CriticalAutoroute(
-                self.autorouter.critical_autoroute(selection, *options)?,
+                Box::new(self.autorouter.critical_autoroute(selection, *options)?),
             ),
             Command::TopoAutoroute {
                 selection,
@@ -324,13 +365,13 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
 
                 // TODO: consider "presort by pairwise detours"
 
-                ExecutionStepper::TopoAutoroute(self.autorouter.topo_autoroute_ratlines(
+                ExecutionStepper::TopoAutoroute(Box::new(self.autorouter.topo_autoroute_ratlines(
                     ratlines.into_iter().collect(),
                     allowed_edges.clone(),
                     active_layer,
                     *routed_band_width,
                     None,
-                )?)
+                )?))
             }
             Command::PlaceVia(weight) => {
                 ExecutionStepper::PlaceVia(self.autorouter.place_via(*weight)?)

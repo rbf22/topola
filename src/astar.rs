@@ -44,7 +44,7 @@ impl<N: Clone + Ord, S: Add<S, Output = S> + Copy + Default + PartialOrd> Astar<
     }
 
     pub fn push(&mut self, new_node: (S, S, N)) {
-        let curr_g_score = self.g_scores.get(&self.curr_node).unwrap().clone();
+        let curr_g_score = *self.g_scores.get(&self.curr_node).unwrap();
         let (edge_g_cost, h_heuristic, node) = new_node;
 
         match self.g_scores.entry(node.clone()) {

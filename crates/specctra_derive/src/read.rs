@@ -108,7 +108,7 @@ fn impl_variant(variant: &Variant) -> (TokenStream, TokenStream) {
     let inner = match &variant.fields {
         Fields::Unnamed(fields) => {
             let all_parts =
-                core::iter::repeat(quote! { tokenizer.read_value()?, }).take(fields.unnamed.len());
+                std::iter::repeat_n(quote! { tokenizer.read_value()?, }, fields.unnamed.len());
             quote! { Self::#name(#(#all_parts)*) }
         }
         Fields::Named(fields) => {

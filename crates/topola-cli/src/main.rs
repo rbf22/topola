@@ -26,7 +26,7 @@ pub mod suggest;
 
 use cli::Cli;
 use jobs::run_parallel_jobs;
-use options::{band_width, make_command, make_planar_options, make_selection};
+use options::{band_width, make_anneal_options, make_command, make_planar_options, make_selection};
 use preprobe::preprobe_blockers;
 use report::{humantime, write_blockers_csv, ProgressCsv};
 
@@ -62,6 +62,7 @@ fn main() -> Result<(), std::io::Error> {
                 selection.clone(),
                 make_planar_options(&args, &board),
                 0,
+                make_anneal_options(&args),
                 &board,
             );
             history.do_(command, None);

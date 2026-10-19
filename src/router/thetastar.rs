@@ -24,7 +24,7 @@ use crate::stepper::{EstimateProgress, LinearScale, Step};
 
 /// Index-addressed per-node slot: node ids are dense `NodeIndex`-style
 /// numbers, so a grow-on-demand `Vec` beats a hash map on every lookup.
-fn node_slot<'a, T: Copy, N: GetIndex>(slots: &'a [Option<T>], node: N) -> Option<T> {
+fn node_slot<T: Copy, N: GetIndex>(slots: &[Option<T>], node: N) -> Option<T> {
     slots.get(node.index()).copied().flatten()
 }
 
@@ -87,6 +87,13 @@ where
     }
 }
 
+/// A [`ThetastarStrategy`] visitor raises this to reject the visited
+/// navnode — the driver treats it like any unproductive expansion and
+/// moves on to the next frontier entry.
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("visitor rejected the navnode")]
+pub struct VisitRejected;
+
 pub trait ThetastarStrategy<G, K, R>
 where
     G: GraphBase,
@@ -99,7 +106,7 @@ where
         graph: &G,
         navnode: G::NodeId,
         tracker: &PathTracker<G>,
-    ) -> Result<Option<R>, ()>;
+    ) -> Result<Option<R>, VisitRejected>;
     fn place_probe_to_navnode(
         &mut self,
         graph: &G,

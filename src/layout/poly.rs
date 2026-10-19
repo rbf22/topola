@@ -73,7 +73,7 @@ pub(super) fn add_poly_with_nodes_intern<R: AccessRules>(
     }
 
     let poly_compound = poly.into();
-    let mut shape = Vec::with_capacity((nodes.len() + 1) / 2);
+    let mut shape = Vec::with_capacity(nodes.len().div_ceil(2));
 
     // create a temporary RTree to speed up lookups from O(n²) to O(n log n)
     let mut temp_rtree = rstar::RTree::<Rto>::new();

@@ -54,6 +54,8 @@ ROWS=(
     "tests/external/optoisolator_4n35/optoisolator_4n35.dsn||30000"
     "tests/external/fasttest/fasttest.dsn|--multilayer|30000"
     "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn|--multilayer|30000"
+    "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn|--multilayer --anneal --anneal-mode continuous|30000"
+    "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn|--multilayer --anneal --anneal-mode discrete|30000"
     "tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn|--multilayer|30000"
 )
 

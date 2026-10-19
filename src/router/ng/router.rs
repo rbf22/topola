@@ -259,6 +259,10 @@ impl<M> GetDebugOverlayData for AutorouteExecutionStepper<M> {
     }
 }
 
+/// The navmesh's shared edge table: each navedge maps to its
+/// geometric edge plus bookkeeping.
+type NavEdgeMap = BTreeMap<EdgeIndex<NavmeshIndex<FixedDotIndex>>, (Edge<FixedDotIndex>, usize)>;
+
 #[derive(Clone, Debug)]
 struct ManualRouteStep {
     goal: Goal,
@@ -277,7 +281,7 @@ pub struct ManualrouteExecutionStepper<R> {
 
     // constant stuff
     nodes: Arc<BTreeMap<NavmeshIndex<FixedDotIndex>, Node<FixedDotIndex, f64>>>,
-    edges: Arc<BTreeMap<EdgeIndex<NavmeshIndex<FixedDotIndex>>, (Edge<FixedDotIndex>, usize)>>,
+    edges: Arc<NavEdgeMap>,
     common: Common<R>,
     original_edge_paths: Box<[EdgePaths<EtchedPath, ()>]>,
 
@@ -293,7 +297,7 @@ pub struct ManualrouteExecutionStepper<R> {
 }
 
 impl<M> ManualrouteExecutionStepper<M> {
-    pub fn last_edge_paths(&self) -> &Box<[EdgePaths<EtchedPath, ()>]> {
+    pub fn last_edge_paths(&self) -> &[EdgePaths<EtchedPath, ()>] {
         match self.remaining_steps.last() {
             _ if self.aborted => &self.original_edge_paths,
             Some(goal) => &goal.edge_paths,
@@ -405,7 +409,7 @@ impl<R: AccessRules + Clone + std::panic::RefUnwindSafe> ManualrouteExecutionSte
         };
 
         // try to advance current goal
-        let source = goal.cur_node.clone();
+        let source = goal.cur_node;
         let label = goal.goal.label();
         let navmesh = pie::navmesh::NavmeshRef::<'_, super::PieNavmeshBase> {
             nodes: &*self.nodes,
@@ -525,7 +529,7 @@ impl<M> GetDebugOverlayData for ManualrouteExecutionStepper<M> {
         Some(pie::navmesh::NavmeshRef {
             nodes: &self.nodes,
             edges: &self.edges,
-            edge_paths: &self.last_edge_paths(),
+            edge_paths: self.last_edge_paths(),
         })
     }
 

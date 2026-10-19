@@ -242,7 +242,7 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
             for hit in tree.locate_in_envelope_intersecting(&envelopes[i].envelope()) {
                 let j = hit.data;
                 let same_net = maybe_net.is_some() && *maybe_net == corridors[j].2;
-                if j != i && !same_net && Euclidean::distance(&*line, &corridors[j].1) < margin {
+                if j != i && !same_net && Euclidean::distance(line, &corridors[j].1) < margin {
                     count += 1.0;
                 }
             }

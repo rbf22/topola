@@ -198,13 +198,12 @@ impl<
         &mut self,
         recorder: &mut GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
         dot: DI,
-    ) -> Result<(), ()> {
+    ) {
         crate::metrics::incr(&crate::metrics::METRICS.geometry_removes);
         let _timer = crate::metrics::Timer::start(&crate::metrics::METRICS.remove_nanos);
         let weight = self.geometry_with_rtree.geometry().dot_weight(dot);
         self.geometry_with_rtree.remove_dot(dot);
         edit_remove_from_map(&mut recorder.dots, dot, weight);
-        Ok(())
     }
 
     pub fn remove_seg(

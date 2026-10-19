@@ -157,8 +157,8 @@ pub enum CriticalAutorouteStatus {
 
 /// Planar or multilayer routing machinery, driven by the outer stepper.
 enum InnerRouter {
-    Planar(PlanarAutorouteReconfigurator),
-    Multilayer(MultilayerAutorouteReconfigurator),
+    Planar(Box<PlanarAutorouteReconfigurator>),
+    Multilayer(Box<MultilayerAutorouteReconfigurator>),
 }
 
 impl InnerRouter {
@@ -305,34 +305,36 @@ impl CriticalAutorouteExecutionStepper {
         let mut overridden: Option<(BTreeSet<RatlineUid>, BTreeMap<RatlineUid, BoardEdit>)> = None;
 
         let mut inner = if let Some(multilayer_options) = options.multilayer {
-            InnerRouter::Multilayer(MultilayerAutorouteReconfigurator::new_with_planar_override(
-                autorouter,
-                MultilayerAutoroutePreconfigurerInput {
-                    ratlines: ratlines.clone(),
-                },
-                multilayer_options,
-                |autorouter, configuration| {
-                    // The multilayer plan's own order encodes
-                    // fanout/layer structure — congestion seeding and
-                    // re-probing apply, but neither the critical-first
-                    // reorder, protected-set scheduling, nor carving:
-                    // carved corridors starve the via-weaving the
-                    // fanout plan depends on.
-                    overridden = Some(Self::install_critical(
-                        autorouter,
-                        configuration,
-                        &report,
-                        router_options,
-                        &CriticalAutorouteOptions {
-                            carve: false,
-                            ..options
-                        },
-                        false,
-                    ));
-                },
-            )?)
+            InnerRouter::Multilayer(Box::new(
+                MultilayerAutorouteReconfigurator::new_with_planar_override(
+                    autorouter,
+                    MultilayerAutoroutePreconfigurerInput {
+                        ratlines: ratlines.clone(),
+                    },
+                    multilayer_options,
+                    |autorouter, configuration| {
+                        // The multilayer plan's own order encodes
+                        // fanout/layer structure — congestion seeding and
+                        // re-probing apply, but neither the critical-first
+                        // reorder, protected-set scheduling, nor carving:
+                        // carved corridors starve the via-weaving the
+                        // fanout plan depends on.
+                        overridden = Some(Self::install_critical(
+                            autorouter,
+                            configuration,
+                            &report,
+                            router_options,
+                            &CriticalAutorouteOptions {
+                                carve: false,
+                                ..options
+                            },
+                            false,
+                        ));
+                    },
+                )?,
+            ))
         } else {
-            InnerRouter::Planar(
+            InnerRouter::Planar(Box::new(
                 PlanarAutorouteReconfigurator::new_with_configuration_override(
                     autorouter,
                     PlanarAutoroutePreconfigurerInput {
@@ -351,7 +353,7 @@ impl CriticalAutorouteExecutionStepper {
                         ));
                     },
                 )?,
-            )
+            ))
         };
 
         let (critical, carve_edits) = overridden.unwrap_or_default();

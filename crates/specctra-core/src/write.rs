@@ -19,7 +19,7 @@ impl<W: io::Write> WriteSes<W> for String {
     fn write_dsn(&self, writer: &mut ListWriter<W>) -> Result<(), io::Error> {
         let string = if self.is_empty() {
             "\"\"".to_string()
-        } else if self.contains(|i: char| i == ' ' || i == '(' || i == ')' || i == '\n') {
+        } else if self.contains([' ', '(', ')', '\n']) {
             format!("\"{}\"", self)
         } else {
             self.to_string()

@@ -10,6 +10,7 @@ use petgraph::graph::NodeIndex;
 use rstar::{Envelope, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use specctra_core::mesadata::AccessMesadata;
+use thiserror::Error;
 
 use crate::{
     autorouter::{
@@ -34,6 +35,13 @@ use crate::{
 pub struct AnterouterOptions {
     pub fanout_clearance: f64,
 }
+
+/// An endpoint's fanout via or seg could not be placed — the
+/// ratline's anteroute is incomplete. Callers either fall back to
+/// another layer or drop the ratline from the configuration.
+#[derive(Clone, Copy, Debug, Error)]
+#[error("anteroute fanout placement failed")]
+pub struct AnterouteFailure;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct AnterouterPlan {
@@ -93,7 +101,7 @@ impl Anterouter {
         layer: usize,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), AnterouteFailure> {
         let endpoint_indices = ratline.ref_(autorouter).endpoint_indices();
         let endpoint_dots = ratline.ref_(autorouter).endpoint_dots();
         let mut result = Ok(());
@@ -121,7 +129,7 @@ impl Anterouter {
                 )
                 .is_err()
             {
-                result = Err(());
+                result = Err(AnterouteFailure);
             }
         }
 
@@ -138,7 +146,7 @@ impl Anterouter {
         target_layer: usize,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), AnterouteFailure> {
         let mut ratline_delta: Point = ratline.ref_(autorouter).line_segment().delta().into();
 
         if ratvertex == ratline.ref_(autorouter).endpoint_indices().1 {
@@ -255,7 +263,7 @@ impl Anterouter {
             return Ok(());
         }
 
-        Err(())
+        Err(AnterouteFailure)
     }
 
     fn anteroute_fanout_on_bbox(
@@ -270,7 +278,7 @@ impl Anterouter {
         preferred_compass_direction: impl CompassDirection,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), AnterouteFailure> {
         if self
             .anteroute_fanout_on_bbox_in_direction(
                 autorouter,
@@ -338,7 +346,7 @@ impl Anterouter {
             if counterclockwise_turning_cardinal_direction == preferred_compass_direction
                 || clockwise_turning_cardinal_direction == preferred_compass_direction
             {
-                return Err(());
+                return Err(AnterouteFailure);
             }
         }
     }
@@ -355,7 +363,7 @@ impl Anterouter {
         direction: impl Into<Point>,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), AnterouteFailure> {
         let (via, dots) = self.place_fanout_via_on_bbox_in_direction(
             autorouter,
             recorder,
@@ -391,21 +399,26 @@ impl Anterouter {
         // meaningless across coordinate scales and on
         // fine-pitch boards the stub can never be placed.
         let width = autorouter.board().mesadata().default_trace_width();
-        if let Ok(_) = autorouter.board.layout_mut().add_fixed_seg(
-            &mut recorder.layout_edit,
-            source_dot,
-            fanout_dot,
-            FixedSegWeight(GeneralSegWeight {
-                width,
-                layer,
-                maybe_net,
-            }),
-        ) {
+        if autorouter
+            .board
+            .layout_mut()
+            .add_fixed_seg(
+                &mut recorder.layout_edit,
+                source_dot,
+                fanout_dot,
+                FixedSegWeight(GeneralSegWeight {
+                    width,
+                    layer,
+                    maybe_net,
+                }),
+            )
+            .is_ok()
+        {
             Ok(())
         } else {
             autorouter.board.remove_via(recorder, via, dots);
             terminating_dot_map.remove(&(ratline, source_dot));
-            Err(())
+            Err(AnterouteFailure)
         }
     }
 
@@ -421,7 +434,7 @@ impl Anterouter {
         direction: impl Into<Point>,
         options: &AnterouterOptions,
         terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
-    ) -> Result<(GenericIndex<ViaWeight>, Vec<FixedDotIndex>), ()> {
+    ) -> Result<(GenericIndex<ViaWeight>, Vec<FixedDotIndex>), AnterouteFailure> {
         let source_layer = autorouter
             .board()
             .layout()
@@ -502,7 +515,7 @@ impl Anterouter {
             terminating_dot_map.insert((ratline, source_dot), *terminating_dot);
             Ok((via, dots))
         } else {
-            Err(())
+            Err(AnterouteFailure)
         }
     }
 }

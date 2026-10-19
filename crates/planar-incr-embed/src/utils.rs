@@ -30,7 +30,7 @@ where
 
     let mut it_first = iter.clone().peekable();
     let mut start_idx = 0;
-    while it_first.peek().is_some_and(|item| not_is_start(item)) {
+    while it_first.peek().is_some_and(&not_is_start) {
         it_first.next();
         start_idx += 1;
     }

@@ -232,6 +232,11 @@ pub(crate) enum PathCane {
     Real(CaneHead),
 }
 
+/// Verdict memo for one interned navcord-path prefix: maps
+/// `(materialized canes, target navnode)` to a `.step_to(..)`
+/// outcome.
+type StepMemo = HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>;
+
 #[derive(Debug)]
 pub struct Navcord {
     /// The layout edit which we are currently recording.
@@ -266,10 +271,7 @@ pub struct Navcord {
     /// materialized canes — and the target navnode.
     /// `.rework_path(..)` redraws paths over and over, so this saves
     /// re-evaluating their geometry each time.
-    step_memo: HashMap<
-        u64,
-        HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>,
-    >,
+    step_memo: HashMap<u64, StepMemo>,
     /// Interned ids of each prefix of `.path`, parallel to it:
     /// `path_ids[i]` uniquely identifies the sequence `path[..=i]`.
     /// Memo tables are keyed by these ids, keeping lookups O(1)
@@ -292,10 +294,7 @@ pub struct Navcord {
 #[derive(Debug)]
 pub struct NavcordSearchState {
     probe_memo: HashMap<u64, HashMap<(Option<NavnodeIndex>, NavnodeIndex), ProbeMemoEntry>>,
-    step_memo: HashMap<
-        u64,
-        HashMap<(usize, NavnodeIndex), Result<(GhostReplay, f64), NavcorderException>>,
-    >,
+    step_memo: HashMap<u64, StepMemo>,
     path_interner: HashMap<(u64, NavnodeIndex), u64>,
     next_path_id: u64,
 }
@@ -641,8 +640,8 @@ impl Navcord {
             Ok(_) => crate::metrics::incr(&crate::metrics::METRICS.step_to_ok),
             Err(_) => crate::metrics::incr(&crate::metrics::METRICS.step_to_err),
         }
-        debug_assert!(!result.is_ok() || self.path.len() == __old_len + 1);
-        debug_assert!(!result.is_err() || self.path.len() == __old_len);
+        debug_assert!(result.is_err() || self.path.len() == __old_len + 1);
+        debug_assert!(result.is_ok() || self.path.len() == __old_len);
         result
     }
 
@@ -894,7 +893,10 @@ impl Navcord {
                     continue;
                 }
                 if seg_shape.intersects(&virtual_seg) {
-                    return fail(Collision(seg_shape, virtual_seg, cane.gear.into()).into());
+                    return fail(
+                        Collision(Box::new(seg_shape), Box::new(virtual_seg), cane.gear.into())
+                            .into(),
+                    );
                 }
             }
         }

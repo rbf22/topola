@@ -25,7 +25,7 @@ use crate::{
     math::{Circle, NoBitangents, RotationSense},
 };
 
-#[derive(Error, Debug, Clone, Copy)]
+#[derive(Error, Debug, Clone)]
 pub enum DrawException {
     #[error(transparent)]
     NoBitangents(#[from] NoBitangents),
@@ -150,10 +150,10 @@ impl<R: AccessRules> Draw for Layout<R> {
                             .map(BandTermsegIndex::Seq),
                     }
                 })
-                .map_err(|err| DrawException::CannotFinishIn(into, err.into()))
+                .map_err(|err| DrawException::CannotFinishIn(into, err))
             })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 1);
-        debug_assert!(!__ret.is_err() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 1);
+        debug_assert!(__ret.is_ok() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 
@@ -189,8 +189,8 @@ impl<R: AccessRules> Draw for Layout<R> {
             )
             .map_err(|err| DrawException::CannotWrapAround(around.into(), err))
         })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
-        debug_assert!(!__ret.is_err() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_ok() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 
@@ -222,7 +222,7 @@ impl<R: AccessRules> Draw for Layout<R> {
                 offset,
             ))
         })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
         __ret
     }
 
@@ -258,8 +258,8 @@ impl<R: AccessRules> Draw for Layout<R> {
             )
             .map_err(|err| DrawException::CannotWrapAround(around.into(), err))
         })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
-        debug_assert!(!__ret.is_err() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_ok() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 
@@ -291,7 +291,7 @@ impl<R: AccessRules> Draw for Layout<R> {
                 offset,
             ))
         })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
         __ret
     }
 
@@ -306,8 +306,8 @@ impl<R: AccessRules> Draw for Layout<R> {
             self.remove_cane(recorder, &head.cane, head.face);
             Some(self.drawing().head(prev_dot))
         };
-        debug_assert!(!__ret.is_some() || self.drawing().node_count() == __old_node_count - 4);
-        debug_assert!(!__ret.is_none() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_none() || self.drawing().node_count() == __old_node_count - 4);
+        debug_assert!(__ret.is_some() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 }
@@ -405,8 +405,8 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
         let __ret = self.extend_head(recorder, head, from, |this, recorder| {
             this.cane(recorder, head, around, to, sense, width, offset)
         });
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
-        debug_assert!(!__ret.is_err() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_ok() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 
@@ -536,8 +536,8 @@ impl<R: AccessRules> DrawPrivate for Layout<R> {
                 squeezed,
             ))
         })();
-        debug_assert!(!__ret.is_ok() || self.drawing().node_count() == __old_node_count + 4);
-        debug_assert!(!__ret.is_err() || self.drawing().node_count() == __old_node_count);
+        debug_assert!(__ret.is_err() || self.drawing().node_count() == __old_node_count + 4);
+        debug_assert!(__ret.is_ok() || self.drawing().node_count() == __old_node_count);
         __ret
     }
 

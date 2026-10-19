@@ -246,6 +246,13 @@ impl PlanarAutorouteReconfigurator {
         self.stepper.configuration()
     }
 
+    /// Mutable access to the live configuration — the anneal handoff
+    /// uses it to degrade a planned split whose parent half could not
+    /// reach the assumed layer.
+    pub fn configuration_mut(&mut self) -> &mut PlanarAutorouteConfiguration {
+        self.stepper.configuration_mut()
+    }
+
     /// Index of the ratline currently being attempted in the live
     /// configuration's ordering.
     pub fn curr_ratline_index(&self) -> usize {
@@ -445,12 +452,12 @@ impl PlanarAutorouteReconfigurator {
             .filter(|ratline| configuration.ratlines.contains(ratline) && !pinned.contains(ratline))
             .collect();
         let mut urgent = urgent_set.iter().copied();
-        for index in curr + 1..slots.len() {
+        for slot in slots.iter_mut().skip(curr + 1) {
             if urgent.len() == 0 {
                 break;
             }
-            if slots[index].is_none() {
-                slots[index] = urgent.next();
+            if slot.is_none() {
+                *slot = urgent.next();
             }
         }
 
@@ -498,7 +505,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
             && !stepper_done
             && !self
                 .timeout
-                .update(*self.estimate_progress().subscale().value() as f64)
+                .update(*self.estimate_progress().subscale().value())
         {
             if self.reconfiguration_budget_exhausted() {
                 self.finish_early(autorouter);

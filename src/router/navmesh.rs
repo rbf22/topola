@@ -124,6 +124,13 @@ pub enum NavmeshError {
     UnreachableDestination,
 }
 
+/// Per-prenavnode navnode table used while building a navmesh:
+/// `None` means the prenavnode never entered this navmesh's
+/// triangulation; `Some(vec![])` means it did but produced no
+/// navnodes — the same distinction a keyed map would make between
+/// a missing key and an empty value.
+type PrenavnodeNavnodes = Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>;
+
 /// The navmesh holds the entire Topola's search space represented as a graph.
 /// Topola's routing works by navigating over this graph with a pathfinding
 /// algorithm such as A* while drawing a track segment (always a cane except
@@ -203,7 +210,7 @@ impl Navmesh {
         // entered this navmesh's triangulation; `Some(vec![])` means it
         // did but produced no navnodes — the same distinction the
         // BTreeMap made between a missing key and an empty value.
-        let mut prenavnode_to_navnodes: Vec<Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>> =
+        let mut prenavnode_to_navnodes: Vec<PrenavnodeNavnodes> =
             vec![None; layout.drawing().geometry().dot_index_bound()];
         let mut overlapping_prenavnodes_unions =
         // FIXME: This bound is incorrect. You can't actually unionize dots with bends.
@@ -435,7 +442,7 @@ impl Navmesh {
 
     fn add_prenavnode_as_binavnode(
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
-        prenavnode_to_navnodes: &mut [Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
+        prenavnode_to_navnodes: &mut [PrenavnodeNavnodes],
         prenavnode: PrenavnodeNodeIndex,
         binavnode: BinavnodeNodeIndex,
     ) {
@@ -459,7 +466,7 @@ impl Navmesh {
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
         edge_set: &mut HashSet<u64>,
-        prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
+        prenavnode_to_navnodes: &[PrenavnodeNavnodes],
         overlapping_prenavnodes_unions: &UnionFind<usize>,
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
@@ -468,7 +475,7 @@ impl Navmesh {
         // since fixed bends also can be prenavnodes, but it works for now.
         let resolve_repr = |prenavnode: PrenavnodeNodeIndex| {
             let repr = PrenavnodeNodeIndex::FixedDot(GenericIndex::new(
-                overlapping_prenavnodes_unions.find(prenavnode.index().into()),
+                overlapping_prenavnodes_unions.find(prenavnode.index()),
             ));
             // The union representative can be a dot that never entered
             // this navmesh's triangulation — `unionize_with_overlapees`
@@ -513,7 +520,7 @@ impl Navmesh {
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
         edge_set: &mut HashSet<u64>,
-        prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
+        prenavnode_to_navnodes: &[PrenavnodeNavnodes],
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
     ) {
