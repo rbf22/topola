@@ -16,13 +16,15 @@
 //! before re-exporting and routing again.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Write};
+use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use topola::{
     autorouter::Autorouter,
-    board::AccessMesadata,
+    board::{edit::BoardEdit, AccessMesadata, Board},
     drawing::{
         graph::{GetMaybeNet, MakePrimitiveRef},
         primitive::MakePrimitiveShape,
@@ -31,6 +33,46 @@ use topola::{
     router::RouterOptions,
     specctra::mesadata::SpecctraMesadata,
 };
+
+/// Applies the per-owner displacements of a `--suggest-shifts` report
+/// to the board before routing ("component shifting" for congestion
+/// relief). Only reference-designator owners are components;
+/// `wire:<net>` blockers are routed geometry and `<board>` owners are
+/// netless shapes, neither of which can be translated.
+pub fn apply_report(
+    board: &mut Board<SpecctraMesadata>,
+    report_filename: &Path,
+) -> Result<(), std::io::Error> {
+    #[derive(Deserialize)]
+    struct ShiftEntry {
+        dx: f64,
+        dy: f64,
+    }
+
+    #[derive(Deserialize)]
+    struct ShiftReport {
+        shifts: BTreeMap<String, ShiftEntry>,
+    }
+
+    let report: ShiftReport =
+        serde_json::from_reader(BufReader::new(File::open(report_filename)?))?;
+
+    let mut edit = BoardEdit::new();
+    for (refdes, shift) in report.shifts {
+        if refdes.starts_with("wire:") || refdes == "<board>" {
+            continue;
+        }
+
+        match board.shift_component(&mut edit, &refdes, (shift.dx, shift.dy)) {
+            Some(moved) => eprintln!(
+                "[topola] shifted {} ({} dots) by ({:.0}, {:.0})",
+                refdes, moved, shift.dx, shift.dy
+            ),
+            None => eprintln!("[topola] skipped shift of {}", refdes),
+        }
+    }
+    Ok(())
+}
 
 #[derive(Serialize)]
 struct ShiftSuggestions {
