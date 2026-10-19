@@ -114,6 +114,7 @@ impl<DW, SW, BW, CW, Cel, PI, DI, SI, BI> GeometryEdit<DW, SW, BW, CW, Cel, PI, 
             .filter(|(_, (old, new))| old.is_none() && new.is_some())
             .map(|(index, _)| *index)
     }
+
 }
 
 impl<

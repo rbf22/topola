@@ -62,6 +62,12 @@ pub struct Cli {
     pub jobs: Option<u16>,
     #[arg(
         long,
+        value_name = "WIDTH",
+        help = "Width of the routed band in the design's units. Defaults to the trace width declared by the design's rule, or 100.0 when it declares none"
+    )]
+    pub band_width: Option<f64>,
+    #[arg(
+        long,
         value_name = "FILE",
         help = "Write a JSON report of channel blockers and per-component shift suggestions for unrouted ratlines"
     )]
@@ -97,6 +103,11 @@ pub struct Cli {
         help = "Rip up only blocking bands on failure instead of backtracing (negotiated congestion)"
     )]
     pub surgical_ripup: bool,
+    #[arg(
+        long,
+        help = "Probe-selected ratlines identify the hardest connections up front; they are scheduled first, their demand corridors carved as same-net fixed geometry, and their bands protected from rip-up, with re-identification on stalls (combines with --multilayer)"
+    )]
+    pub critical_first: bool,
     #[arg(
         long,
         help = "Route across all layers, fanning out to vias (multilayer autorouting)"

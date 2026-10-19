@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use topola::autorouter::anterouter::AnterouterOptions;
+use topola::autorouter::critical_autoroute::CriticalAutorouteOptions;
 use topola::autorouter::execution::Command;
 use topola::autorouter::history::History;
 use topola::autorouter::invoker::Invoker;
@@ -102,7 +103,12 @@ fn main() -> Result<(), std::io::Error> {
         } else {
             let mut history = History::new();
             let selection = make_selection(&board, &args.nets, &args.exclude_nets, args.multilayer);
-            let command = make_command(&args, selection.clone(), make_planar_options(&args));
+            let command = make_command(
+                &args,
+                selection.clone(),
+                make_planar_options(&args, &board),
+                &board,
+            );
             history.do_(command, None);
             (history, Some(selection))
         };
@@ -110,10 +116,11 @@ fn main() -> Result<(), std::io::Error> {
         let mut invoker = Invoker::new(Autorouter::new(board).unwrap());
 
         if args.preprobe {
+            let router_options = make_planar_options(&args, invoker.autorouter().board()).router;
             let blockers = preprobe_blockers(
                 invoker.autorouter_mut(),
                 selection.as_ref(),
-                make_planar_options(&args).router,
+                router_options,
                 args.jobs.unwrap_or(1) as usize,
             );
             invoker.autorouter_mut().seed_congestion(blockers);
@@ -137,7 +144,7 @@ fn main() -> Result<(), std::io::Error> {
                             0.0
                         };
                         eprintln!(
-                            "[topola] {} elapsed, routed {}/{} ({:.1}%)",
+                            "[topola] {} elapsed, processed {}/{} ratlines ({:.1}%)",
                             humantime(start.elapsed()),
                             value,
                             maximum,
@@ -202,6 +209,45 @@ fn main() -> Result<(), std::io::Error> {
             "[topola] finished: {} ratlines total, {} unrouted",
             total, unrouted_count
         );
+
+        // DIAG: union-find connectivity check
+        {
+            use topola::autorouter::connected_components::ConnectedComponents;
+            use topola::graph::GetIndex;
+            use topola::graph::MakeRef as _;
+            let conncomps = ConnectedComponents::new(autorouter.board());
+            let mut unconn = 0;
+            for pl in 0..autorouter.board().layout().drawing().layer_count() {
+                for edge in autorouter
+                    .ratsnests()
+                    .on_principal_layer(pl)
+                    .graph()
+                    .edge_indices()
+                {
+                    let uid = RatlineUid {
+                        principal_layer: pl,
+                        index: edge,
+                    };
+                    let (o, d) = uid.ref_(autorouter).endpoint_dots();
+                    let net = o
+                        .primitive_ref(autorouter.board().layout().drawing())
+                        .maybe_net();
+                    let name = net.and_then(|n| autorouter.board().mesadata().net_netname(n));
+                    if name == Some("GND") {
+                        continue;
+                    }
+                    if conncomps.unionfind().find(o.index())
+                        != conncomps.unionfind().find(d.index())
+                    {
+                        eprintln!("[topola] UNCONNECTED {:?} pl{} {:?}", edge, pl, name);
+                        unconn += 1;
+                    }
+                }
+            }
+            if unconn > 0 {
+                eprintln!("[topola] connectivity: {} unconnected", unconn);
+            }
+        }
         for (netname, count) in &unrouted {
             eprintln!("[topola]   unrouted: {} ({} ratlines)", netname, count);
         }
@@ -229,13 +275,14 @@ fn main() -> Result<(), std::io::Error> {
 
     if let Some(suggest_shifts_filename) = &args.suggest_shifts {
         let file = File::create(suggest_shifts_filename)?;
+        let router_options = RouterOptions {
+            wrap_around_bands: true,
+            squeeze_through_under_bends: false,
+            routed_band_width: band_width(&args, invoker.autorouter().board()),
+        };
         suggest::write_suggestions(
             invoker.autorouter_mut(),
-            RouterOptions {
-                wrap_around_bands: true,
-                squeeze_through_under_bends: false,
-                routed_band_width: 100.0,
-            },
+            router_options,
             args.jobs.unwrap_or(1) as usize,
             file,
         )?;
@@ -304,7 +351,25 @@ fn make_selection(
     }
 }
 
-fn make_planar_options(args: &Cli) -> PlanarAutorouteOptions {
+/// Routed band width: the `--band-width` override, else the trace
+/// width the design's structure rule declares, else the historical
+/// fixed default. The rule-derived default keeps the option in the
+/// design's own units — a fixed value is meaningless across boards
+/// with different resolutions.
+fn band_width(args: &Cli, board: &Board<SpecctraMesadata>) -> f64 {
+    if let Some(width) = args.band_width {
+        return width;
+    }
+
+    let declared = board.mesadata().structure_rule().width;
+    if declared > 0.0 {
+        declared
+    } else {
+        100.0
+    }
+}
+
+fn make_planar_options(args: &Cli, board: &Board<SpecctraMesadata>) -> PlanarAutorouteOptions {
     PlanarAutorouteOptions {
         principal_layer: 0,
         presort_by: if args.corridor_presort {
@@ -320,7 +385,7 @@ fn make_planar_options(args: &Cli) -> PlanarAutorouteOptions {
         router: RouterOptions {
             wrap_around_bands: true,
             squeeze_through_under_bends: args.multilayer,
-            routed_band_width: 100.0,
+            routed_band_width: band_width(args, board),
         },
         timeout: TimeoutOptions {
             initial: 1.0,
@@ -335,29 +400,61 @@ fn make_planar_options(args: &Cli) -> PlanarAutorouteOptions {
     }
 }
 
+/// Fanout clearance: how far past the pad's bounding-box edge the via
+/// center is placed. The minimum legal distance scales with the
+/// design's via size and clearance — a fixed value is meaningless
+/// across boards with different resolutions.
+fn fanout_clearance(board: &Board<SpecctraMesadata>) -> f64 {
+    let mesadata = board.mesadata();
+    mesadata.via_radius() + 1.05 * mesadata.structure_rule().clearance
+}
+
+fn make_multilayer_options(
+    planar_options: PlanarAutorouteOptions,
+    layer_seed: u64,
+    board: &Board<SpecctraMesadata>,
+) -> MultilayerAutorouteOptions {
+    MultilayerAutorouteOptions {
+        anterouter: AnterouterOptions {
+            fanout_clearance: fanout_clearance(board),
+        },
+        planar: planar_options,
+        timeout: TimeoutOptions {
+            // Bonus applies per newly-reached ratline index —
+            // 0.5s each banks ~2min of budget by mid-list on
+            // big boards, starving layer rotation entirely.
+            initial: 5.0,
+            progress_bonus: 0.05,
+        },
+        layer_seed,
+    }
+}
+
 fn make_command(
     args: &Cli,
     selection: PinSelection,
     planar_options: PlanarAutorouteOptions,
+    board: &Board<SpecctraMesadata>,
 ) -> Command {
-    if args.multilayer {
-        Command::MultilayerAutoroute(
+    if args.critical_first {
+        Command::CriticalAutoroute(
             selection,
-            MultilayerAutorouteOptions {
-                anterouter: AnterouterOptions {
-                    fanout_clearance: 200.0,
-                },
+            CriticalAutorouteOptions {
                 planar: planar_options,
-                timeout: TimeoutOptions {
-                    // Bonus applies per newly-reached ratline index —
-                    // 0.5s each banks ~2min of budget by mid-list on
-                    // big boards, starving layer rotation entirely.
-                    initial: 5.0,
-                    progress_bonus: 0.05,
-                },
-                layer_seed: 0,
+                multilayer: args
+                    .multilayer
+                    .then(|| make_multilayer_options(planar_options, 0, board)),
+                critical_quantile: 0.75,
+                carve: true,
+                protect: true,
+                reprobe_every: 4,
+                max_reprobe_rounds: 8,
+                max_carves: 24,
+                keep_carves: false,
             },
         )
+    } else if args.multilayer {
+        Command::MultilayerAutoroute(selection, make_multilayer_options(planar_options, 0, board))
     } else {
         Command::Autoroute(selection, planar_options)
     }
@@ -428,15 +525,21 @@ fn routed_counts(autorouter: &Autorouter<SpecctraMesadata>) -> (usize, usize) {
 fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::Error> {
     let jobs = args.jobs.unwrap_or(1) as usize;
     let stop = Arc::new(AtomicBool::new(false));
-    let template = make_planar_options(args);
+
+    // The template needs the design's rule width for the band-width
+    // default; the same board serves the up-front probe below.
+    let template_board = {
+        let design_file = File::open(&args.input)?;
+        let design = SpecctraDesign::load(BufReader::new(design_file))
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        design.make_board(&mut BoardEdit::new())
+    };
+    let template = make_planar_options(args, &template_board);
 
     // Probe the pristine board once up front; every worker seeds its
     // congestion map from the shared blockers.
     let preprobe_seed = if args.preprobe {
-        let design_file = File::open(&args.input)?;
-        let design = SpecctraDesign::load(BufReader::new(design_file))
-            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        let mut board = design.make_board(&mut BoardEdit::new());
+        let mut board = template_board;
         if let Some(report_filename) = &args.apply_shifts {
             apply_shift_report(&mut board, report_filename)?;
         }
@@ -465,6 +568,7 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
         let nets = args.nets.clone();
         let exclude_nets = args.exclude_nets.clone();
         let multilayer = args.multilayer;
+        let critical_first = args.critical_first;
         let max_seconds = args.max_seconds;
         let stop = Arc::clone(&stop);
         let preprobe_seed = preprobe_seed.clone();
@@ -482,12 +586,28 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                 }
 
                 let selection = make_selection(&board, &nets, &exclude_nets, multilayer);
-                let command = if multilayer {
+                let command = if critical_first {
+                    Command::CriticalAutoroute(
+                        selection,
+                        CriticalAutorouteOptions {
+                            planar: planar_options,
+                            multilayer: multilayer
+                                .then(|| make_multilayer_options(planar_options, i as u64, &board)),
+                            critical_quantile: 0.75,
+                            carve: true,
+                            protect: true,
+                            reprobe_every: 4,
+                            max_reprobe_rounds: 8,
+                            max_carves: 24,
+                            keep_carves: false,
+                        },
+                    )
+                } else if multilayer {
                     Command::MultilayerAutoroute(
                         selection,
                         MultilayerAutorouteOptions {
                             anterouter: AnterouterOptions {
-                                fanout_clearance: 200.0,
+                                fanout_clearance: fanout_clearance(&board),
                             },
                             planar: planar_options,
                             timeout: TimeoutOptions {

@@ -9,7 +9,11 @@ use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
     board::Board,
-    drawing::{dot::FixedDotIndex, graph::PrimitiveIndex, primitive::GetJoints},
+    drawing::{
+        dot::{DotIndex, FixedDotIndex},
+        graph::PrimitiveIndex,
+        primitive::GetJoints,
+    },
     geometry::GenericNode,
     graph::GetIndex,
 };
@@ -86,10 +90,15 @@ impl ConnectedComponents {
             PrimitiveIndex::LoneLooseSeg(seg) => {
                 let joints = board.layout().drawing().primitive_ref(seg).joints();
                 dot_unionfind.union(joints.0.index(), joints.1.index());
+                Self::unionize_fixed_dot_via(board, dot_unionfind, joints.0);
+                Self::unionize_fixed_dot_via(board, dot_unionfind, joints.1);
             }
             PrimitiveIndex::SeqLooseSeg(seg) => {
                 let joints = board.layout().drawing().primitive_ref(seg).joints();
                 dot_unionfind.union(joints.0.index(), joints.1.index());
+                if let DotIndex::Fixed(dot) = joints.0 {
+                    Self::unionize_fixed_dot_via(board, dot_unionfind, dot);
+                }
             }
             PrimitiveIndex::FixedBend(bend) => {
                 let joints = board.layout().drawing().primitive_ref(bend).joints();
@@ -152,12 +161,17 @@ impl ConnectedComponents {
             PrimitiveIndex::LoneLooseSeg(seg) => {
                 let joints = board.layout().drawing().primitive_ref(seg).joints();
                 dot_unionfind.union(common.index(), joints.0.index());
+                Self::unionize_fixed_dot_via(board, dot_unionfind, joints.0);
                 dot_unionfind.union(common.index(), joints.1.index());
+                Self::unionize_fixed_dot_via(board, dot_unionfind, joints.1);
             }
             PrimitiveIndex::SeqLooseSeg(seg) => {
                 let joints = board.layout().drawing().primitive_ref(seg).joints();
                 dot_unionfind.union(common.index(), joints.0.index());
                 dot_unionfind.union(common.index(), joints.1.index());
+                if let DotIndex::Fixed(dot) = joints.0 {
+                    Self::unionize_fixed_dot_via(board, dot_unionfind, dot);
+                }
             }
             PrimitiveIndex::FixedBend(bend) => {
                 let joints = board.layout().drawing().primitive_ref(bend).joints();

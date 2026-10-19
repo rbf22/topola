@@ -107,6 +107,18 @@ impl SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer {
 
         let mut sccs: Vec<_> = tarjan_scc(&filtered_ratsnest)
             .into_iter()
+            // Drop SCCs containing no selected ratline — singleton
+            // pin-nodes left edgeless by the edge filter above. They
+            // cannot affect the emitted ratline ordering but would
+            // otherwise inflate the permutation space searched by the
+            // reconfigurer's fallback from (#nets)! to (#pins)!, making
+            // nearly every emitted ordering a duplicate.
+            .filter(|node_indices| {
+                input.ratlines.iter().any(|ratline| {
+                    let (from, to) = filtered_ratsnest.edge_endpoints(ratline.index).unwrap();
+                    node_indices.contains(&from) && node_indices.contains(&to)
+                })
+            })
             .map(|node_indices| {
                 Scc::new(
                     autorouter,
@@ -356,6 +368,7 @@ impl PreconfigurePlanarAutoroute for SccIntersectionsAndLengthRatlinePlanarAutor
             terminating_dot_map: input.terminating_dot_map,
             obstacle_penalties: BTreeMap::new(),
             rip_up: vec![],
+            protected: BTreeSet::new(),
         }
     }
 }

@@ -35,6 +35,28 @@ pub trait AccessMesadata: AccessRules + std::panic::RefUnwindSafe {
 
     /// Retrieves the index of a net by its name.
     fn netname_net(&self, netname: &str) -> Option<usize>;
+
+    /// Overrides every clearance to `clearance`. Relaxed channel
+    /// probes use this to measure demand paths; run them on a cloned
+    /// autorouter so the live board's rules are unaffected. The
+    /// default is a no-op for mesadatas without clearance tracking.
+    fn override_clearances(&mut self, _clearance: f64) {}
+
+    /// Radius for vias the autorouter places (fanout, mid-route
+    /// weaves). Designs declare via padstacks whose scale is arbitrary;
+    /// the default preserves the historical constant for mesadatas
+    /// that do not track them.
+    fn default_via_radius(&self) -> f64 {
+        100.0
+    }
+
+    /// Width for copper the autorouter generates (fanout stubs).
+    /// Designs declare rule widths whose scale is arbitrary; the
+    /// default preserves the historical constant for mesadatas that
+    /// do not track them.
+    fn default_trace_width(&self) -> f64 {
+        100.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +120,10 @@ pub struct SpecctraMesadata {
 
     /// Maximum clearance across all net class rules, computed once at load.
     largest_clearance: f64,
+
+    /// Radius of the smallest via padstack the structure declares, for
+    /// autorouter-placed vias.
+    via_radius: f64,
 }
 
 impl SpecctraMesadata {
@@ -179,6 +205,22 @@ impl SpecctraMesadata {
             .reduce(f64::max)
             .unwrap_or(0.0);
 
+        // The smallest declared via padstack: fanout placement has the
+        // best chance of finding room with the smallest legal via.
+        let via_radius = pcb
+            .structure
+            .via
+            .names
+            .iter()
+            .filter_map(|name| pcb.library.find_padstack_by_name(name))
+            .flat_map(|padstack| padstack.shapes.iter())
+            .filter_map(|shape| match shape {
+                super::structure::Shape::Circle(circle) => Some(circle.diameter / 2.0),
+                _ => None,
+            })
+            .reduce(f64::min)
+            .unwrap_or(100.0);
+
         Self {
             structure_rule,
             class_rules,
@@ -187,6 +229,7 @@ impl SpecctraMesadata {
             net_netclass,
             net_clearance,
             largest_clearance,
+            via_radius,
         }
     }
 
@@ -207,6 +250,21 @@ impl SpecctraMesadata {
             .get(&net)
             .and_then(|netclass| self.class_rules.get(netclass))
             .unwrap_or(&self.structure_rule)
+    }
+
+    /// The design-wide default rule, used for nets without a net
+    /// class. Its `width` is the routed trace width the design
+    /// declares — a sane default for the routed band width on boards
+    /// whose units make a fixed default meaningless.
+    pub fn structure_rule(&self) -> &SpecctraRule {
+        &self.structure_rule
+    }
+
+    /// The design's declared via padstack radius — what
+    /// autorouter-placed vias should use so fanout works on boards of
+    /// any coordinate scale.
+    pub fn via_radius(&self) -> f64 {
+        self.via_radius
     }
 }
 
@@ -257,6 +315,18 @@ impl AccessMesadata for SpecctraMesadata {
 
     fn netname_net(&self, netname: &str) -> Option<usize> {
         self.net_netname.get_by_right(netname).copied()
+    }
+
+    fn override_clearances(&mut self, clearance: f64) {
+        SpecctraMesadata::override_clearances(self, clearance)
+    }
+
+    fn default_via_radius(&self) -> f64 {
+        self.via_radius()
+    }
+
+    fn default_trace_width(&self) -> f64 {
+        self.structure_rule().width
     }
 }
 

@@ -20,8 +20,14 @@ use crate::{
             IncrementFailedRatlineLayersMultilayerAutorouteReconfigurer,
             MakeNextMultilayerAutorouteConfiguration, MultilayerAutorouteReconfigurer,
         },
+        planar_autoroute::{
+            PlanarAutorouteConfiguration, PlanarAutorouteConfigurationStatus, PlanarAutorouteCosts,
+        },
         planar_preconfigurer::PlanarAutoroutePreconfigurerInput,
-        planar_reconfigurator::PlanarAutorouteReconfiguratorStatus,
+        planar_reconfigurator::{
+            PlanarAutorouteReconfigurator, PlanarAutorouteReconfiguratorStatus,
+        },
+        ratline::RatlineUid,
         Autorouter, AutorouterError,
     },
     board::edit::BoardEdit,
@@ -61,6 +67,21 @@ impl MultilayerAutorouteReconfigurator {
         input: MultilayerAutoroutePreconfigurerInput,
         options: MultilayerAutorouteOptions,
     ) -> Result<Self, AutorouterError> {
+        Self::new_with_planar_override(autorouter, input, options, |_, _| {})
+    }
+
+    /// Like [`MultilayerAutorouteReconfigurator::new`], but
+    /// `planar_override` runs on the inner planar reconfigurator's
+    /// freshly built preconfiguration (after anterouting, so
+    /// terminating dots name the fanout vias). The critical-first
+    /// outer stepper uses it to inject its ordering, carve corridors
+    /// on the assigned layers, and seed the protected set.
+    pub fn new_with_planar_override<M: AccessMesadata>(
+        autorouter: &mut Autorouter<M>,
+        input: MultilayerAutoroutePreconfigurerInput,
+        options: MultilayerAutorouteOptions,
+        planar_override: impl FnOnce(&mut Autorouter<M>, &mut PlanarAutorouteConfiguration),
+    ) -> Result<Self, AutorouterError> {
         // One band width: demand corridors closer than that cannot
         // both fit on one layer without a detour.
         let preconfigurer = MultilayerPreconfigurer::new_seeded(
@@ -86,10 +107,11 @@ impl MultilayerAutorouteReconfigurator {
         );
 
         Ok(Self {
-            stepper: MultilayerAutorouteExecutionStepper::new(
+            stepper: MultilayerAutorouteExecutionStepper::new_with_planar_override(
                 autorouter,
                 preconfiguration,
                 options,
+                planar_override,
             )?,
             timeout: TimeVsProgressAccumulatorTimeout::new_from_options(options.timeout),
             reconfigurer,
@@ -107,6 +129,25 @@ impl MultilayerAutorouteReconfigurator {
     pub fn finish_early(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
         self.stepper.finish_early(autorouter);
         self.finished = true;
+    }
+
+    /// The inner planar reconfigurator.
+    pub fn planar(&self) -> &PlanarAutorouteReconfigurator {
+        self.stepper.planar()
+    }
+
+    /// Mutable access to the inner planar reconfigurator — for the
+    /// critical-first outer stepper's surgical windows and protected
+    /// bookkeeping.
+    pub fn planar_mut(&mut self) -> &mut PlanarAutorouteReconfigurator {
+        self.stepper.planar_mut()
+    }
+
+    /// The layer assignments the placed fanout vias correspond to —
+    /// diffed between critical-first re-identification rounds to find
+    /// ratlines whose carves went stale on rotation.
+    pub fn layer_map(&self) -> &BTreeMap<RatlineUid, usize> {
+        self.stepper.layer_map()
     }
 
     /// Whether the number of layer reassignments has reached
@@ -170,7 +211,51 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
         }
 
         match self.stepper.step(autorouter) {
-            Ok(ControlFlow::Break(maybe_edit)) => Ok(ControlFlow::Break(maybe_edit)),
+            Ok(ControlFlow::Break(maybe_edit)) => {
+                // Planar stopped — either its ordering space
+                // exhausted mid-route (Break(None)) or it finished
+                // early on a reconfiguration budget/timeout with
+                // bands still missing (Break(Some)). A ratline
+                // sealed on its assigned layer may route on another,
+                // so give the layer search its turn before ending the
+                // command: the frontier names a ratline that failed
+                // to route, which the search rotates first.
+                let frontier = if maybe_edit.is_none() {
+                    Some(self.stepper.planar().curr_ratline_index())
+                } else {
+                    let configuration = self.stepper.planar().configuration();
+                    (0..configuration.ratlines.len()).find(|&index| {
+                        let (origin, destination) =
+                            configuration.ratline_terminating_dots(autorouter, index);
+                        autorouter
+                            .board()
+                            .band_between_nodes(origin, destination)
+                            .is_none()
+                    })
+                };
+
+                if frontier.is_some()
+                    && !self.finished
+                    && !self.reconfiguration_budget_exhausted()
+                {
+                    self.reconfigurer.process_planar_result(
+                        autorouter,
+                        Ok(PlanarAutorouteConfigurationStatus {
+                            configuration: self.stepper.planar().configuration().clone(),
+                            costs: PlanarAutorouteCosts {
+                                lengths: vec![0.0; frontier.unwrap()],
+                            },
+                        }),
+                        self.stepper.planar().blockers(),
+                    );
+                    if let ret @ (ControlFlow::Continue(..) | ControlFlow::Break(Some(..))) =
+                        self.reconfigure(autorouter)?
+                    {
+                        return Ok(ret);
+                    }
+                }
+                Ok(ControlFlow::Break(maybe_edit))
+            }
             Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status))) => {
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(
                     ReconfiguratorStatus::Running(status),
@@ -247,6 +332,17 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                     Err(err.clone()),
                     self.stepper.planar().blockers(),
                 );
+                // A failed route attempt can leave a weave's chain
+                // broken — the continuation half could not complete —
+                // while the parent half keeps a dangling band that
+                // reports the ratline routed but connects nothing.
+                // Rip it now so the parent regains rotation freedom;
+                // the stalled-round check only reaches broken weaves
+                // via the Reconfigured branch, which errors bypass.
+                let broken = self.stepper.broken_weaves(autorouter);
+                for parent in broken {
+                    self.stepper.unweave_ratline(autorouter, parent)?;
+                }
                 self.reconfigure(autorouter)
             }
         }

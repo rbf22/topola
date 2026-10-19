@@ -839,3 +839,172 @@ instead of unwrapping into a panic.
 - True fused-layer navmesh (vias as free-space search edges, Phase
   E2) remains the structurally complete answer; the weave is a
   ratline-level approximation layered on the existing engine.
+
+## Critical-first iterative routing — implemented (opt-in `--critical-first`)
+
+New outer stepper (`CriticalAutorouteExecutionStepper`) that wraps the
+planar or multilayer inner router:
+
+1. **Identify**: every selected unresolved ratline is probed on a
+   *cloned* autorouter under relaxed clearances
+   (`override_clearances(max(largest_clearance, band_width)/4)` —
+   clearance 0 produces degenerate navmeshes). Scores combine relaxed
+   failure, real-clearance blocker count, demand-path conflicts, and
+   endpoint crowding; the top quantile + all relaxed failures form the
+   critical set (capped at `max(#ratlines/4, 8)`).
+2. **Reserve** (planar only): each critical ratline's demand corridor —
+   the probe path, densified to band-width spacing, or the endpoint
+   chord when the probe failed — is carved onto the board as same-net
+   fixed geometry, invisible to its own net but a clearance obstacle to
+   foreign bands. Carves are reverted on abort; dead ones are removed
+   at completion unless a foreign band has wrapped them (load-bearing).
+3. **Protect** (planar only): critical ratlines are ordered first and
+   filtered out of `rip_up` lists in emitted reconfigurations; routed
+   protected bands are pinned at the front of emitted orderings in
+   *live* order so backtracing can never undo them, and unrouted
+   protecteds are urgent-scheduled right after the current ratline. A
+   desperation escape revokes protection when every rip candidate is
+   protected (monotone shrinking — cannot deadlock).
+4. **Re-identify** (planar only): every `reprobe_every`
+   reconfigurations the still-unrouted set is re-probed and the
+   hardest are promoted (per-round and total caps — uncapped
+   promotion starved easy work), carved, protected, and spliced after
+   the current position via a surgical reconfiguration commit.
+
+Under `--multilayer` the inner is `MultilayerAutorouteReconfigurator`
+but only the probe + congestion seeding apply — ordering, carving, and
+protection measurably hurt the fanout plan's own scheduling (see
+results below).
+
+### Machinery built to make this possible
+
+- `PlanarAutorouteReconfigurator::new_with_configuration_override` /
+  `MultilayerAutorouteReconfigurator::new_with_planar_override`:
+  install the critical-first ordering/carves/protected set on the
+  freshly built preconfiguration before routing history begins.
+- `PlanarAutorouteConfiguration.protected` + reconfigurator
+  `apply_protection` transform + `set_protected`/`seed_congestion`
+  plumbing into the reconfigurer's stored preconfigurations.
+- `probe.rs`: `probe_one`/`probe_ratlines_dots` take explicit endpoint
+  dots (terminating-dot-map-aware); parallel and sequential probe
+  passes share the worker path.
+- `carve.rs`: `carve_corridor` (densification, chord fallback, checked
+  `add_fixed_*`), `edit_is_wrapped` (shared load-bearing check,
+  refactored out of the multilayer weave-preservation code),
+  `remove_dead_carves`.
+- Bounded emit loop in `PlanarAutorouteReconfigurator::reconfigure`:
+  an ordering differing only in the un-attempted tail is stashed and
+  installed after 256 candidates, so a permutation search that never
+  produces a backtrace-usable ordering cannot spin inside one `step()`
+  (this was an upstream hang: the emit loop drained an effectively
+  unbounded SCC-permutation A* in a single call).
+- `Invoker::execute_with_timeout` catches step panics and finishes
+  early, salvaging routed bands — latent geometry-graph bugs
+  (stale node indices, `joints()` unreachable) otherwise lose all
+  work on dense boards. The board may still be too corrupt to
+  serialize; salvage is best-effort.
+- `multilayer_reconfigurer`: `revise_ratline` skips ratlines absent
+  from the layer map (continuation/unmapped ratlines — upstream panic).
+- `criticality.rs`: scoring + `relaxed_probe_clearance`.
+
+### Results (release, `--features metrics`, 60 s unless noted)
+
+| board / mode | baseline unrouted | critical-first unrouted |
+|---|---|---|
+| `red_led_heart` planar | 149/176 | **132/176** |
+| `red_led_heart` multilayer | 77/176 (30 s) | 77/176 (30 s) |
+| `candE.dsn` planar (all nets) | 2365/2403 | **2352/2403** |
+
+Multilayer is at parity: the native plan ordering + probe-derived
+congestion seeding, with carving/protection/re-identification all
+disabled for it (each was measured harmful — carved corridors starve
+via weaving; the forced reorder and protected urgent-scheduling stall
+the fanout schedule; re-probing every N reconfigurations is pure
+overhead once nothing else consumes its output).
+
+### Pre-existing upstream bugs found while benchmarking
+
+- `PlanarAutorouteReconfigurator::reconfigure` / fallback emit loops
+  could drain an unbounded permutation A* inside one `step()`,
+  hanging past any timeout (heart baseline, clean HEAD).
+- `multilayer_reconfigurer::revise_ratline` panicked on
+  continuation/unmapped ratlines (`.unwrap()` on missing layer-map
+  entry) — fixed.
+- `geometry.rs` `joints()`/`update_edge` panics from stale node
+  indices under heavy weave/rip-up traffic (both baseline and
+  critical-first hit these on heart at larger budgets) — **root-caused
+  and fixed** (see below).
+
+### Geometry-graph corruption — root cause and fix
+
+All typed indices (dots, segs, bends, compounds) share one flat
+`StableGraph` node-index namespace, and `*_at_index` restorations use
+`update_node`, which replaces the weight **in place while keeping the
+occupant's edges**. Two compositional bugs followed:
+
+1. **Slot recycling under reversible edits.** A recorded removal
+   freed a slot that fresh allocation (e.g. a weave `add_via`
+   compound) recycled; when the removal's reversal replayed, the
+   `*_at_index` write swapped a different live node's weight under
+   its edges — producing the `maybe_net`/`joints`/`primitive_weight`
+   unreachable family. **Fix:** removals tombstone the slot
+   (`GenericNode::Removed`) so it stays occupied and can never be
+   recycled; `*_at_index` writes assert vacant-or-tombstone and
+   `update_node` restores in place. `node_count` excludes tombstones.
+
+2. **Cross-ledger endpoint lifetimes.** A band seg joined to a
+   fanout-via dot could be ripped (recorded, reversible) and then the
+   multilayer relayer removed the via: `edit_is_wrapped` only saw
+   *live* geometry and missed the dead-but-restorable join, and the
+   later backtrace replayed the join onto a tombstoned endpoint
+   (provenance: `multilayer_autoroute.rs` surgical-relayer
+   `old_edit.reverse()` → `backtrace_to_index`). **Fix:** every
+   removal records its join endpoints in `Geometry::pending_joiners`;
+   `edit_is_wrapped` treats endpoints with pending joiners as
+   load-bearing, so the via is kept and the pending band rejoins it
+   on restoration — which is also the semantically correct outcome.
+   Entries for permanently-forgotten edits leak conservatively (the
+   endpoint stays wrapped; cannot corrupt the graph).
+
+Write-site invariants (`assert_vacant_slot`, `assert_dot_endpoint`,
+liveness checks on `add_to_compound`/`reattach_bend`/double-removal)
+turn any residual staleness into a descriptive failure at the
+corrupting write instead of silent type confusion; setting
+`TOPOLA_TOMBSTONE_DEBUG` names the call site that tombstoned a slot.
+
+Also fixed alongside: the negotiated-congestion fallback's
+duplicate-draining loop could spin for minutes inside one `step()`,
+unreachable by `--max-seconds`. It is now bounded per call (4096
+pops) and hands the last candidate back — the emit loop's own bound
+absorbs duplicate emissions and the A* resumes next call, so the
+deadline interrupts the grind and salvages routed bands.
+
+Verification: heart multilayer `--critical-first` 120 s — previously
+a deterministic panic — completes clean with valid `.ses` output;
+baseline 60/90 s and candE 90 s likewise terminate with output.
+95 tests green including the `wrapped_check_sees_pending_joiners`
+regression test.
+- **Fanout/weave vias used a hardcoded r=100 regardless of the
+  declared padstack** (astable/heart/candE all declare 300 µm-radius
+  vias). Correcting it unroutes `astable_multivibrator`'s D1-K —
+  the fixture's success relied on phantom vias smaller than the real
+  padstack. Reverted to preserve baseline behavior; a real fix needs
+  fanout placement that searches for legal via sites rather than
+  trusting the fake radius.
+
+### Known limitations / next steps
+
+- Critical-first is planar-first: on dense fanout-bound boards the
+  probe's value is real but the physical carve currently fights the
+  weave. Ideas: carve corridors as *preferred*, not forbidden space
+  (soft penalty instead of fixed geometry), or carve only on layers
+  the plan assigned.
+- `critical_corridor` fixture: baseline oscillates 7–8/9 and never
+  converges; critical-first stabilizes at ~6–9/9 depending on run —
+  the board's capacity is borderline; better demonstration needs a
+  fixture where the critical net *must* go first to be routed at all.
+- Progress reporting still uses `curr_ratline_index`, which overstates
+  completion when late reconfigurations rip bands back.
+- `.cmd` replay determinism under `--critical-first` is wall-clock
+  dependent (probe timeouts), like the existing oscillating-board
+  tests.

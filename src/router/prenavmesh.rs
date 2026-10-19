@@ -1189,11 +1189,16 @@ mod tests {
     }
 
     /// The fingerprint must notice a via-style swap: a fixed primitive
-    /// removed and another placed at the same index and position but
-    /// on a different net. Navnode net classification is baked into a
+    /// removed and another placed at the same position but on a
+    /// different net. Navnode net classification is baked into a
     /// cached navmesh at build time, so a net change must invalidate.
+    ///
+    /// Freed slots are tombstoned rather than recycled while recorded
+    /// edits may restore them, so the replacement lands on a fresh
+    /// index — same-index reuse is exactly the staleness hazard the
+    /// tombstones rule out.
     #[test]
-    fn fixed_fingerprint_distinguishes_net_at_same_index() {
+    fn fixed_fingerprint_distinguishes_net_at_new_index() {
         let mut autorouter = autorouter_0603();
         let layout = autorouter.board_mut().layout_mut();
 
@@ -1223,7 +1228,7 @@ mod tests {
                 maybe_net: Some(91),
             }),
         );
-        assert_eq!(swapped, dot);
+        assert_ne!(swapped, dot);
         assert_ne!(Prenavmesh::fixed_fingerprint(layout, 0), fingerprint);
     }
 

@@ -18,6 +18,7 @@ use topola::{
     board::{edit::BoardEdit, AccessMesadata, Board},
     drawing::{
         graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
+        loose::GetPrevNextLoose,
         primitive::MakePrimitiveShape,
     },
     geometry::{shape::MeasureLength, GenericNode},
@@ -55,6 +56,11 @@ pub fn replay_and_assert_and_report(
     filename: &str,
     variant: &str,
 ) {
+    // Captured before the first replay: this is the node count a full
+    // undo must restore exactly. Stronger than `assert_no_loose_nodes`
+    // — it also catches leftover compounds (vias) and fixed geometry.
+    let pristine_node_count = invoker.autorouter().board().layout().drawing().node_count();
+
     let file = File::open(filename).unwrap();
     let history: History = serde_json::from_reader(file).unwrap();
 
@@ -62,12 +68,18 @@ pub fn replay_and_assert_and_report(
     report_route_lengths(invoker.autorouter());
 
     if variant == "with_undo_redo_replay" {
-        assert_undo_redo_replay(invoker, filename);
+        assert_undo_redo_replay(invoker, filename, pristine_node_count);
     }
 }
 
-pub fn assert_undo_redo_replay(invoker: &mut Invoker<SpecctraMesadata>, filename: &str) {
+pub fn assert_undo_redo_replay(
+    invoker: &mut Invoker<SpecctraMesadata>,
+    filename: &str,
+    pristine_node_count: usize,
+) {
     let prev_node_count = invoker.autorouter().board().layout().drawing().node_count();
+
+    assert_bend_integrity(invoker.autorouter());
 
     // Sanity test: check if node count remained the same after some attempts at undo-redo.
 
@@ -96,12 +108,39 @@ pub fn assert_undo_redo_replay(invoker: &mut Invoker<SpecctraMesadata>, filename
     let history: History = serde_json::from_reader(file).unwrap();
 
     undo_all_and_assert(invoker);
-    invoker.replay(history);
 
+    // A complete undo must restore the board exactly as it was before
+    // the first replay — tombstoned slots are excluded from the count.
     assert_eq!(
         invoker.autorouter().board().layout().drawing().node_count(),
-        prev_node_count,
+        pristine_node_count,
     );
+
+    invoker.replay(history);
+
+    // No exact node-count check here: replay re-routes live, and the
+    // rerouted result may legitimately differ in node count from the
+    // first run. (`assert_no_loose_nodes` doesn't apply either — routed
+    // bands are made of loose segs and bends.)
+    assert_bend_integrity(invoker.autorouter());
+}
+
+/// Forward-run sanity: every bend must still have both chain joints —
+/// a floating bend means band removal stranded it before undo ever ran.
+pub fn assert_bend_integrity(autorouter: &Autorouter<impl AccessMesadata>) {
+    for node in autorouter.board().layout().drawing().primitive_nodes() {
+        match node {
+            PrimitiveIndex::LooseBend(bend) => {
+                let drawing = autorouter.board().layout().drawing();
+                let _ = drawing.loose(bend.into()).next_loose(None);
+            }
+            PrimitiveIndex::FixedBend(bend) => {
+                let drawing = autorouter.board().layout().drawing();
+                let _ = bend.primitive_ref(drawing).shape();
+            }
+            _ => (),
+        }
+    }
 }
 
 pub fn undo_all_and_assert(invoker: &mut Invoker<SpecctraMesadata>) {
@@ -123,7 +162,13 @@ pub fn assert_no_loose_nodes(autorouter: &Autorouter<impl AccessMesadata>) {
             PrimitiveIndex::LooseDot(..)
             | PrimitiveIndex::LoneLooseSeg(..)
             | PrimitiveIndex::SeqLooseSeg(..)
-            | PrimitiveIndex::LooseBend(..) => assert!(false),
+            | PrimitiveIndex::LooseBend(..) => {
+                let drawing = autorouter.board().layout().drawing();
+                panic!(
+                    "loose node left behind: {node:?} {:?}",
+                    node.primitive_ref(drawing).shape()
+                )
+            }
             _ => (),
         }
     }
@@ -221,9 +266,19 @@ pub fn assert_that_all_ratlines_besides_gnd_are_autorouted(
                 let destination = conncomps.unionfind().find(destination_dot.index());
 
                 if netname != "GND" && origin != destination {
+                    let weight = autorouter
+                        .ratsnests()
+                        .on_principal_layer(principal_layer)
+                        .graph()
+                        .edge_weight(ratline.index);
                     eprintln!(
-                        "UNCONNECTED ratline={:?} net={} origin_dot={:?} dest_dot={:?}",
-                        ratline.index, netname, origin_dot, destination_dot
+                        "UNCONNECTED ratline={:?} layer={} net={} origin_dot={:?} dest_dot={:?} has_band={:?}",
+                        ratline.index,
+                        principal_layer,
+                        netname,
+                        origin_dot,
+                        destination_dot,
+                        weight.map(|w| w.band_termseg.is_some()),
                     );
                     unconnected.push(ratline);
                 }

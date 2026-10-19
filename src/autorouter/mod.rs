@@ -4,8 +4,11 @@
 
 pub mod anterouter;
 mod autorouter;
+pub mod carve;
 pub mod compass_direction;
 pub mod connected_components;
+pub mod critical_autoroute;
+pub mod criticality;
 pub mod escape_stubs;
 pub mod execution;
 pub mod history;

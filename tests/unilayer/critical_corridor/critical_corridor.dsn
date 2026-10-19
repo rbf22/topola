@@ -1,0 +1,121 @@
+(pcb critical_corridor.dsn
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad's Pcbnew")
+    (host_version "8.0.1")
+  )
+  (resolution um 10)
+  (unit um)
+  (structure
+    (layer F.Cu
+      (type signal)
+      (property
+        (index 0)
+      )
+    )
+    (layer B.Cu
+      (type signal)
+      (property
+        (index 1)
+      )
+    )
+    (boundary
+      (path pcb 0  -9000 -9000  9000 -9000  9000 9000  -9000 9000
+            -9000 -9000)
+    )
+    (via "Via[0-1]_600:300_um")
+    (rule
+      (width 200)
+      (clearance 200)
+      (clearance 200 (type default_smd))
+      (clearance 200 (type smd_smd))
+    )
+  )
+  (placement
+    (component Pad
+      (place CA 0 -3500 front 0.000000 (PN CA))
+      (place CB 0 0 front 0.000000 (PN CB))
+      (place E1A -3500 3500 front 0.000000 (PN E1A))
+      (place E1B 1000 -3500 front 0.000000 (PN E1B))
+      (place E2A -2000 2500 front 0.000000 (PN E2A))
+      (place E2B 1500 -3500 front 0.000000 (PN E2B))
+      (place E3A 1500 3500 front 0.000000 (PN E3A))
+      (place E3B -3000 -3000 front 0.000000 (PN E3B))
+      (place E4A -6000 -800 front 0.000000 (PN E4A))
+      (place E4B 6000 -800 front 0.000000 (PN E4B))
+      (place E5A -5000 3000 front 0.000000 (PN E5A))
+      (place E5B -5000 -3000 front 0.000000 (PN E5B))
+      (place E6A 5200 3000 front 0.000000 (PN E6A))
+      (place E6B 5200 -3000 front 0.000000 (PN E6B))
+      (place E7A -8000 -5000 front 0.000000 (PN E7A))
+      (place E7B -6000 -5000 front 0.000000 (PN E7B))
+      (place E8A 6000 5000 front 0.000000 (PN E8A))
+      (place E8B 8000 5000 front 0.000000 (PN E8B))
+      (place G1 -8500 -5000 front 0.000000 (PN G1))
+      (place G2 8500 -5000 front 0.000000 (PN G2))
+    )
+  )
+  (library
+    (image Pad
+      (pin Rect[A]Pad_850x850_um 1 0 0)
+    )
+    (padstack Rect[A]Pad_850x850_um
+      (shape (rect F.Cu -425 -425 425 425))
+      (shape (rect B.Cu -425 -425 425 425))
+      (attach off)
+    )
+    (padstack "Via[0-1]_600:300_um"
+      (shape (circle F.Cu 600))
+      (shape (circle B.Cu 600))
+      (attach off)
+    )
+  )
+  (network
+    (net E1
+      (pins E1A-1 E1B-1)
+    )
+    (net E2
+      (pins E2A-1 E2B-1)
+    )
+    (net E3
+      (pins E3A-1 E3B-1)
+    )
+    (net E4
+      (pins E4A-1 E4B-1)
+    )
+    (net E5
+      (pins E5A-1 E5B-1)
+    )
+    (net E6
+      (pins E6A-1 E6B-1)
+    )
+    (net E7
+      (pins E7A-1 E7B-1)
+    )
+    (net E8
+      (pins E8A-1 E8B-1)
+    )
+    (net CRIT
+      (pins CA-1 CB-1)
+    )
+    (net GND
+      (pins G1-1 G2-1)
+    )
+    (class kicad_default "" E1 E2 E3 E4 E5 E6 E7 E8 CRIT GND
+      (circuit
+        (use_via Via[0-1]_600:300_um)
+      )
+      (rule
+        (width 200)
+        (clearance 200)
+      )
+    )
+  )
+  (wiring
+    (wire (path F.Cu 400  -9000 0  -6000 0) (net "GND") (type "fix"))
+    (wire (path F.Cu 400  -4000 0  -1400 0) (net "GND") (type "fix"))
+    (wire (path F.Cu 400  1400 0  4400 0) (net "GND") (type "fix"))
+    (wire (path F.Cu 400  6000 0  9000 0) (net "GND") (type "fix"))
+  )
+)

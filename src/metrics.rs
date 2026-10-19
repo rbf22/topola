@@ -83,6 +83,31 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
+                    "critical: probes {}x, identified {}, reprobe rounds {}, promotions {}, protected_rip_skips {}, desperations {}",
+                    self.critical_probes.load(Ordering::Relaxed),
+                    self.critical_identified.load(Ordering::Relaxed),
+                    self.critical_reprobe_rounds.load(Ordering::Relaxed),
+                    self.critical_promotions.load(Ordering::Relaxed),
+                    self.protected_rip_skips.load(Ordering::Relaxed),
+                    self.protection_desperations.load(Ordering::Relaxed),
+                )?;
+                writeln!(
+                    f,
+                    "carve: segs placed {} failed {}, removed {}, kept-wrapped {}",
+                    self.carve_segs_placed.load(Ordering::Relaxed),
+                    self.carve_segs_failed.load(Ordering::Relaxed),
+                    self.carves_removed.load(Ordering::Relaxed),
+                    self.carves_kept_wrapped.load(Ordering::Relaxed),
+                )?;
+                writeln!(
+                    f,
+                    "geometry: pending joins recorded {}, pending-wrapped holds {}, dedup truncations {}",
+                    self.pending_joins_recorded.load(Ordering::Relaxed),
+                    self.pending_joiners_held.load(Ordering::Relaxed),
+                    self.reconfig_dedup_truncations.load(Ordering::Relaxed),
+                )?;
+                writeln!(
+                    f,
                     "probes: {} (memoized {}, ghost {}, los_ok {}, failed {}, backtracked {})",
                     self.probes.load(Ordering::Relaxed),
                     self.probes_memoized.load(Ordering::Relaxed),
@@ -172,6 +197,20 @@ metrics_struct!(
     multilayer_surgical_reconfigures,
     search_state_stores,
     search_state_hits,
+    // Critical-first routing
+    critical_probes,
+    critical_identified,
+    critical_reprobe_rounds,
+    critical_promotions,
+    carve_segs_placed,
+    carve_segs_failed,
+    carves_removed,
+    carves_kept_wrapped,
+    pending_joins_recorded,
+    pending_joiners_held,
+    reconfig_dedup_truncations,
+    protected_rip_skips,
+    protection_desperations,
     // Geometry draw/undraw — the suspected hot path
     step_to_ok,
     step_to_err,

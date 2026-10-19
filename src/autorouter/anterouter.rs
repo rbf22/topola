@@ -387,12 +387,16 @@ impl Anterouter {
             })
             .unwrap();
 
+        // The design's declared trace width — a fixed width is
+        // meaningless across coordinate scales and on
+        // fine-pitch boards the stub can never be placed.
+        let width = autorouter.board().mesadata().default_trace_width();
         if let Ok(_) = autorouter.board.layout_mut().add_fixed_seg(
             &mut recorder.layout_edit,
             source_dot,
             fanout_dot,
             FixedSegWeight(GeneralSegWeight {
-                width: 100.0,
+                width,
                 layer,
                 maybe_net,
             }),
@@ -441,14 +445,30 @@ impl Anterouter {
 
         let cardinal_direction_vector = direction.into();
 
+        // The via center must land at least its own radius plus the
+        // net's clearance past the pad's bbox edge, or the placement
+        // infringes the very pad it fans out — the configured
+        // clearance is only a floor for that minimum.
+        let via_radius = autorouter.board().mesadata().default_via_radius();
+        let fanout_clearance = options.fanout_clearance.max(
+            via_radius
+                + pin_maybe_net
+                    .map(|net| {
+                        autorouter
+                            .board()
+                            .layout()
+                            .rules()
+                            .largest_clearance(Some(net))
+                    })
+                    .unwrap_or(0.0),
+        );
+
         let bbox_anchor = point! {
             x: (bbox.upper()[0] - bbox.lower()[0]) / 2.0 * cardinal_direction_vector.x(),
             y: (bbox.upper()[1] - bbox.lower()[1]) / 2.0 * cardinal_direction_vector.y(),
         };
         let bbox_anchor_with_clearance = bbox_anchor
-            * (1.0
-                + options.fanout_clearance
-                    / Euclidean::distance(bbox_anchor, point! {x: 0.0, y: 0.0}));
+            * (1.0 + fanout_clearance / Euclidean::distance(bbox_anchor, point! {x: 0.0, y: 0.0}));
         let pos = center
             + cardinal_direction_vector
                 * (bbox_center + bbox_anchor_with_clearance - center)
@@ -459,7 +479,10 @@ impl Anterouter {
             ViaWeight {
                 from_layer: std::cmp::min(source_layer, target_layer),
                 to_layer: std::cmp::max(source_layer, target_layer),
-                circle: Circle { pos, r: 100.0 },
+                // The design's declared via size — a fixed radius is
+                // meaningless across arbitrary coordinate scales and
+                // seals every fanout attempt on fine-pitch boards.
+                circle: Circle { pos, r: via_radius },
                 maybe_net: pin_maybe_net,
             },
             autorouter

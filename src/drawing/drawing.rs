@@ -1398,6 +1398,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             GenericNode::Compound(compound) => {
                 self.compound_weight(compound).is_in_layer(active_layer)
             }
+            GenericNode::Removed => false,
         }
     }
 
@@ -1416,6 +1417,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             GenericNode::Compound(compound) => {
                 self.compound_weight(compound).is_in_any_layer_of(layers)
             }
+            GenericNode::Removed => false,
         }
     }
 
@@ -1472,6 +1474,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules>
         BendIndex,
     > for Drawing<CW, Cel, R>
 {
+    #[track_caller]
     fn apply(&mut self, edit: &DrawingEdit<CW, Cel>) {
         self.recording_geometry_with_rtree.apply(edit);
     }

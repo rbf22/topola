@@ -12,11 +12,13 @@ use thiserror::Error;
 
 use crate::{
     autorouter::{
+        critical_autoroute::{CriticalAutorouteExecutionStepper, CriticalAutorouteOptions},
         multilayer_autoroute::MultilayerAutorouteOptions,
         multilayer_preconfigurer::MultilayerAutoroutePreconfigurerInput,
         multilayer_reconfigurator::MultilayerAutorouteReconfigurator,
         planar_preconfigurer::PlanarAutoroutePreconfigurerInput,
-        planar_reconfigurator::PlanarAutorouteReconfigurator, ratsnests::Ratsnests,
+        planar_reconfigurator::PlanarAutorouteReconfigurator,
+        ratsnests::Ratsnests,
     },
     board::{AccessMesadata, Board},
     drawing::{
@@ -250,6 +252,33 @@ impl<M: AccessMesadata> Autorouter<M> {
             },
             options,
         )
+    }
+
+    /// Critical-first autorouting: probes the selected ratlines under
+    /// relaxed rules, commits the hardest ones first with carved
+    /// corridors and rip-up protection, and iteratively re-identifies
+    /// newly difficult ratlines on stalls. `options.multilayer`
+    /// selects the inner routing machinery; when it is `Some`, the
+    /// selection covers every principal layer's ratlines, planar only
+    /// the principal layer's same-layer ratlines.
+    pub fn critical_autoroute(
+        &mut self,
+        selection: &PinSelection,
+        options: CriticalAutorouteOptions,
+    ) -> Result<CriticalAutorouteExecutionStepper, AutorouterError>
+    where
+        M: Clone,
+    {
+        let principal_layer = options
+            .multilayer
+            .map(|options| options.planar.principal_layer)
+            .unwrap_or(options.planar.principal_layer);
+        let ratlines = if options.multilayer.is_some() {
+            self.selected_ratlines(selection, principal_layer)
+        } else {
+            self.selected_planar_ratlines(selection, principal_layer)
+        };
+        CriticalAutorouteExecutionStepper::new(self, ratlines, options)
     }
 
     pub fn topo_autoroute(

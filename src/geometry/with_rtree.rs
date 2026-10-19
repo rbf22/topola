@@ -206,6 +206,7 @@ impl<
         self.rtree.insert(self.make_compound_bbox(compound));
     }
 
+    #[track_caller]
     pub fn remove_dot(&mut self, dot: DI) {
         // One of the possible causes: you have failed to delete navcord's final
         // termseg.
@@ -217,12 +218,14 @@ impl<
         self.geometry.remove_primitive(dot.into());
     }
 
+    #[track_caller]
     pub fn remove_seg(&mut self, seg: SI) {
         self.bump_generation();
         Self::rtree_remove_must_be_successful(self.rtree.remove(&self.make_seg_bbox(seg)));
         self.geometry.remove_primitive(seg.into());
     }
 
+    #[track_caller]
     pub fn remove_bend(&mut self, bend: BI) {
         // Note how we can't use `.modify_bend(...)` to update the envelopes
         // here because it starts iteration from the bend we currently operate
@@ -243,6 +246,7 @@ impl<
         }
     }
 
+    #[track_caller]
     pub fn remove_compound(&mut self, compound: GenericIndex<CW>) {
         self.bump_generation();
         Self::rtree_remove_must_be_successful(
@@ -333,7 +337,10 @@ impl<
     fn rtree_remove_must_be_successful(
         removed: Option<BboxedIndex<GenericNode<PI, GenericIndex<CW>>>>,
     ) {
-        debug_assert!(
+        // In release this used to be debug-only: a failed removal left a
+        // stale entry whose index could be recycled by a different node
+        // kind, corrupting every subsequent R-tree lookup.
+        assert!(
             removed.is_some(),
             "removed node's bbox did not match any of the R-tree's envelopes.
             There are two likely reasons for this. The node may have not
@@ -548,6 +555,7 @@ impl<
     > ApplyGeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>
     for GeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
 {
+    #[track_caller]
     fn apply(&mut self, edit: &GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>) {
         self.bump_generation();
         // First we remove every node that is in the edit. But we have to do
@@ -670,6 +678,8 @@ impl<
                         *compound,
                     );
                 }
+
+                self.rtree.insert(self.make_compound_bbox(*compound));
             }
         }
     }

@@ -72,6 +72,14 @@ pub enum GeometryLabel<Cel> {
 pub enum GenericNode<P, C> {
     Primitive(P),
     Compound(C),
+    /// A slot freed by a removal that still-pending edits may need to
+    /// restore at this exact index. Tombstoning keeps the slot
+    /// occupied so `add_node` cannot recycle it while its index is
+    /// still referenced by a reversible edit: `update_node` on an
+    /// occupied slot swaps the weight in place — keeping the
+    /// incumbent's edges — so recycling a pending index would
+    /// silently corrupt the graph instead of failing.
+    Removed,
 }
 
 impl<P: GetIndex, C: GetIndex> GetIndex for GenericNode<P, C> {
@@ -79,6 +87,9 @@ impl<P: GetIndex, C: GetIndex> GetIndex for GenericNode<P, C> {
         match self {
             Self::Primitive(x) => x.index(),
             Self::Compound(x) => x.index(),
+            Self::Removed => {
+                unreachable!("tombstone nodes carry no index")
+            }
         }
     }
 }
@@ -95,6 +106,22 @@ impl<T: SetOffset + GetWidth + Copy> AccessBendWeight for T {}
 #[derive(Debug)]
 pub struct Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> {
     graph: StableDiGraph<GenericNode<PW, CW>, GeometryLabel<Cel>, usize>,
+    /// Number of `Removed` tombstone slots: they keep their indices
+    /// occupied so a still-pending edit's reversal can restore the
+    /// original occupant in place.
+    removed_count: usize,
+    /// When `TOPOLA_TOMBSTONE_DEBUG` is set, records the call site that
+    /// tombstoned each slot so stale-edit failures can name the
+    /// operation that removed the node.
+    tombstone_origins: std::collections::HashMap<usize, &'static std::panic::Location<'static>>,
+    /// Seg/bend nodes removed while still reversible keep their join
+    /// endpoints recorded in their edits: a restoration replays the
+    /// join, so the endpoint must stay alive until the joiner is
+    /// either restored or permanently forgotten. Maps each referenced
+    /// endpoint (dot, or a bend's `inner`) to the pending joiner
+    /// nodes. Load-bearing checks like `edit_is_wrapped` consult this
+    /// so a removal cannot orphan a join a pending reversal expects.
+    pending_joiners: std::collections::HashMap<usize, std::collections::BTreeSet<usize>>,
     primitive_weight_marker: PhantomData<PW>,
     dot_weight_marker: PhantomData<DW>,
     seg_weight_marker: PhantomData<SW>,
@@ -112,6 +139,9 @@ impl<PW: Clone, DW, SW, BW, CW: Clone, Cel: Clone, PI, DI, SI, BI> Clone
     fn clone(&self) -> Self {
         Self {
             graph: self.graph.clone(),
+            removed_count: self.removed_count,
+            tombstone_origins: self.tombstone_origins.clone(),
+            pending_joiners: self.pending_joiners.clone(),
             ..Self::new()
         }
     }
@@ -129,6 +159,9 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
     pub fn new() -> Self {
         Self {
             graph: StableDiGraph::default(),
+            removed_count: 0,
+            tombstone_origins: std::collections::HashMap::new(),
+            pending_joiners: std::collections::HashMap::new(),
             primitive_weight_marker: PhantomData,
             dot_weight_marker: PhantomData,
             seg_weight_marker: PhantomData,
@@ -142,7 +175,7 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
     }
 
     pub fn node_count(&self) -> usize {
-        self.graph.node_count()
+        self.graph.node_count() - self.removed_count
     }
 
     /// Whether `index` still holds a primitive — false when the slot is
@@ -168,6 +201,13 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
                 "stale primitive index {index}: slot now holds a compound \
                  (index recycled across a mutation?)"
             ),
+            Some(GenericNode::Removed) => {
+                let origin = self
+                    .tombstone_origins
+                    .get(&index)
+                    .map_or("unknown".to_string(), |loc| loc.to_string());
+                panic!("stale primitive index {index}: tombstoned at {origin}")
+            }
             None => panic!("stale primitive index {index}: slot is vacant"),
         }
     }
@@ -186,6 +226,122 @@ impl<
         BI: GetIndex + Into<PI> + Copy,
     > Geometry<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
 {
+    /// Names what occupies a graph slot, for diagnosing edit
+    /// application failures. Tombstone slots report which call site
+    /// removed them when `TOPOLA_TOMBSTONE_DEBUG` is set.
+    fn describe_slot(&self, index: usize) -> String {
+        let occupant = self.slot_occupant(index);
+        match self.tombstone_origins.get(&index) {
+            Some(location) => format!("{occupant} (tombstoned at {location})"),
+            None => occupant.into(),
+        }
+    }
+
+    /// Names what occupies a graph slot, for diagnosing edit
+    /// application failures.
+    fn slot_occupant(&self, index: usize) -> &'static str {
+        match self.graph.node_weight(index.into()) {
+            None => "vacant",
+            Some(GenericNode::Primitive(weight)) => {
+                if <PW as TryInto<DW>>::try_into(*weight).is_ok() {
+                    "a dot"
+                } else if <PW as TryInto<SW>>::try_into(*weight).is_ok() {
+                    "a seg"
+                } else if <PW as TryInto<BW>>::try_into(*weight).is_ok() {
+                    "a bend"
+                } else {
+                    "an unknown primitive"
+                }
+            }
+            Some(GenericNode::Compound(_)) => "a compound",
+            Some(GenericNode::Removed) => "a removal tombstone",
+        }
+    }
+
+    /// An `*_at_index` creation write requires a vacant or tombstone
+    /// slot: `update_node` on a live occupied slot swaps the weight
+    /// in place while keeping the incumbent's edges, silently
+    /// corrupting the graph when a stale edit index hits a recycled
+    /// slot.
+    fn assert_vacant_slot(&self, index: usize, what: &str) {
+        let ok = matches!(
+            self.graph.node_weight(index.into()),
+            None | Some(GenericNode::Removed)
+        );
+        assert!(
+            ok,
+            "stale edit: creating {what} at slot {index}, which still holds {}",
+            self.describe_slot(index),
+        );
+    }
+
+    /// An `*_at_index` write overwriting a removal tombstone restores
+    /// the slot to live use — release it from the tombstone count.
+    fn unreserve_slot(&mut self, index: usize) {
+        if matches!(
+            self.graph.node_weight(index.into()),
+            Some(GenericNode::Removed)
+        ) {
+            self.removed_count -= 1;
+            self.tombstone_origins.remove(&index);
+        }
+    }
+
+    /// Records that removed-but-restorable node `joiner` references
+    /// `endpoint`: its pending reversal replays the join, so the
+    /// endpoint must stay alive until the joiner is restored or its
+    /// removal is forgotten.
+    fn record_pending_join(&mut self, endpoint: usize, joiner: usize) {
+        crate::metrics::incr(&crate::metrics::METRICS.pending_joins_recorded);
+        self.pending_joiners
+            .entry(endpoint)
+            .or_default()
+            .insert(joiner);
+    }
+
+    /// `joiner` is live again — its references are ordinary graph
+    /// edges once more, not pending restorations.
+    fn clear_pending_join(&mut self, endpoint: usize, joiner: usize) {
+        if let Some(joiners) = self.pending_joiners.get_mut(&endpoint) {
+            joiners.remove(&joiner);
+            if joiners.is_empty() {
+                self.pending_joiners.remove(&endpoint);
+            }
+        }
+    }
+
+    /// Whether `endpoint` has removed-but-reversible nodes joined to
+    /// it. The graph shows no such joins — the joiners are tombstoned
+    /// — but their recorded edits replay the join on restoration, so
+    /// the endpoint is still load-bearing. Removing it would orphan a
+    /// join a pending reversal expects. Entries whose joiner edits are
+    /// permanently forgotten leak conservatively: the endpoint reads
+    /// as wrapped forever, which keeps geometry alive but cannot
+    /// corrupt the graph.
+    pub fn has_pending_joiners(&self, endpoint: usize) -> bool {
+        self.pending_joiners
+            .get(&endpoint)
+            .map_or(false, |joiners| !joiners.is_empty())
+    }
+
+    /// A `*_at_index` joint endpoint must hold a dot, else
+    /// `update_edge` either panics on a vacant slot or joins to a
+    /// node of the wrong kind, which later trips `joints()`.
+    fn assert_dot_endpoint(&self, index: usize, what: &str, node: usize) {
+        let ok = matches!(
+            self.graph.node_weight(index.into()),
+            Some(GenericNode::Primitive(weight))
+                if <PW as TryInto<DW>>::try_into(*weight).is_ok()
+        );
+        assert!(
+            ok,
+            "stale edit: {what} endpoint at slot {index} holds {} instead of a dot; \
+             node slot {node} holds {}",
+            self.describe_slot(index),
+            self.describe_slot(node),
+        );
+    }
+
     pub fn add_dot<W: AccessDotWeight + Into<PW>>(&mut self, weight: W) -> GenericIndex<W> {
         GenericIndex::<W>::new(
             self.graph
@@ -199,6 +355,25 @@ impl<
         dot: GenericIndex<W>,
         weight: W,
     ) {
+        // Legitimate occupants: nothing (creation), a tombstone left
+        // by a recorded removal awaiting possible restoration, or
+        // another dot (in-place modify). Anything else means a stale
+        // edit index is about to swap a live node's weight under its
+        // edges.
+        let ok = match self.graph.node_weight(dot.index().into()) {
+            None | Some(GenericNode::Removed) => true,
+            Some(GenericNode::Primitive(occupant)) => {
+                <PW as TryInto<DW>>::try_into(*occupant).is_ok()
+            }
+            Some(GenericNode::Compound(_)) => false,
+        };
+        assert!(
+            ok,
+            "stale edit: writing dot at slot {}, which holds {}",
+            dot.index(),
+            self.describe_slot(dot.index()),
+        );
+        self.unreserve_slot(dot.index());
         self.graph
             .update_node(dot.index().into(), GenericNode::Primitive(weight.into()));
     }
@@ -225,6 +400,8 @@ impl<
         to: DI,
         weight: W,
     ) {
+        self.assert_vacant_slot(seg.index(), "seg");
+        self.unreserve_slot(seg.index());
         self.graph
             .update_node(seg.index().into(), GenericNode::Primitive(weight.into()));
         self.init_seg_joints(seg, from, to);
@@ -236,6 +413,8 @@ impl<
         from: DI,
         to: DI,
     ) {
+        self.assert_dot_endpoint(from.index(), "seg from", seg.index());
+        self.assert_dot_endpoint(to.index(), "seg to", seg.index());
         self.graph.update_edge(
             from.index().into(),
             seg.index().into(),
@@ -243,6 +422,9 @@ impl<
         );
         self.graph
             .update_edge(seg.index().into(), to.index().into(), GeometryLabel::Joined);
+        // A restoration makes the joins live edges again.
+        self.clear_pending_join(from.index(), seg.index());
+        self.clear_pending_join(to.index(), seg.index());
     }
 
     pub fn is_joined_with<I>(&self, seg: I, node: GenericNode<PI, GenericIndex<CW>>) -> bool
@@ -258,6 +440,7 @@ impl<
                 .map_or(false, |(eidx, _direction)| {
                     matches!(self.graph.edge_weight(eidx).unwrap(), GeometryLabel::Joined)
                 }),
+            GenericNode::Removed => false,
             GenericNode::Compound(comp) => self
                 .compound_members(comp)
                 .any(|(_cel, i)| self.is_joined_with(seg, GenericNode::Primitive(i))),
@@ -288,12 +471,16 @@ impl<
         core: DI,
         weight: W,
     ) {
+        self.assert_vacant_slot(bend.index(), "bend");
+        self.unreserve_slot(bend.index());
         self.graph
             .update_node(bend.index().into(), GenericNode::Primitive(weight.into()));
         self.init_bend_joints_and_core(bend, from, to, core);
     }
 
     pub(super) fn add_compound_at_index(&mut self, compound: GenericIndex<CW>, weight: CW) {
+        self.assert_vacant_slot(compound.index(), "compound");
+        self.unreserve_slot(compound.index());
         self.graph
             .update_node(compound.index().into(), GenericNode::Compound(weight));
     }
@@ -305,6 +492,9 @@ impl<
         to: DI,
         core: DI,
     ) {
+        self.assert_dot_endpoint(from.index(), "bend from", bend.index());
+        self.assert_dot_endpoint(to.index(), "bend to", bend.index());
+        self.assert_dot_endpoint(core.index(), "bend core", bend.index());
         self.graph.update_edge(
             from.index().into(),
             bend.index().into(),
@@ -320,11 +510,49 @@ impl<
             core.index().into(),
             GeometryLabel::Core,
         );
+        self.clear_pending_join(from.index(), bend.index());
+        self.clear_pending_join(to.index(), bend.index());
+        self.clear_pending_join(core.index(), bend.index());
     }
 
+    #[track_caller]
     pub fn remove_primitive(&mut self, primitive: PI) {
-        let maybe_removed = self.graph.remove_node(primitive.index().into());
+        let index = primitive.index();
+        assert!(
+            !matches!(
+                self.graph.node_weight(index.into()),
+                Some(GenericNode::Removed) | None
+            ),
+            "stale edit: removing already-removed slot {index} ({})",
+            self.describe_slot(index),
+        );
+        // The removal may be reversed: record this node's join
+        // endpoints as pending references so a conflicting removal of
+        // an endpoint can be refused while the join can still replay.
+        if let Ok(seg) = <PI as TryInto<SI>>::try_into(primitive) {
+            let (from, to) = self.seg_joints(seg);
+            self.record_pending_join(from.index(), index);
+            self.record_pending_join(to.index(), index);
+        } else if let Ok(bend) = <PI as TryInto<BI>>::try_into(primitive) {
+            let (from, to) = self.bend_joints(bend);
+            self.record_pending_join(from.index(), index);
+            self.record_pending_join(to.index(), index);
+            self.record_pending_join(self.core(bend).index(), index);
+            if let Some(inner) = self.inner(bend) {
+                self.record_pending_join(inner.index(), index);
+            }
+        }
+        let maybe_removed = self.graph.remove_node(index.into());
         assert!(maybe_removed.is_some());
+        // Tombstone the slot: while a recorded removal may still be
+        // reversed, the index must not be recycled for a different
+        // node — `*_at_index` restorations write back in place.
+        self.graph.update_node(index.into(), GenericNode::Removed);
+        self.removed_count += 1;
+        if tombstone_debug_enabled() {
+            self.tombstone_origins
+                .insert(index, std::panic::Location::caller());
+        }
     }
 
     pub fn move_dot(&mut self, dot: DI, to: Point) {
@@ -376,11 +604,24 @@ impl<
         }
 
         if let Some(new_inner) = maybe_new_inner {
+            let ok = matches!(
+                self.graph.node_weight(new_inner.index().into()),
+                Some(GenericNode::Primitive(weight))
+                    if <PW as TryInto<BW>>::try_into(*weight).is_ok()
+            );
+            assert!(
+                ok,
+                "stale edit: reattaching bend {} to inner slot {}, which holds {}",
+                bend.index(),
+                new_inner.index(),
+                self.describe_slot(new_inner.index()),
+            );
             self.graph.update_edge(
                 new_inner.index().into(),
                 bend.index().into(),
                 GeometryLabel::Outer,
             );
+            self.clear_pending_join(new_inner.index(), bend.index());
         }
     }
 
@@ -457,6 +698,9 @@ impl<
             Some(GenericNode::Compound(weight)) => weight,
             Some(GenericNode::Primitive(_)) => {
                 panic!("index {index} holds a primitive, not a compound")
+            }
+            Some(GenericNode::Removed) => {
+                panic!("stale compound index {index}: slot is a removal tombstone")
             }
             None => panic!("stale compound index {index}: slot is vacant"),
         }
@@ -561,6 +805,11 @@ impl<PW: Copy + Retag<Index = PI>, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
     fn primitive_index(&self, index: usize) -> PI {
         self.primitive_weight(index).retag(index)
     }
+}
+
+fn tombstone_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TOPOLA_TOMBSTONE_DEBUG").is_some())
 }
 
 pub struct OutwardWalker<BI> {
@@ -675,15 +924,48 @@ impl<PW: Copy + Retag<Index = PI>, DW, SW, BW, CW: Clone, Cel: Copy, PI: Copy, D
         GenericIndex::<CW>::new(self.graph.add_node(GenericNode::Compound(weight)).index())
     }
 
+    #[track_caller]
     fn remove_compound(&mut self, compound: GenericIndex<CW>) {
-        let maybe_removed = self.graph.remove_node(compound.index().into());
+        let index = compound.index();
+        assert!(
+            matches!(
+                self.graph.node_weight(index.into()),
+                Some(GenericNode::Compound(_))
+            ),
+            "stale edit: removing compound at slot {index}, which holds no live compound{}",
+            if tombstone_debug_enabled() {
+                match self.tombstone_origins.get(&index) {
+                    Some(location) => format!(" (tombstoned at {location})"),
+                    None => String::new(),
+                }
+            } else {
+                String::new()
+            },
+        );
+        let maybe_removed = self.graph.remove_node(index.into());
         assert!(maybe_removed.is_some());
+        // See `remove_primitive`: the slot is tombstoned so a pending
+        // reversal can restore this compound at its recorded index.
+        self.graph.update_node(index.into(), GenericNode::Removed);
+        self.removed_count += 1;
+        if tombstone_debug_enabled() {
+            self.tombstone_origins
+                .insert(index, std::panic::Location::caller());
+        }
     }
 
     fn add_to_compound<I>(&mut self, primitive: I, entry_label: Cel, compound: GenericIndex<CW>)
     where
         I: Copy + GetIndex,
     {
+        assert!(
+            matches!(
+                self.graph.node_weight(primitive.index().into()),
+                Some(GenericNode::Primitive(_))
+            ),
+            "stale edit: adding compound member at slot {}, which is not a live primitive",
+            primitive.index(),
+        );
         self.graph.update_edge(
             primitive.index().into(),
             compound.index().into(),

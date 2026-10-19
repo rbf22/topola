@@ -456,6 +456,7 @@ impl<R: AccessRules> Layout<R> {
                 primitive.primitive_ref(&self.drawing).shape().into()
             }
             NodeIndex::Compound(compound) => self.compound_shape(compound),
+            NodeIndex::Removed => unreachable!("tombstone nodes have no shape"),
         }
     }
 
@@ -540,6 +541,7 @@ impl<R: AccessRules> Layout<R> {
                     (apex, weight.shape().center())
                 }
             }),
+            NodeIndex::Removed => None,
         }
     }
 
@@ -569,6 +571,7 @@ impl<R: AccessRules>
         BendIndex,
     > for Layout<R>
 {
+    #[track_caller]
     fn apply(&mut self, edit: &LayoutEdit) {
         self.drawing.apply(edit);
     }

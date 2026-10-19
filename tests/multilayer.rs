@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
+use rstest::rstest;
+use rstest_reuse::{self, *};
 use topola::{
     autorouter::{execution::Command, invoker::InvokerError, AutorouterError},
     board::AccessMesadata,
@@ -10,6 +12,12 @@ use topola::{
 };
 
 mod common;
+
+#[template]
+#[rstest]
+#[case::plain("")]
+#[case::with_undo_redo_replay("with_undo_redo_replay")]
+fn test_master(#[case] variant: &str) {}
 
 #[test]
 fn test_unrouted_lm317_breakout() {
@@ -34,8 +42,38 @@ fn test_unrouted_lm317_breakout() {
     ));
 }
 
+/// The second undo's compound removal goes through
+/// `ApplyGeometryEdit::apply`, which must reinsert the compound's
+/// R-tree envelope when it restores the members — otherwise the
+/// removal fails the envelope lookup. Regression test: this used to
+/// panic in `remove_compound`.
 #[test]
-fn test_astable_multivibrator() {
+fn test_place_via_undo_redo_undo() {
+    let mut invoker = common::create_invoker_and_assert(common::load_design(
+        "tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn",
+    ));
+
+    invoker
+        .execute(Command::PlaceVia(ViaWeight {
+            from_layer: 0,
+            to_layer: 1,
+            circle: Circle {
+                pos: [-2500.0, -1250.0].into(),
+                r: 400.0,
+            },
+            maybe_net: None,
+        }))
+        .unwrap();
+
+    invoker.undo().unwrap();
+    invoker.redo().unwrap();
+    invoker.undo().unwrap();
+
+    common::assert_no_loose_nodes(invoker.autorouter());
+}
+
+#[apply(test_master)]
+fn test_astable_multivibrator(variant: &str) {
     let mut invoker = common::create_invoker_and_assert(common::load_design(
         "tests/multilayer/astable_multivibrator/astable_multivibrator.dsn",
     ));
@@ -43,7 +81,7 @@ fn test_astable_multivibrator() {
     common::replay_and_assert_and_report(
         &mut invoker,
         "tests/multilayer/astable_multivibrator/autoroute_all.cmd",
-        "plain",
+        variant,
     );
 
     let (mut autorouter, ..) = invoker.dissolve();

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     autorouter::{
+        critical_autoroute::{CriticalAutorouteExecutionStepper, CriticalAutorouteOptions},
         multilayer_autoroute::MultilayerAutorouteOptions,
         multilayer_reconfigurator::MultilayerAutorouteReconfigurator,
         planar_reconfigurator::PlanarAutorouteReconfigurator,
@@ -33,6 +34,7 @@ use super::{
 pub enum Command {
     Autoroute(PinSelection, PlanarAutorouteOptions), // TODO: Rename to PlanarAutoroute.
     MultilayerAutoroute(PinSelection, MultilayerAutorouteOptions),
+    CriticalAutoroute(PinSelection, CriticalAutorouteOptions),
     TopoAutoroute {
         selection: PinSelection,
         #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -50,6 +52,7 @@ pub enum Command {
 pub enum ExecutionStepper<M> {
     MultilayerAutoroute(MultilayerAutorouteReconfigurator),
     PlanarAutoroute(PlanarAutorouteReconfigurator),
+    CriticalAutoroute(CriticalAutorouteExecutionStepper),
     TopoAutoroute(ng::AutorouteExecutionStepper<M>),
     PlaceVia(PlaceViaExecutionStepper),
     ShiftComponents(ShiftComponentsExecutionStepper),
@@ -73,6 +76,12 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
                 ControlFlow::Continue(..) => ControlFlow::Continue(()),
                 ControlFlow::Break(edit) => {
                     ControlFlow::Break((edit, "finished planar autorouting".to_string()))
+                }
+            },
+            ExecutionStepper::CriticalAutoroute(autoroute) => match autoroute.step(autorouter)? {
+                ControlFlow::Continue(..) => ControlFlow::Continue(()),
+                ControlFlow::Break(edit) => {
+                    ControlFlow::Break((edit, "finished critical autorouting".to_string()))
                 }
             },
             ExecutionStepper::TopoAutoroute(autoroute) => {
@@ -155,6 +164,7 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
         match self {
             ExecutionStepper::MultilayerAutoroute(autoroute) => autoroute.finish_early(autorouter),
             ExecutionStepper::PlanarAutoroute(autoroute) => autoroute.finish_early(autorouter),
+            ExecutionStepper::CriticalAutoroute(autoroute) => autoroute.finish_early(autorouter),
             ExecutionStepper::TopoAutoroute(autoroute) => {
                 autoroute.abort(&mut ());
             }
@@ -173,6 +183,9 @@ impl<M: AccessMesadata + Clone> Abort<Invoker<M>> for ExecutionStepper<M> {
                 autoroute.abort(&mut invoker.autorouter)
             }
             ExecutionStepper::PlanarAutoroute(autoroute) => {
+                autoroute.abort(&mut invoker.autorouter)
+            }
+            ExecutionStepper::CriticalAutoroute(autoroute) => {
                 autoroute.abort(&mut invoker.autorouter)
             }
             ExecutionStepper::TopoAutoroute(autoroute) => {
@@ -198,6 +211,7 @@ impl<M> EstimateProgress for ExecutionStepper<M> {
         match self {
             ExecutionStepper::MultilayerAutoroute(autoroute) => autoroute.estimate_progress(),
             ExecutionStepper::PlanarAutoroute(autoroute) => autoroute.estimate_progress(),
+            ExecutionStepper::CriticalAutoroute(autoroute) => autoroute.estimate_progress(),
             ExecutionStepper::TopoAutoroute(..) => {
                 LinearScale::new(0, 0, LinearScale::new(0.0, 0.0, ()))
             }
@@ -225,6 +239,7 @@ impl<M> GetTimeoutProgress for ExecutionStepper<M> {
     fn timeout_progress(&self) -> Option<LinearScale<f64, LinearScale<f64>>> {
         match self {
             ExecutionStepper::MultilayerAutoroute(autoroute) => autoroute.timeout_progress(),
+            ExecutionStepper::CriticalAutoroute(autoroute) => autoroute.timeout_progress(),
             ExecutionStepper::PlanarAutoroute(_autoroute) => None,
             ExecutionStepper::TopoAutoroute(..) => None,
             ExecutionStepper::PlaceVia(..) => None,

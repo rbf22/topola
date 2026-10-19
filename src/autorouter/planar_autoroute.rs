@@ -5,7 +5,10 @@
 //! Manages autorouting of ratlines in a layout, tracking status and processed
 //! routing steps.
 
-use std::{collections::BTreeMap, ops::ControlFlow};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
+};
 
 use derive_getters::Getters;
 
@@ -14,8 +17,12 @@ use crate::{
         edit::{BoardDataEdit, BoardEdit},
         AccessMesadata,
     },
-    drawing::{band::BandTermsegIndex, dot::FixedDotIndex, graph::PrimitiveIndex},
-    geometry::{edit::Edit, primitive::PrimitiveShape},
+    drawing::{
+        band::BandTermsegIndex,
+        dot::FixedDotIndex,
+        graph::{MakePrimitiveRef, PrimitiveIndex},
+    },
+    geometry::{edit::Edit, primitive::PrimitiveShape, GetLayer},
     graph::MakeRef,
     layout::LayoutEdit,
     router::{
@@ -46,6 +53,13 @@ pub struct PlanarAutorouteConfiguration {
     /// ratline. Empty on orderings that only permute ratlines, which
     /// take the usual backtrace path instead.
     pub rip_up: Vec<RatlineUid>,
+    /// Critical-first ratlines whose committed bands must survive
+    /// reconfiguration: orderings keep them first, and they are
+    /// filtered out of `rip_up` lists (the reconfigurator's
+    /// desperation escape may still revoke protection when a
+    /// protected band is the *only* way forward). Empty when
+    /// critical-first routing is not in use.
+    pub protected: BTreeSet<RatlineUid>,
 }
 
 impl PlanarAutorouteConfiguration {
@@ -104,6 +118,11 @@ pub struct PlanarAutorouteExecutionStepper {
     layout_edits: Vec<LayoutEdit>,
     /// Records the changes to the board data, one routed band per item.
     board_data_edits: Vec<BoardDataEdit>,
+    /// Debug: the ratline whose attempt produced each edit slot, used to
+    /// detect drift between slot positions and `configuration.ratlines`.
+    slot_ratlines: Vec<Option<RatlineUid>>,
+    /// Debug: the ratline currently in flight or just dissolved.
+    attempt_ratline: Option<RatlineUid>,
     /// The options for the autorouting process, defining how routing should be carried out.
     options: PlanarAutorouteOptions,
     /// Edits applied outside any ratline's route — board data updates
@@ -136,12 +155,21 @@ impl PlanarAutorouteExecutionStepper {
             route: None,
             layout_edits: vec![],
             board_data_edits: vec![],
+            slot_ratlines: vec![],
+            attempt_ratline: None,
             options,
             pending_edit: BoardEdit::new(),
             prenavmesh_bases: PrenavmeshBases::default(),
         };
         this.start_routing_ratline(autorouter)?;
         Ok(this)
+    }
+
+    /// Mutable access to the live configuration — for protected-set
+    /// bookkeeping, which lives in the configuration but is managed
+    /// externally by the critical-first machinery.
+    pub fn configuration_mut(&mut self) -> &mut PlanarAutorouteConfiguration {
+        &mut self.configuration
     }
 
     fn backtrace_to_index(
@@ -159,6 +187,7 @@ impl PlanarAutorouteExecutionStepper {
             BoardDataEdit::merge_iter(self.board_data_edits.split_off(index)),
             LayoutEdit::merge_iter(self.layout_edits.split_off(index)),
         );
+        let _ = self.slot_ratlines.split_off(index);
 
         autorouter.board.apply_edit(&board_edit.reverse());
 
@@ -219,6 +248,8 @@ impl PlanarAutorouteExecutionStepper {
         autorouter: &mut Autorouter<impl AccessMesadata>,
     ) -> Result<(), AutorouterError> {
         while self.curr_ratline_index < self.configuration.ratlines.len() {
+            self.attempt_ratline =
+                Some(self.configuration.ratlines[self.curr_ratline_index]);
             let (origin, destination) = self
                 .configuration
                 .ratline_terminating_dots(autorouter, self.curr_ratline_index);
@@ -245,6 +276,15 @@ impl PlanarAutorouteExecutionStepper {
                     }
                     Err(err) => return Err(err),
                 };
+
+            log::debug!(
+                "ratline {:?} attempt on layer {}: {} navnodes",
+                self.configuration.ratlines[self.curr_ratline_index],
+                origin
+                    .primitive_ref(autorouter.board().layout().drawing())
+                    .layer(),
+                navmesh.graph().node_count()
+            );
 
             let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
             let mut route = RouteStepper::new_from_navmesh(
@@ -290,6 +330,7 @@ impl PlanarAutorouteExecutionStepper {
         let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
         self.layout_edits.push(pending.layout_edit);
         self.board_data_edits.push(pending.board_data_edit);
+        self.slot_ratlines.push(self.attempt_ratline);
         extracted
     }
 
@@ -376,14 +417,20 @@ impl PlanarAutorouteExecutionStepper {
                     .ratlines
                     .iter()
                     .position(|uid| uid == ratline)
+                    .map(|index| (index, *ratline))
             })
-            .filter(|index| *index < self.layout_edits.len())
+            .filter(|(index, _)| *index < self.layout_edits.len())
             .collect();
-        indices.sort_unstable();
+        indices.sort_unstable_by_key(|(index, _)| *index);
         indices.dedup();
 
         let mut ripped_edits = BoardEdit::new();
-        for index in indices.iter().rev() {
+        for (index, ratline) in indices.iter().rev() {
+            debug_assert_eq!(
+                self.slot_ratlines.remove(*index),
+                Some(*ratline),
+                "edit slot {index} must hold the ripped ratline's edits",
+            );
             ripped_edits
                 .layout_edit
                 .merge(self.layout_edits.remove(*index));
@@ -486,6 +533,53 @@ impl PlanarAutorouteExecutionStepper {
         Ok(result)
     }
 
+    /// Installs an ordering whose first difference from the live one
+    /// lies past every recorded edit slot — a permutation of the
+    /// un-attempted tail only. No routed band needs undoing, so the
+    /// configuration is adopted and routing resumes at the first
+    /// changed position; every reordered ratline is still attempted.
+    /// The emit loop falls back to this after skipping a bounded
+    /// number of tail-only candidates, which keeps a pathological
+    /// emitter from draining its permutation space inside a single
+    /// `reconfigure()` call.
+    pub fn install_tail_configuration(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        new_configuration: PlanarAutorouteConfiguration,
+    ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
+        let new_index = new_configuration
+            .ratlines
+            .iter()
+            .zip(self.configuration.ratlines.iter())
+            .position(|(permuted, original)| *permuted != *original)
+            .unwrap_or(usize::MAX);
+
+        let result = PlanarAutorouteConfigurationStatus {
+            configuration: std::mem::replace(&mut self.configuration, new_configuration),
+            costs: PlanarAutorouteCosts {
+                lengths: (0..self.curr_ratline_index).map(|_| 0.0).collect(),
+            },
+        };
+
+        if self.route.is_some() {
+            self.dissolve_route_stepper_and_push_edits();
+        }
+        if new_index >= self.board_data_edits.len() {
+            self.curr_ratline_index = new_index.min(self.configuration.ratlines.len());
+        } else {
+            // The just-dissolved in-flight slot now covers the first
+            // changed position — that position holds a different
+            // ratline under the new ordering, so drop the slot and
+            // resume there.
+            self.backtrace_to_index(autorouter, new_index)?;
+        }
+
+        if self.curr_ratline_index < self.configuration.ratlines.len() {
+            self.start_routing_ratline(autorouter)?;
+        }
+        Ok(result)
+    }
+
     /// Extends the live configuration's terminating-dot remappings.
     /// Multilayer re-layering calls this between
     /// [`Self::surgical_rip_up`] and [`Self::install_configuration`]
@@ -556,14 +650,22 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
                 log::debug!("pad-entry post-processing: {stats:?}");
                 self.layout_edits.push(layout_edit);
                 self.board_data_edits.push(board_data_edit);
+                self.slot_ratlines.push(None);
             }
 
+            self.slot_ratlines.clear();
+            // The produced edit is committed: its slots are consumed
+            // so that a later round (the multilayer reconfigurator may
+            // restart this stepper after `Break`) cannot backtrace or
+            // rip them up — records already handed out must not be
+            // reverted and dropped, which would leave dead creations
+            // in the committed edit.
             return Ok(ControlFlow::Break(Some(BoardEdit::new_from_edits(
-                BoardDataEdit::merge_iter(self.board_data_edits.iter().cloned()),
+                BoardDataEdit::merge_iter(self.board_data_edits.drain(..)),
                 // FIXME: This is a large clone. We probably need some
                 // high-level, say `AutorouteEdit`, struct to store sequences
                 // of edits.
-                LayoutEdit::merge_iter(self.layout_edits.iter().cloned()),
+                LayoutEdit::merge_iter(self.layout_edits.drain(..)),
             ))));
         }
 
@@ -772,6 +874,7 @@ mod tests {
                 terminating_dot_map: BTreeMap::new(),
                 obstacle_penalties: BTreeMap::new(),
                 rip_up: vec![],
+                protected: BTreeSet::new(),
             },
             PlanarAutorouteOptions {
                 principal_layer: 0,

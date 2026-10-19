@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::{collections::BTreeMap, ops::ControlFlow};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
+};
 
 use specctra_core::mesadata::AccessMesadata;
 
@@ -50,6 +53,15 @@ pub struct PlanarAutorouteReconfigurator {
     /// further reconfiguration once early finishing is requested.
     finished: bool,
     reconfiguration_count: usize,
+    /// Critical-first ratlines whose committed bands must survive
+    /// reconfiguration: every emitted ordering keeps them first and
+    /// never lists them for rip-up — unless a protected band is the
+    /// only way forward, when desperation revokes its protection.
+    protected: BTreeSet<RatlineUid>,
+    /// Ratlines whose protection was revoked by desperation. Kept for
+    /// introspection; protection is monotone-shrinking so a revoked
+    /// ratline is never re-protected by this reconfigurator.
+    desperated: BTreeSet<RatlineUid>,
 }
 
 impl PlanarAutorouteReconfigurator {
@@ -57,6 +69,23 @@ impl PlanarAutorouteReconfigurator {
         autorouter: &mut Autorouter<impl AccessMesadata>,
         input: PlanarAutoroutePreconfigurerInput,
         options: PlanarAutorouteOptions,
+    ) -> Result<Self, AutorouterError> {
+        Self::new_with_configuration_override(autorouter, input, options, |_, _| {})
+    }
+
+    /// Like [`PlanarAutorouteReconfigurator::new`], but
+    /// `configuration_override` runs on the freshly built
+    /// preconfiguration (after escape-stub placement, which may remap
+    /// terminating dots) before the inner stepper and reconfigurer
+    /// consume it. The critical-first outer stepper uses it to inject
+    /// its ordering, carve corridors onto the board, and seed the
+    /// protected set — so the routing history starts with the
+    /// critical-first order already installed, no surgical dance.
+    pub fn new_with_configuration_override<M: AccessMesadata>(
+        autorouter: &mut Autorouter<M>,
+        input: PlanarAutoroutePreconfigurerInput,
+        options: PlanarAutorouteOptions,
+        configuration_override: impl FnOnce(&mut Autorouter<M>, &mut PlanarAutorouteConfiguration),
     ) -> Result<Self, AutorouterError> {
         let preconfigurer = SccIntersectionsAndLengthRatlinePlanarAutoroutePreconfigurer::new(
             autorouter,
@@ -81,6 +110,9 @@ impl PlanarAutorouteReconfigurator {
             log::debug!("escape stubs: {stats:?}");
         }
 
+        configuration_override(autorouter, &mut preconfiguration);
+
+        let protected = preconfiguration.protected.clone();
         let reconfigurer = PlanarAutorouteReconfigurer::new(
             autorouter,
             preconfiguration.clone(),
@@ -97,6 +129,8 @@ impl PlanarAutorouteReconfigurator {
             escape_stub_edit,
             finished: false,
             reconfiguration_count: 0,
+            protected,
+            desperated: BTreeSet::new(),
         })
     }
 
@@ -182,6 +216,30 @@ impl PlanarAutorouteReconfigurator {
         self.reconfigurer.remove_terminating_dot_entries(keys);
     }
 
+    /// Replaces the critical-first protected set: the stepper's live
+    /// configuration and the reconfigurer's stored preconfigurations
+    /// are updated so subsequently emitted orderings keep it.
+    pub fn set_protected(&mut self, protected: BTreeSet<RatlineUid>) {
+        self.stepper.configuration_mut().protected = protected.clone();
+        self.reconfigurer.set_protected(&protected);
+        self.protected = protected;
+    }
+
+    /// The ratlines whose bands are currently protected from rip-up
+    /// and permutation reordering.
+    pub fn protected(&self) -> &BTreeSet<RatlineUid> {
+        &self.protected
+    }
+
+    /// Feeds externally observed blockers (e.g. relaxed channel probes
+    /// run by the critical-first outer stepper) into the
+    /// reconfigurer's congestion record so emitted orderings penalize
+    /// paths through them.
+    pub fn seed_congestion(&mut self, obstacles: impl IntoIterator<Item = PrimitiveIndex>) {
+        self.reconfigurer
+            .add_congestion(obstacles, self.options.congestion_penalty);
+    }
+
     /// The live configuration of the inner stepper — the ratline order
     /// and terminating-dot map routing is currently working against.
     pub fn configuration(&self) -> &PlanarAutorouteConfiguration {
@@ -225,13 +283,37 @@ impl PlanarAutorouteReconfigurator {
         self.reconfiguration_count += 1;
         self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
 
-        loop {
-            let Some(configuration) = self
+        // Bound the emit-and-apply cycle: an ordering that differs
+        // from all previously emitted ones can still fail to install
+        // (e.g. nothing left to undo), and an unbounded loop here
+        // would spin inside a single `step()` where no timeout can
+        // fire. `tail_candidate` keeps the newest ordering that
+        // permutes only the un-attempted tail — installable without
+        // undoing anything — so a search that never produces an
+        // ordering touching routed bands still makes progress instead
+        // of ending the command.
+        let mut tail_candidate = None;
+        for _ in 0..256 {
+            let Some(mut configuration) = self
                 .reconfigurer
                 .next_configuration(autorouter, &self.stepper)
             else {
-                return Ok(ControlFlow::Break(None));
+                break;
             };
+
+            self.apply_protection(autorouter, &mut configuration);
+
+            let tail_only = configuration.rip_up.is_empty()
+                && configuration
+                    .ratlines
+                    .iter()
+                    .zip(self.stepper.configuration().ratlines.iter())
+                    .position(|(permuted, original)| *permuted != *original)
+                    .is_some_and(|index| index >= self.stepper.board_data_edits().len());
+            if tail_only {
+                tail_candidate = Some(configuration);
+                continue;
+            }
 
             match self.stepper.reconfigure(autorouter, configuration) {
                 Ok(result) => {
@@ -243,6 +325,149 @@ impl PlanarAutorouteReconfigurator {
                 Err(err) => return Err(err),
             }
         }
+
+        if let Some(configuration) = tail_candidate {
+            let result = self
+                .stepper
+                .install_tail_configuration(autorouter, configuration)?;
+            return Ok(ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(
+                result,
+            )));
+        }
+
+        Ok(ControlFlow::Break(None))
+    }
+
+    /// Enforces the critical-first protected set on an emitted
+    /// configuration. Protected ratlines are filtered out of `rip_up`;
+    /// desperation escape: when *every* listed rip is protected, those
+    /// bands are the only way forward — protection is revoked and the
+    /// rip proceeds. Protection only ever shrinks, so this cannot
+    /// deadlock.
+    ///
+    /// The ordering transform keeps critical-first scheduling without
+    /// churn: a protected ratline *with a committed band* is pinned at
+    /// its live position — the first-difference index lands after it,
+    /// so backtracing can never undo its band — while a protected one
+    /// *without* a band is scheduled into free slots right after the
+    /// current ratline, to be attempted next without ripping the
+    /// routed bands ahead of it.
+    fn apply_protection(
+        &mut self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        configuration: &mut PlanarAutorouteConfiguration,
+    ) {
+        if self.protected.is_empty() {
+            return;
+        }
+
+        if !configuration.rip_up.is_empty()
+            && configuration
+                .rip_up
+                .iter()
+                .all(|ratline| self.protected.contains(ratline))
+        {
+            for ratline in &configuration.rip_up {
+                self.protected.remove(ratline);
+                self.desperated.insert(*ratline);
+            }
+            crate::metrics::incr(&crate::metrics::METRICS.protection_desperations);
+            self.stepper.configuration_mut().protected = self.protected.clone();
+            self.reconfigurer.set_protected(&self.protected);
+        } else {
+            let skipped = configuration
+                .rip_up
+                .iter()
+                .filter(|ratline| self.protected.contains(ratline))
+                .count();
+            if skipped > 0 {
+                crate::metrics::add(&crate::metrics::METRICS.protected_rip_skips, skipped);
+                configuration
+                    .rip_up
+                    .retain(|ratline| !self.protected.contains(ratline));
+            }
+        }
+
+        configuration.protected = self.protected.clone();
+
+        let live = &self.stepper.configuration().ratlines;
+        let live_pos: BTreeMap<RatlineUid, usize> = live
+            .iter()
+            .enumerate()
+            .map(|(index, ratline)| (*ratline, index))
+            .collect();
+        let curr = *self.stepper.curr_ratline_index();
+
+        // Routed protected ratlines hold the front of the ordering in
+        // live order: every transformed ordering then shares that
+        // prefix with the live one, so the first-difference index
+        // always lands after it and backtracing can never undo a
+        // protected band. (A protected band later than the first
+        // difference would be undone despite being pinned.)
+        let mut slots: Vec<Option<RatlineUid>> =
+            vec![None; live.len().max(configuration.ratlines.len())];
+        let mut pinned = BTreeSet::new();
+        let mut front = 0;
+        // Front prefix is in *live* order so it stays identical to the
+        // live configuration's own protected prefix.
+        for ratline in live.iter().copied() {
+            if !self.protected.contains(&ratline) || !configuration.ratlines.contains(&ratline) {
+                continue;
+            }
+            let index = live_pos[&ratline];
+            let (origin, destination) = self
+                .stepper
+                .configuration()
+                .ratline_terminating_dots(autorouter, index);
+            if autorouter
+                .board
+                .band_between_nodes(origin, destination)
+                .is_some()
+            {
+                slots[front] = Some(ratline);
+                front += 1;
+                pinned.insert(ratline);
+            }
+        }
+
+        // Unrouted protected ratlines fill free slots right after the
+        // current position — attempted next, without ripping the
+        // routed bands ahead of them.
+        let urgent_set: BTreeSet<RatlineUid> = self
+            .protected
+            .iter()
+            .copied()
+            .filter(|ratline| configuration.ratlines.contains(ratline) && !pinned.contains(ratline))
+            .collect();
+        let mut urgent = urgent_set.iter().copied();
+        for index in curr + 1..slots.len() {
+            if urgent.len() == 0 {
+                break;
+            }
+            if slots[index].is_none() {
+                slots[index] = urgent.next();
+            }
+        }
+
+        let mut rest = configuration
+            .ratlines
+            .iter()
+            .copied()
+            .filter(|ratline| !pinned.contains(ratline) && !urgent_set.contains(ratline));
+        let mut order = Vec::with_capacity(configuration.ratlines.len());
+        for slot in slots {
+            match slot {
+                Some(ratline) => order.push(ratline),
+                None => {
+                    if let Some(ratline) = rest.next() {
+                        order.push(ratline);
+                    }
+                }
+            }
+        }
+        order.extend(urgent);
+        order.extend(rest);
+        configuration.ratlines = order;
     }
 }
 

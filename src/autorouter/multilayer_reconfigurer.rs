@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
@@ -75,8 +78,12 @@ impl SearchNode {
     pub fn revise_ratline(self, ratline_uid: RatlineUid, layer_count: usize) -> Self {
         let mut new_anterouter_plan = self.configuration.plan.clone();
 
-        *new_anterouter_plan.layer_map.get_mut(&ratline_uid).unwrap() += 1;
-        *new_anterouter_plan.layer_map.get_mut(&ratline_uid).unwrap() %= layer_count;
+        let Some(assignment) = new_anterouter_plan.layer_map.get_mut(&ratline_uid) else {
+            // Weave continuation ratlines have no layer assignment of
+            // their own — there is nothing to rotate.
+            return self;
+        };
+        *assignment = (*assignment + 1) % layer_count;
 
         Self {
             configuration: MultilayerAutorouteConfiguration {
@@ -126,12 +133,25 @@ impl MakeNextMultilayerAutorouteConfiguration
         // The failed ratline rotates first; each blocking ratline is a
         // candidate too — moving a blocker off the contested layer can
         // resolve the conflict without moving the failed ratline.
+        // Continuation ratlines carry no layer assignment; rotating
+        // them is impossible, so don't push a duplicate candidate.
+        let layered: BTreeSet<RatlineUid> = self
+            .configuration_search
+            .curr_node()
+            .configuration
+            .plan
+            .layer_map
+            .keys()
+            .copied()
+            .collect();
+
         for ratline in planar_status
             .configuration
             .ratlines
             .get(planar_status.costs.lengths.len())
             .into_iter()
             .chain(blockers.iter().take(8))
+            .filter(|ratline| layered.contains(ratline))
         {
             self.configuration_search.push((
                 0.1,

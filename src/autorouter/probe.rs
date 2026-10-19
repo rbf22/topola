@@ -29,6 +29,7 @@ use crate::{
     },
     drawing::{
         band::BandTermsegIndex,
+        dot::FixedDotIndex,
         graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
         loose::{GetPrevNextLoose, LooseIndex},
         primitive::MakePrimitiveShape,
@@ -48,10 +49,7 @@ pub struct ChannelProbe {
     /// The ratline's net.
     pub net: Option<usize>,
     /// The ratline's endpoint dots.
-    pub endpoints: (
-        crate::drawing::dot::FixedDotIndex,
-        crate::drawing::dot::FixedDotIndex,
-    ),
+    pub endpoints: (FixedDotIndex, FixedDotIndex),
     /// Ordered waypoints of the demand path as `(center, layer)`. Empty
     /// when the probe could not produce a path even under relaxed rules.
     pub path: Vec<(Point, usize)>,
@@ -252,32 +250,59 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         router_options: RouterOptions,
         relax_rules: impl FnOnce(&mut M),
     ) -> Vec<ChannelProbe> {
+        let pairs: Vec<_> = ratlines
+            .iter()
+            .map(|&uid| {
+                let (origin, destination) = uid.ref_(self).endpoint_dots();
+                (uid, origin, destination)
+            })
+            .collect();
+        self.probe_ratlines_dots(&pairs, router_options, relax_rules)
+    }
+
+    /// Probes the given `(ratline, origin, destination)` triples under
+    /// `relax_rules` — for ratlines whose effective endpoints have moved
+    /// (e.g. fanout vias), the caller supplies the live terminating dots
+    /// rather than the pad dots. The board is unchanged afterwards.
+    pub fn probe_ratlines_dots(
+        &mut self,
+        pairs: &[(RatlineUid, FixedDotIndex, FixedDotIndex)],
+        router_options: RouterOptions,
+        relax_rules: impl FnOnce(&mut M),
+    ) -> Vec<ChannelProbe> {
         let saved_rules = self.board.layout().drawing().rules().clone();
         relax_rules(self.board.layout_mut().rules_mut());
 
-        let mut probes = Vec::with_capacity(ratlines.len());
+        let mut probes = Vec::with_capacity(pairs.len());
         // The board is reverted between probes, so one set of prenavmesh
         // bases serves every ratline.
         let mut prenavmesh_bases = PrenavmeshBases::default();
 
-        for &uid in ratlines {
-            probes.push(self.probe_one(uid, router_options, &mut prenavmesh_bases));
+        for &(uid, origin, destination) in pairs {
+            probes.push(self.probe_one(
+                uid,
+                origin,
+                destination,
+                router_options,
+                &mut prenavmesh_bases,
+            ));
         }
 
         *self.board.layout_mut().rules_mut() = saved_rules;
         probes
     }
 
-    /// Probes one ratline under the currently installed rules.
-    /// Cross-layer ratlines (needing a via the planar probe cannot
-    /// express) yield an empty-path probe.
+    /// Probes one ratline under the currently installed rules, between
+    /// the given endpoint dots. Cross-layer endpoints (needing a via
+    /// the planar probe cannot express) yield an empty-path probe.
     fn probe_one(
         &mut self,
-        uid: RatlineUid,
+        _uid: RatlineUid,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
         router_options: RouterOptions,
         prenavmesh_bases: &mut PrenavmeshBases,
     ) -> ChannelProbe {
-        let (origin, destination) = uid.ref_(self).endpoint_dots();
         let (net, same_layer) = {
             let drawing = self.board.layout().drawing();
             (
@@ -387,7 +412,14 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
                         chunk
                             .iter()
                             .map(|&uid| {
-                                worker.probe_one(uid, router_options, &mut prenavmesh_bases)
+                                let (origin, destination) = uid.ref_(&worker).endpoint_dots();
+                                worker.probe_one(
+                                    uid,
+                                    origin,
+                                    destination,
+                                    router_options,
+                                    &mut prenavmesh_bases,
+                                )
                             })
                             .collect::<Vec<_>>()
                     })
@@ -415,8 +447,8 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
     /// band; on failure returns the terminal blocker.
     fn probe_ratline(
         &mut self,
-        origin: crate::drawing::dot::FixedDotIndex,
-        destination: crate::drawing::dot::FixedDotIndex,
+        origin: FixedDotIndex,
+        destination: FixedDotIndex,
         router_options: RouterOptions,
         prenavmesh_bases: &mut PrenavmeshBases,
     ) -> (
@@ -426,6 +458,7 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
         let Ok(navmesh) =
             prenavmesh_bases.navmesh(self.board.layout(), origin, destination, router_options)
         else {
+            log::debug!("probe: navmesh construction failed");
             return (vec![], None);
         };
 
@@ -445,13 +478,23 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
                     termseg = Some(done);
                     break;
                 }
-                Err(_) => break,
+                Err(err) => {
+                    log::debug!("probe: route step error: {err}");
+                    break;
+                }
             }
         }
 
         // `route` is self-contained; the router borrow ends here so the
         // drawing can be read and the probe band reverted.
         drop(router);
+
+        if termseg.is_none() {
+            log::debug!(
+                "probe: route failed, obstacles={:?}",
+                route.obstacles().len()
+            );
+        }
 
         if let Some(termseg) = termseg {
             let path = self.band_waypoints(termseg);

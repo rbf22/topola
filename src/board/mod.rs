@@ -64,6 +64,7 @@ impl<'a> ResolvedSelector<'a> {
                     _ => return None,
                 }
             }
+            NodeIndex::Removed => return None,
         };
 
         if let Some(pin_name) = board.node_pinname(&node) {
@@ -538,6 +539,7 @@ impl<M: AccessMesadata> Board<M> {
         }
     }
 
+    #[track_caller]
     pub fn apply_edit(&mut self, edit: &BoardEdit) {
         for (node, (maybe_old_pinname, _)) in &edit.board_data_edit.pinname_nodes {
             if maybe_old_pinname.is_some() {

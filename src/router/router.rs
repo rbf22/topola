@@ -229,6 +229,13 @@ impl<R: AccessRules> RouterThetastarStrategy<'_, R> {
         // the virtual state `.step_to(..)` pushes is undone by the
         // following `.step_back(..)`.
         let result = self.navcord.step_to(self.layout, navmesh, probed_navnode);
+        if let Err(err) = &result {
+            static PROBE_ERR_LOGS: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            if PROBE_ERR_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                log::debug!("probe to {probed_navnode:?} failed: {err:?}");
+            }
+        }
 
         ControlFlow::Break(match result {
             Ok(probe_length) => Some(

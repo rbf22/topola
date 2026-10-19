@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use derive_getters::Getters;
 use enum_dispatch::enum_dispatch;
@@ -183,6 +186,13 @@ impl Navmesh {
         );
 
         let mut graph: UnGraph<NavnodeWeight, (), usize> = UnGraph::default();
+        // `UnGraph::update_edge` deduplicates by linearly scanning the
+        // source node's adjacency — O(degree) per call. On dense boards
+        // the quadrinavedge expansion issues millions of calls against
+        // nodes of degree in the thousands, which dominated navmesh
+        // build time. This set deduplicates in O(1) instead; edge
+        // weights are all `()`, so skipping duplicates is equivalent.
+        let mut edge_set: HashSet<u64> = HashSet::new();
         let mut origin_navnode = None;
         let mut destination_navnode = None;
 
@@ -279,6 +289,7 @@ impl Navmesh {
             Self::add_prenavedge_to_repr_as_quadrinavedges(
                 layout,
                 &mut graph,
+                &mut edge_set,
                 &prenavnode_to_navnodes,
                 &overlapping_prenavnodes_unions,
                 prenavedge.source(),
@@ -297,6 +308,7 @@ impl Navmesh {
             Self::add_prenavedge_to_repr_as_quadrinavedges(
                 layout,
                 &mut graph,
+                &mut edge_set,
                 &prenavnode_to_navnodes,
                 &overlapping_prenavnodes_unions,
                 constraint.0.node,
@@ -322,35 +334,20 @@ impl Navmesh {
             };
 
             for (repr_navnode1, repr_navnode2) in repr_navnodes.iter() {
-                let repr_navedge1_targets: Vec<_> = graph
+                let repr_navedge_targets: Vec<_> = graph
                     .edges(*repr_navnode1)
+                    .chain(graph.edges(*repr_navnode2))
                     .map(|edge| edge.target())
                     .collect();
 
-                for target in repr_navedge1_targets {
+                for target in repr_navedge_targets {
                     for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[prenavnode.index()]
                         .as_ref()
                         .unwrap()
                         .iter()
                     {
-                        graph.update_edge(*from_navnode1, target, ());
-                        graph.update_edge(*from_navnode2, target, ());
-                    }
-                }
-
-                let repr_navedge2_targets: Vec<_> = graph
-                    .edges(*repr_navnode2)
-                    .map(|edge| edge.target())
-                    .collect();
-
-                for target in repr_navedge2_targets {
-                    for (from_navnode1, from_navnode2) in prenavnode_to_navnodes[prenavnode.index()]
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                    {
-                        graph.update_edge(*from_navnode1, target, ());
-                        graph.update_edge(*from_navnode2, target, ());
+                        Self::add_unique_edge(&mut graph, &mut edge_set, *from_navnode1, target);
+                        Self::add_unique_edge(&mut graph, &mut edge_set, *from_navnode2, target);
                     }
                 }
             }
@@ -461,6 +458,7 @@ impl Navmesh {
     fn add_prenavedge_to_repr_as_quadrinavedges(
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
+        edge_set: &mut HashSet<u64>,
         prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
         overlapping_prenavnodes_unions: &UnionFind<usize>,
         from_prenavnode: PrenavnodeNodeIndex,
@@ -490,15 +488,31 @@ impl Navmesh {
         Self::add_prenavedge_as_quadrinavedges(
             layout,
             graph,
+            edge_set,
             prenavnode_to_navnodes,
             from_prenavnode_repr,
             to_prenavnode_repr,
         )
     }
 
+    /// `graph.update_edge` equivalent with O(1) deduplication; see the
+    /// `edge_set` comment in `new_from_prenavmesh`.
+    fn add_unique_edge(
+        graph: &mut UnGraph<NavnodeWeight, (), usize>,
+        edge_set: &mut HashSet<u64>,
+        a: NodeIndex<usize>,
+        b: NodeIndex<usize>,
+    ) {
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        if edge_set.insert(((lo.index() as u64) << 32) | hi.index() as u64) {
+            graph.add_edge(lo, hi, ());
+        }
+    }
+
     fn add_prenavedge_as_quadrinavedges(
         layout: &Layout<impl AccessRules>,
         graph: &mut UnGraph<NavnodeWeight, (), usize>,
+        edge_set: &mut HashSet<u64>,
         prenavnode_to_navnodes: &[Option<Vec<(NodeIndex<usize>, NodeIndex<usize>)>>],
         from_prenavnode: PrenavnodeNodeIndex,
         to_prenavnode: PrenavnodeNodeIndex,
@@ -532,8 +546,8 @@ impl Navmesh {
                 })
             {
                 // Add binavedge.
-                graph.update_edge(*from_navnode1, *to_navnode1, ());
-                graph.update_edge(*from_navnode2, *to_navnode2, ());
+                Self::add_unique_edge(graph, edge_set, *from_navnode1, *to_navnode1);
+                Self::add_unique_edge(graph, edge_set, *from_navnode2, *to_navnode2);
 
                 maybe_lowest_join = Some((from_index, to_index));
                 continue;
@@ -565,13 +579,13 @@ impl Navmesh {
                 }
 
                 // Add binavedge.
-                graph.update_edge(*from_navnode1, *to_navnode1, ());
-                graph.update_edge(*from_navnode2, *to_navnode2, ());
+                Self::add_unique_edge(graph, edge_set, *from_navnode1, *to_navnode1);
+                Self::add_unique_edge(graph, edge_set, *from_navnode2, *to_navnode2);
 
                 // Add two more navedges to upgrade the binavedge to form a
                 // quadrinavedge.
-                graph.update_edge(*from_navnode1, *to_navnode2, ());
-                graph.update_edge(*from_navnode2, *to_navnode1, ());
+                Self::add_unique_edge(graph, edge_set, *from_navnode1, *to_navnode2);
+                Self::add_unique_edge(graph, edge_set, *from_navnode2, *to_navnode1);
             }
         }
     }

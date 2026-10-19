@@ -101,9 +101,14 @@ pub(super) fn add_poly_with_nodes_intern<R: AccessRules>(
     let apex = layout.add_fixed_dot_infringably(
         recorder,
         FixedDotWeight(GeneralDotWeight {
+            // The apex is the poly's attach point, not copper of its
+            // own — sized like the rect-corner dots. A large fixed
+            // radius is meaningless across coordinate scales and on
+            // fine-pitch boards the apex circles seal the entire pad
+            // field off from routing.
             circle: Circle {
                 pos: shape.centroid().unwrap(),
-                r: 100.0,
+                r: 0.5,
             },
             layer,
             maybe_net,

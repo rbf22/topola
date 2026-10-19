@@ -65,7 +65,7 @@ impl<R: AccessRules> Layout<R> {
             // TODO: handle non-loose entries (bends, segs)
             .filter_map(|geom| match geom.data {
                 NodeIndex::Primitive(prim) => LooseIndex::try_from(prim).ok(),
-                NodeIndex::Compound(_) => None,
+                NodeIndex::Compound(_) | NodeIndex::Removed => None,
             })
             .map(|loose| {
                 let prim: PrimitiveIndex = loose.into();
@@ -188,6 +188,7 @@ impl<R: AccessRules> Layout<R> {
                 .geometry()
                 .compound_members(compound)
                 .any(|(_, pi)| pi == core),
+            GenericNode::Removed => false,
         }
     }
 
@@ -212,6 +213,7 @@ impl<R: AccessRules> Layout<R> {
                 .next()
                 .map(|(_, idx)| idx),
             GenericNode::Compound(compound) => Some(compound),
+            GenericNode::Removed => None,
         };
         let resolve_node =
             |x: NodeIndex| maybe_to_compound(x).map(GenericNode::Compound).unwrap_or(x);

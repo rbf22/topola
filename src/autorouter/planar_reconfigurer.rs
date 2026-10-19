@@ -189,6 +189,63 @@ impl PlanarAutorouteReconfigurer {
         }
     }
 
+    /// Replaces the protected set carried by the stored
+    /// preconfigurations, so subsequently emitted configurations keep
+    /// it. The stepper's live configuration is updated separately.
+    pub fn set_protected(&mut self, protected: &BTreeSet<RatlineUid>) {
+        match self {
+            Self::SccPermutations(reconfigurer) => {
+                reconfigurer.preconfiguration.protected = protected.clone()
+            }
+            Self::NegotiatedCongestion(reconfigurer) => {
+                reconfigurer.preconfiguration.protected = protected.clone();
+                reconfigurer.fallback.preconfiguration.protected = protected.clone();
+            }
+        }
+    }
+
+    /// Feeds externally observed blockers into the congestion record:
+    /// the negotiated-congestion reconfigurer bumps its counts (fixed
+    /// primitives only — loose indices are recycled and could
+    /// misattribute), the permutations fallback folds them straight
+    /// into the stored preconfiguration's obstacle penalties.
+    pub fn add_congestion(
+        &mut self,
+        obstacles: impl IntoIterator<Item = PrimitiveIndex>,
+        penalty: f64,
+    ) {
+        match self {
+            Self::SccPermutations(reconfigurer) => {
+                for obstacle in obstacles {
+                    if matches!(
+                        obstacle,
+                        PrimitiveIndex::FixedDot(_)
+                            | PrimitiveIndex::FixedSeg(_)
+                            | PrimitiveIndex::FixedBend(_)
+                    ) {
+                        *reconfigurer
+                            .preconfiguration
+                            .obstacle_penalties
+                            .entry(obstacle)
+                            .or_insert(0.0) += penalty;
+                    }
+                }
+            }
+            Self::NegotiatedCongestion(reconfigurer) => {
+                for obstacle in obstacles {
+                    if matches!(
+                        obstacle,
+                        PrimitiveIndex::FixedDot(_)
+                            | PrimitiveIndex::FixedSeg(_)
+                            | PrimitiveIndex::FixedBend(_)
+                    ) {
+                        *reconfigurer.congestion.entry(obstacle).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// Registers a ratline created mid-run — a via-weave continuation —
     /// into the stored preconfigurations, right after `after`, so that
     /// emitted orderings keep it and positional lookups that index the
@@ -871,15 +928,30 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
         }
 
         // Fallback: enumerate orderings, carrying the accumulated
-        // congestion penalties either way.
-        loop {
+        // congestion penalties either way. A* nodes with the same
+        // permutation at different lengths emit identical ratline
+        // lists; `emitted` dedups them, and the loop terminates at
+        // exhaustion when `next_configuration` returns `None`.
+        //
+        // The dedup run between fresh orderings grows factorially with
+        // the SCC count: on dense boards the loop can spin for minutes
+        // inside a single `step()`, unreachable by any timeout. Bound
+        // it and hand the last (duplicate) candidate back instead —
+        // the emit loop's own bound and tail-stash path absorb
+        // duplicate emissions, and the A* search state persists, so
+        // the enumeration resumes where it left off next call.
+        let mut last = None;
+        for _ in 0..4096 {
             let mut configuration = self.fallback.next_configuration(autorouter, stepper)?;
             configuration.obstacle_penalties = self.obstacle_penalties();
 
             if self.emitted.insert(configuration.ratlines.clone()) {
                 return Some(configuration);
             }
+            last = Some(configuration);
         }
+        crate::metrics::incr(&crate::metrics::METRICS.reconfig_dedup_truncations);
+        last
     }
 }
 

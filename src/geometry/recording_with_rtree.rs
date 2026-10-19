@@ -221,6 +221,7 @@ impl<
         edit_remove_from_map(&mut recorder.segs, seg, (joints, weight));
     }
 
+    #[track_caller]
     pub fn remove_bend(
         &mut self,
         recorder: &mut GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>,
@@ -398,6 +399,7 @@ impl<
     > ApplyGeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>
     for RecordingGeometryWithRtree<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI>
 {
+    #[track_caller]
     fn apply(&mut self, edit: &GeometryEdit<DW, SW, BW, CW, Cel, PI, DI, SI, BI>) {
         self.geometry_with_rtree.apply(edit);
     }

@@ -43,6 +43,7 @@ impl PinSelector {
                     unreachable!()
                 }
             }
+            NodeIndex::Removed => return None,
         };
 
         if let (Some(pinname), Some(layername)) = (
@@ -236,6 +237,7 @@ impl PinSelection {
                     .maybe_net()
                     .and_then(|net| board.mesadata().net_netname(net))
                     .is_some_and(|netname| self.net_names.contains(netname)),
+                NodeIndex::Removed => false,
             };
 
             if on_listed_net != self.nets_excluded {

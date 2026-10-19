@@ -8,7 +8,6 @@ use std::{
 };
 
 use derive_getters::Getters;
-use petgraph::visit::Walker;
 use serde::{Deserialize, Serialize};
 use specctra_core::mesadata::AccessMesadata;
 
@@ -27,12 +26,9 @@ use crate::{
     },
     board::edit::BoardEdit,
     drawing::{
-        bend::BendIndex,
-        dot::{DotIndex, FixedDotIndex},
-        gear::{GearIndex, WalkOutwards},
+        dot::FixedDotIndex,
         graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
-        primitive::{GetLimbs, MakePrimitiveShape},
-        seg::SegIndex,
+        primitive::MakePrimitiveShape,
     },
     geometry::{edit::Edit, primitive::PrimitiveShape, shape::AccessShape, GetLayer},
     graph::MakeRef,
@@ -120,6 +116,22 @@ impl MultilayerAutorouteExecutionStepper {
         configuration: MultilayerAutorouteConfiguration,
         options: MultilayerAutorouteOptions,
     ) -> Result<Self, AutorouterError> {
+        Self::new_with_planar_override(autorouter, configuration, options, |_, _| {})
+    }
+
+    /// Like [`MultilayerAutorouteExecutionStepper::new`], but
+    /// `planar_override` runs on the inner planar reconfigurator's
+    /// freshly built preconfiguration — after anterouting, so the
+    /// terminating-dot map already names each ratline's fanout dots.
+    /// The critical-first outer stepper uses it to inject its
+    /// ordering, carve corridors on the assigned layers, and seed the
+    /// protected set.
+    pub fn new_with_planar_override<M: AccessMesadata>(
+        autorouter: &mut Autorouter<M>,
+        configuration: MultilayerAutorouteConfiguration,
+        options: MultilayerAutorouteOptions,
+        planar_override: impl FnOnce(&mut Autorouter<M>, &mut PlanarAutorouteConfiguration),
+    ) -> Result<Self, AutorouterError> {
         let mut anterouter = Anterouter::new(configuration.plan.clone());
         let mut anteroute_edit = BoardEdit::new();
         let mut anteroute_edits = BTreeMap::new();
@@ -176,7 +188,7 @@ impl MultilayerAutorouteExecutionStepper {
         }
 
         Ok(Self {
-            planar: PlanarAutorouteReconfigurator::new(
+            planar: PlanarAutorouteReconfigurator::new_with_configuration_override(
                 autorouter,
                 PlanarAutoroutePreconfigurerInput {
                     terminating_dot_map,
@@ -189,6 +201,7 @@ impl MultilayerAutorouteExecutionStepper {
                         .collect(),
                 },
                 options.planar,
+                planar_override,
             )?,
             anteroute_edit,
             anteroute_edits,
@@ -198,6 +211,20 @@ impl MultilayerAutorouteExecutionStepper {
             weave_exhausted: BTreeSet::new(),
             options: options.clone(),
         })
+    }
+
+    /// Mutable access to the inner planar reconfigurator — for the
+    /// critical-first outer stepper's surgical windows and protected
+    /// bookkeeping.
+    pub fn planar_mut(&mut self) -> &mut PlanarAutorouteReconfigurator {
+        &mut self.planar
+    }
+
+    /// The layer assignments the currently placed fanout vias were
+    /// made for. Critical-first diffs this between re-identification
+    /// rounds to find ratlines whose carves went stale on rotation.
+    pub fn layer_map(&self) -> &BTreeMap<RatlineUid, usize> {
+        &self.plan.layer_map
     }
 
     /// Finishes routing early, keeping already routed bands. See
@@ -286,7 +313,10 @@ impl MultilayerAutorouteExecutionStepper {
                     ViaWeight {
                         from_layer: source_layer.min(target_layer),
                         to_layer: source_layer.max(target_layer),
-                        circle: Circle { pos, r: 100.0 },
+                        circle: Circle {
+                            pos,
+                            r: autorouter.board().mesadata().default_via_radius(),
+                        },
                         maybe_net,
                     },
                     None,
@@ -431,6 +461,17 @@ impl MultilayerAutorouteExecutionStepper {
             via_pos.x(),
             via_pos.y(),
             target_layer,
+        );
+        log::debug!(
+            "via weave: continuation {:?}, order {:?}, resume at {}",
+            continuation,
+            self.planar
+                .configuration()
+                .ratlines
+                .iter()
+                .map(|r| r.index)
+                .collect::<Vec<_>>(),
+            self.planar.curr_ratline_index(),
         );
         Ok(true)
     }
@@ -707,28 +748,10 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
             // Enumerating the edit's own creations also covers vias the
             // terminating-dot map does not reference.
             let wrapped = self.anteroute_edits.get(ratline).is_some_and(|old_edit| {
-                let drawing = autorouter.board.layout().drawing();
-                let created_segs: BTreeSet<SegIndex> =
-                    old_edit.layout_edit.created_segs().collect();
-                let created_bends: BTreeSet<BendIndex> =
-                    old_edit.layout_edit.created_bends().collect();
-
-                old_edit.layout_edit.created_dots().any(|dot| {
-                    let DotIndex::Fixed(dot) = dot else {
-                        return false;
-                    };
-                    let dot_ref = drawing.primitive_ref(dot);
-                    let mut outwards = dot_ref.outwards();
-                    outwards.walk_next(drawing).is_some()
-                        || dot_ref.segs().iter().any(|seg| !created_segs.contains(seg))
-                        || dot_ref
-                            .bends()
-                            .iter()
-                            .any(|bend| !created_bends.contains(bend))
-                }) || old_edit.layout_edit.created_bends().any(|bend| {
-                    let mut outwards = GearIndex::from(bend).ref_(drawing).outwards();
-                    outwards.walk_next(drawing).is_some()
-                })
+                crate::autorouter::carve::edit_is_wrapped(
+                    autorouter.board.layout().drawing(),
+                    &old_edit.layout_edit,
+                )
             });
 
             if wrapped {

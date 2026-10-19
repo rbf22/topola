@@ -28,6 +28,7 @@ use crate::{
 };
 
 use super::{
+    critical_autoroute::CriticalAutorouteExecutionStepper,
     execution::{Command, ExecutionStepper},
     history::{History, HistoryError},
     measure_length::MeasureLengthExecutionStepper,
@@ -188,7 +189,25 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
         let mut timed_out = false;
 
         loop {
-            let status = execute.step(self)?;
+            // Some geometry bugs manifest as panics deep in the
+            // router; salvage already routed bands the same way an
+            // early finish does instead of losing all the work.
+            let status =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute.step(self)))
+                {
+                    Ok(status) => status?,
+                    Err(payload) => {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            execute.finish_early(&mut self.autorouter)
+                        }))
+                        .is_err()
+                        {
+                            std::panic::resume_unwind(payload);
+                        }
+                        self.history.set_undone(std::iter::empty());
+                        return Ok(true);
+                    }
+                };
 
             if let ControlFlow::Break(..) = status {
                 self.history.set_undone(std::iter::empty());
@@ -228,6 +247,9 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
                     self.autorouter.multilayer_autoroute(selection, *options)?,
                 )
             }
+            Command::CriticalAutoroute(selection, options) => ExecutionStepper::CriticalAutoroute(
+                self.autorouter.critical_autoroute(selection, *options)?,
+            ),
             Command::TopoAutoroute {
                 selection,
                 allowed_edges,
