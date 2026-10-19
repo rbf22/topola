@@ -108,9 +108,12 @@ fn main() -> Result<(), std::io::Error> {
             let mut history = History::new();
             let selection = make_selection(&board, &args.nets, &args.exclude_nets, args.multilayer);
             let command = make_command(
-                &args,
+                args.critical_first,
+                args.multilayer,
+                args.deterministic,
                 selection.clone(),
                 make_planar_options(&args, &board),
+                0,
                 &board,
             );
             history.do_(command, None);
@@ -392,8 +395,8 @@ fn band_width(args: &Cli, board: &Board<SpecctraMesadata>) -> f64 {
 /// Under `--deterministic` the reconfiguration trigger never fires on
 /// elapsed time — routing decisions become a pure function of the
 /// board, options, and seeds.
-fn timeout_options(args: &Cli, initial: f64, progress_bonus: f64) -> TimeoutOptions {
-    if args.deterministic {
+fn timeout_options(deterministic: bool, initial: f64, progress_bonus: f64) -> TimeoutOptions {
+    if deterministic {
         TimeoutOptions {
             initial: f64::INFINITY,
             progress_bonus: 0.0,
@@ -424,7 +427,7 @@ fn make_planar_options(args: &Cli, board: &Board<SpecctraMesadata>) -> PlanarAut
             squeeze_through_under_bends: args.multilayer,
             routed_band_width: band_width(args, board),
         },
-        timeout: timeout_options(args, 1.0, 0.005),
+        timeout: timeout_options(args.deterministic, 1.0, 0.005),
         max_reconfigurations: args.max_reconfigurations.map(|n| n as usize),
         improve_pad_entry: args.pad_entry,
         pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
@@ -444,7 +447,7 @@ fn fanout_clearance(board: &Board<SpecctraMesadata>) -> f64 {
 }
 
 fn make_multilayer_options(
-    args: &Cli,
+    deterministic: bool,
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
     board: &Board<SpecctraMesadata>,
@@ -455,30 +458,34 @@ fn make_multilayer_options(
         },
         planar: planar_options,
         timeout: timeout_options(
-            args,
+            deterministic,
             // Bonus applies per newly-reached ratline index —
             // 0.5s each banks ~2min of budget by mid-list on
             // big boards, starving layer rotation entirely.
-            5.0, 0.05,
+            5.0,
+            0.05,
         ),
         layer_seed,
     }
 }
 
 fn make_command(
-    args: &Cli,
+    critical_first: bool,
+    multilayer: bool,
+    deterministic: bool,
     selection: PinSelection,
     planar_options: PlanarAutorouteOptions,
+    layer_seed: u64,
     board: &Board<SpecctraMesadata>,
 ) -> Command {
-    if args.critical_first {
+    if critical_first {
         Command::CriticalAutoroute(
             selection,
             CriticalAutorouteOptions {
                 planar: planar_options,
-                multilayer: args
-                    .multilayer
-                    .then(|| make_multilayer_options(args, planar_options, 0, board)),
+                multilayer: multilayer.then(|| {
+                    make_multilayer_options(deterministic, planar_options, layer_seed, board)
+                }),
                 critical_quantile: 0.75,
                 carve: true,
                 protect: true,
@@ -488,10 +495,10 @@ fn make_command(
                 keep_carves: false,
             },
         )
-    } else if args.multilayer {
+    } else if multilayer {
         Command::MultilayerAutoroute(
             selection,
-            make_multilayer_options(args, planar_options, 0, board),
+            make_multilayer_options(deterministic, planar_options, layer_seed, board),
         )
     } else {
         Command::Autoroute(selection, planar_options)
@@ -787,54 +794,15 @@ fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::io::E
                 }
 
                 let selection = make_selection(&board, &nets, &exclude_nets, multilayer);
-                let multilayer_timeout = if deterministic {
-                    TimeoutOptions {
-                        initial: f64::INFINITY,
-                        progress_bonus: 0.0,
-                    }
-                } else {
-                    TimeoutOptions {
-                        initial: 5.0,
-                        progress_bonus: 0.5,
-                    }
-                };
-                let command = if critical_first {
-                    Command::CriticalAutoroute(
-                        selection,
-                        CriticalAutorouteOptions {
-                            planar: planar_options,
-                            multilayer: multilayer.then(|| MultilayerAutorouteOptions {
-                                anterouter: AnterouterOptions {
-                                    fanout_clearance: fanout_clearance(&board),
-                                },
-                                planar: planar_options,
-                                timeout: multilayer_timeout,
-                                layer_seed: i as u64,
-                            }),
-                            critical_quantile: 0.75,
-                            carve: true,
-                            protect: true,
-                            reprobe_every: 4,
-                            max_reprobe_rounds: 8,
-                            max_carves: 24,
-                            keep_carves: false,
-                        },
-                    )
-                } else if multilayer {
-                    Command::MultilayerAutoroute(
-                        selection,
-                        MultilayerAutorouteOptions {
-                            anterouter: AnterouterOptions {
-                                fanout_clearance: fanout_clearance(&board),
-                            },
-                            planar: planar_options,
-                            timeout: multilayer_timeout,
-                            layer_seed: i as u64,
-                        },
-                    )
-                } else {
-                    Command::Autoroute(selection, planar_options)
-                };
+                let command = make_command(
+                    critical_first,
+                    multilayer,
+                    deterministic,
+                    selection,
+                    planar_options,
+                    i as u64,
+                    &board,
+                );
 
                 let mut invoker =
                     Invoker::new(Autorouter::new(board).map_err(|e| format!("{:?}", e))?);
