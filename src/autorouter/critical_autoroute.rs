@@ -55,8 +55,8 @@ use crate::{
         invoker::GetDebugOverlayData,
         multilayer_autoroute::MultilayerAutorouteOptions,
         multilayer_preconfigurer::MultilayerAutoroutePreconfigurerInput,
-        multilayer_reconfigurator::MultilayerAutorouteReconfigurator,
-        planar_autoroute::PlanarAutorouteConfiguration,
+        multilayer_reconfigurator::{MultilayerAutorouteReconfigurator, MultilayerReconfigKind},
+        planar_autoroute::{PlanarAutorouteConfiguration, PlanarAutorouteContinueStatus},
         planar_preconfigurer::PlanarAutoroutePreconfigurerInput,
         planar_reconfigurator::PlanarAutorouteReconfigurator,
         ratline::RatlineUid,
@@ -139,17 +139,20 @@ pub struct CriticalAutorouteOptions {
 /// What the inner stepper reported this step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum InnerStatus {
-    Running,
+    Running(PlanarAutorouteContinueStatus),
     Reconfigured,
+    LayerReconfigured,
 }
 
 /// The status reported by the outer stepper.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CriticalAutorouteStatus {
-    Running,
-    /// A re-identification round ran or the inner stepper
+    Running(PlanarAutorouteContinueStatus),
+    /// A re-identification round ran or the inner planar machinery
     /// reconfigured.
     Reconfigured,
+    /// The inner multilayer machinery reconfigured (rotation, weave).
+    LayerReconfigured,
 }
 
 /// Planar or multilayer routing machinery, driven by the outer stepper.
@@ -188,8 +191,8 @@ impl InnerRouter {
         match self {
             Self::Planar(inner) => Ok(match inner.step(autorouter)? {
                 ControlFlow::Break(edit) => ControlFlow::Break(edit),
-                ControlFlow::Continue(ReconfiguratorStatus::Running(_)) => {
-                    ControlFlow::Continue(InnerStatus::Running)
+                ControlFlow::Continue(ReconfiguratorStatus::Running(status)) => {
+                    ControlFlow::Continue(InnerStatus::Running(status))
                 }
                 ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(_)) => {
                     ControlFlow::Continue(InnerStatus::Reconfigured)
@@ -197,11 +200,23 @@ impl InnerRouter {
             }),
             Self::Multilayer(inner) => Ok(match inner.step(autorouter)? {
                 ControlFlow::Break(edit) => ControlFlow::Break(edit),
-                ControlFlow::Continue(ReconfiguratorStatus::Running(_)) => {
-                    ControlFlow::Continue(InnerStatus::Running)
+                ControlFlow::Continue(ReconfiguratorStatus::Running(inner_status)) => {
+                    match inner_status {
+                        ReconfiguratorStatus::Running(status) => {
+                            ControlFlow::Continue(InnerStatus::Running(status))
+                        }
+                        ReconfiguratorStatus::Reconfigured(_) => {
+                            ControlFlow::Continue(InnerStatus::Reconfigured)
+                        }
+                    }
                 }
-                ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(_)) => {
-                    ControlFlow::Continue(InnerStatus::Reconfigured)
+                ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(kind)) => {
+                    ControlFlow::Continue(match kind {
+                        MultilayerReconfigKind::Planar => InnerStatus::Reconfigured,
+                        MultilayerReconfigKind::Weave | MultilayerReconfigKind::LayerRotation => {
+                            InnerStatus::LayerReconfigured
+                        }
+                    })
                 }
             }),
         }
@@ -813,10 +828,12 @@ impl<M: AccessMesadata + Clone> Step<Autorouter<M>, Option<BoardEdit>, CriticalA
                 edit.merge(std::mem::replace(&mut self.carve_edit, BoardEdit::new()));
                 Ok(ControlFlow::Break(Some(edit)))
             }
-            ControlFlow::Continue(InnerStatus::Running) => {
-                Ok(ControlFlow::Continue(CriticalAutorouteStatus::Running))
-            }
-            ControlFlow::Continue(InnerStatus::Reconfigured) => {
+            ControlFlow::Continue(InnerStatus::Running(status)) => Ok(ControlFlow::Continue(
+                CriticalAutorouteStatus::Running(status),
+            )),
+            ControlFlow::Continue(
+                reconfigured @ (InnerStatus::Reconfigured | InnerStatus::LayerReconfigured),
+            ) => {
                 self.seen_reconfigurations += 1;
                 // Under multilayer re-identification only ever reseeds
                 // congestion — ordering, carving, and protection are
@@ -831,7 +848,10 @@ impl<M: AccessMesadata + Clone> Step<Autorouter<M>, Option<BoardEdit>, CriticalA
                 {
                     self.reidentify(autorouter)?;
                 }
-                Ok(ControlFlow::Continue(CriticalAutorouteStatus::Reconfigured))
+                Ok(ControlFlow::Continue(match reconfigured {
+                    InnerStatus::Reconfigured => CriticalAutorouteStatus::Reconfigured,
+                    _ => CriticalAutorouteStatus::LayerReconfigured,
+                }))
             }
         }
     }

@@ -150,6 +150,28 @@ pub enum AutorouterError {
     NothingToUndoForReconfiguration,
 }
 
+/// One recorded blocker attribution: a routing failure of `failed`
+/// attributed to `obstacle`; when the obstacle is part of a band routed
+/// for another ratline, `blocker` names that ratline.
+///
+/// Diagnostic-only — written by the negotiated-congestion reconfigurer,
+/// drained by frontends for blocker reports. Loose-primitive indices in
+/// `obstacle` name the geometry that was live at record time; they are
+/// not stable across reconfigurations.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockerRecord {
+    /// Monotonic sequence number of this record.
+    pub seq: usize,
+    /// Configuration position of the failing ratline.
+    pub position: usize,
+    /// The ratline whose route failed.
+    pub failed: RatlineUid,
+    /// The primitive that blocked the route.
+    pub obstacle: PrimitiveIndex,
+    /// The ratline owning the band the obstacle belongs to, if any.
+    pub blocker: Option<RatlineUid>,
+}
+
 #[derive(Clone, Getters)]
 pub struct Autorouter<M> {
     pub(super) board: Board<M>,
@@ -161,6 +183,9 @@ pub struct Autorouter<M> {
     /// primitives a head start on their path penalty instead of learning
     /// them from failures alone.
     pub(super) congestion_seed: BTreeMap<PrimitiveIndex, usize>,
+    /// Failure-attribution log — one [`BlockerRecord`] per blocking
+    /// obstacle per recorded routing failure.
+    pub(super) blocker_log: Vec<BlockerRecord>,
 }
 
 impl<M: AccessMesadata> Autorouter<M> {
@@ -170,6 +195,7 @@ impl<M: AccessMesadata> Autorouter<M> {
             board,
             ratsnests,
             congestion_seed: BTreeMap::new(),
+            blocker_log: Vec::new(),
         })
     }
 

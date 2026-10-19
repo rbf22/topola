@@ -37,6 +37,20 @@ macro_rules! metrics_struct {
                 writeln!(f, "== topola metrics ==")?;
                 writeln!(
                     f,
+                    "steps: {} (route {}, routed {}, skipped {}, planar-reconf {}, layer-reconf {}) — {:.1}ms total, route {:.1}ms, reconf {:.1}ms, max {:.1}ms",
+                    self.steps_total.load(Ordering::Relaxed),
+                    self.steps_route.load(Ordering::Relaxed),
+                    self.steps_routed.load(Ordering::Relaxed),
+                    self.steps_skipped.load(Ordering::Relaxed),
+                    self.steps_planar_reconfigured.load(Ordering::Relaxed),
+                    self.steps_layer_reconfigured.load(Ordering::Relaxed),
+                    ms(self.step_nanos_total.load(Ordering::Relaxed)),
+                    ms(self.step_nanos_route.load(Ordering::Relaxed)),
+                    ms(self.step_nanos_reconfigured.load(Ordering::Relaxed)),
+                    ms(self.step_nanos_max.load(Ordering::Relaxed)),
+                )?;
+                writeln!(
+                    f,
                     "construction: prenavmesh {}x ({:.1}ms), bases {}x ({:.1}ms) + from-base {}x ({:.1}ms) + constrained {}x ({:.1}ms, deltas {}x, hits {}), navmesh {}x ({:.1}ms, hits {}), navnodes {} edges {}",
                     self.prenavmesh_builds.load(Ordering::Relaxed),
                     ms(self.prenavmesh_nanos.load(Ordering::Relaxed)),
@@ -75,9 +89,18 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
-                    "reconfiguration: surgical_ripups {}, multilayer_surgical_reconfigures {}, search_states stored {} hits {}",
+                    "reconfiguration: planar {} layer {} ({:.1}ms), surgical_ripups {}, multilayer_surgical_reconfigures {}, emit candidates {}, backtraced {}, blockers {}, relayered {} refanout-fail {} kept-wrapped {}, search_states stored {} hits {}",
+                    self.planar_reconfigurations.load(Ordering::Relaxed),
+                    self.layer_reconfigurations.load(Ordering::Relaxed),
+                    ms(self.reconfigure_nanos.load(Ordering::Relaxed)),
                     self.surgical_ripups.load(Ordering::Relaxed),
                     self.multilayer_surgical_reconfigures.load(Ordering::Relaxed),
+                    self.emit_loop_candidates.load(Ordering::Relaxed),
+                    self.backtraced_ratlines.load(Ordering::Relaxed),
+                    self.blockers_recorded.load(Ordering::Relaxed),
+                    self.relayered_ratlines.load(Ordering::Relaxed),
+                    self.refanout_failures.load(Ordering::Relaxed),
+                    self.reconfig_kept_wrapped.load(Ordering::Relaxed),
                     self.search_state_stores.load(Ordering::Relaxed),
                     self.search_state_hits.load(Ordering::Relaxed),
                 )?;
@@ -163,6 +186,17 @@ macro_rules! metrics_struct {
 }
 
 metrics_struct!(
+    // Step accounting (Invoker step loop)
+    steps_total,
+    steps_route,
+    steps_routed,
+    steps_skipped,
+    steps_planar_reconfigured,
+    steps_layer_reconfigured,
+    step_nanos_total,
+    step_nanos_route,
+    step_nanos_reconfigured,
+    step_nanos_max,
     // Construction
     prenavmesh_builds,
     prenavmesh_nanos,
@@ -193,8 +227,17 @@ metrics_struct!(
     probes_failed,
     probes_backtracked,
     // Reconfiguration
+    planar_reconfigurations,
+    layer_reconfigurations,
+    reconfigure_nanos,
     surgical_ripups,
     multilayer_surgical_reconfigures,
+    emit_loop_candidates,
+    backtraced_ratlines,
+    blockers_recorded,
+    relayered_ratlines,
+    refanout_failures,
+    reconfig_kept_wrapped,
     search_state_stores,
     search_state_hits,
     // Critical-first routing
@@ -276,6 +319,43 @@ impl Drop for Timer {
                 .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
+}
+
+/// Records one stepped `Continue` of the top-level execution loop:
+/// step count and wall-clock nanos by [`crate::autorouter::execution::StepKind`].
+/// Compiles to a no-op without the `metrics` feature.
+#[inline(always)]
+pub fn record_step(kind: crate::autorouter::execution::StepKind, duration: std::time::Duration) {
+    #[cfg(feature = "metrics")]
+    {
+        use crate::autorouter::execution::StepKind;
+
+        incr(&METRICS.steps_total);
+        add(&METRICS.step_nanos_total, duration.as_nanos() as usize);
+        METRICS
+            .step_nanos_max
+            .fetch_max(duration.as_nanos() as u64, Ordering::Relaxed);
+        match kind {
+            StepKind::Route => incr(&METRICS.steps_route),
+            StepKind::Routed => incr(&METRICS.steps_routed),
+            StepKind::Skipped => incr(&METRICS.steps_skipped),
+            StepKind::PlanarReconfigured => incr(&METRICS.steps_planar_reconfigured),
+            StepKind::LayerReconfigured => incr(&METRICS.steps_layer_reconfigured),
+            StepKind::Other => (),
+        }
+        match kind {
+            StepKind::PlanarReconfigured | StepKind::LayerReconfigured => add(
+                &METRICS.step_nanos_reconfigured,
+                duration.as_nanos() as usize,
+            ),
+            StepKind::Route | StepKind::Routed | StepKind::Skipped => {
+                add(&METRICS.step_nanos_route, duration.as_nanos() as usize)
+            }
+            StepKind::Other => (),
+        }
+    }
+    #[cfg(not(feature = "metrics"))]
+    let _ = (kind, duration);
 }
 
 #[inline(always)]

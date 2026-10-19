@@ -29,7 +29,7 @@ use crate::{
 
 use super::{
     critical_autoroute::CriticalAutorouteExecutionStepper,
-    execution::{Command, ExecutionStepper},
+    execution::{Command, ExecutionStepper, StepKind},
     history::{History, HistoryError},
     measure_length::MeasureLengthExecutionStepper,
     multilayer_reconfigurator::MultilayerAutorouteReconfigurator,
@@ -109,6 +109,23 @@ pub enum InvokerError {
     Autorouter(#[from] AutorouterError),
 }
 
+/// Per-step report passed to progress callbacks of
+/// [`Invoker::execute_with_progress`] and [`Invoker::execute_with_timeout`].
+pub struct StepReport<'a, M> {
+    /// The invoker executing the command.
+    pub invoker: &'a Invoker<M>,
+    /// The ongoing stepper, from which a progress estimate may be
+    /// obtained via [`EstimateProgress::estimate_progress`]
+    /// ([`crate::stepper::EstimateProgress`]).
+    pub stepper: &'a ExecutionStepper<M>,
+    /// Number of steps taken so far, this step included (1-based).
+    pub index: usize,
+    /// Wall-clock duration of this step.
+    pub duration: Duration,
+    /// What this step did.
+    pub kind: StepKind,
+}
+
 #[derive(Getters, Dissolve)]
 pub struct Invoker<M> {
     /// Instance for executing desired autorouting commands.
@@ -151,47 +168,68 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
 
     /// Executes a command, invoking `on_progress` after each step.
     ///
-    /// The callback receives the ongoing [`ExecutionStepper`], from which a
-    /// progress estimate may be obtained via
-    /// [`EstimateProgress::estimate_progress`].
+    /// The callback receives a [`StepReport`] describing the step: its
+    /// duration, what it did ([`StepKind`]), and the ongoing
+    /// [`ExecutionStepper`], from which a progress estimate may be
+    /// obtained via [`EstimateProgress::estimate_progress`]
+    /// ([`crate::stepper::EstimateProgress`]).
     pub fn execute_with_progress(
         &mut self,
         command: Command,
-        mut on_progress: impl FnMut(&ExecutionStepper<M>),
+        mut on_progress: impl FnMut(&StepReport<M>),
     ) -> Result<(), InvokerError> {
         let mut execute = self.execute_stepper(command)?;
+        let mut index = 0usize;
 
         loop {
+            let started = Instant::now();
             let status = execute.step(self)?;
+            let duration = started.elapsed();
+            index += 1;
 
-            if let ControlFlow::Break(..) = status {
-                self.history.set_undone(std::iter::empty());
-                return Ok(());
-            }
+            let kind = match status {
+                ControlFlow::Break(..) => {
+                    self.history.set_undone(std::iter::empty());
+                    return Ok(());
+                }
+                ControlFlow::Continue(kind) => kind,
+            };
 
-            on_progress(&execute);
+            crate::metrics::record_step(kind, duration);
+            on_progress(&StepReport {
+                invoker: self,
+                stepper: &execute,
+                index,
+                duration,
+                kind,
+            });
         }
     }
 
     /// Executes a command like [`Invoker::execute_with_progress`], but
-    /// finishes it early once `timeout` has elapsed. Early finishing keeps
-    /// already routed bands and undoes only in-flight partial work.
+    /// finishes it early once `timeout` has elapsed or `max_steps` steps
+    /// have been taken. Early finishing keeps already routed bands and
+    /// undoes only in-flight partial work.
     ///
-    /// Returns `true` when the command was finished early due to the timeout.
+    /// Returns `true` when the command was finished early due to the
+    /// timeout or step budget.
     pub fn execute_with_timeout(
         &mut self,
         command: Command,
         timeout: Option<Duration>,
-        mut on_progress: impl FnMut(&ExecutionStepper<M>),
+        max_steps: Option<usize>,
+        mut on_progress: impl FnMut(&StepReport<M>),
     ) -> Result<bool, InvokerError> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let mut execute = self.execute_stepper(command)?;
         let mut timed_out = false;
+        let mut index = 0usize;
 
         loop {
             // Some geometry bugs manifest as panics deep in the
             // router; salvage already routed bands the same way an
             // early finish does instead of losing all the work.
+            let started = Instant::now();
             let status =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute.step(self)))
                 {
@@ -208,18 +246,34 @@ impl<M: AccessMesadata + Clone> Invoker<M> {
                         return Ok(true);
                     }
                 };
+            let duration = started.elapsed();
+            index += 1;
 
-            if let ControlFlow::Break(..) = status {
-                self.history.set_undone(std::iter::empty());
-                return Ok(timed_out);
-            }
+            let kind = match status {
+                ControlFlow::Break(..) => {
+                    self.history.set_undone(std::iter::empty());
+                    return Ok(timed_out);
+                }
+                ControlFlow::Continue(kind) => kind,
+            };
 
-            if !timed_out && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            crate::metrics::record_step(kind, duration);
+
+            if !timed_out
+                && (deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    || max_steps.is_some_and(|max_steps| index >= max_steps))
+            {
                 execute.finish_early(&mut self.autorouter);
                 timed_out = true;
             }
 
-            on_progress(&execute);
+            on_progress(&StepReport {
+                invoker: self,
+                stepper: &execute,
+                index,
+                duration,
+                kind,
+            });
         }
     }
 

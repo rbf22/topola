@@ -35,7 +35,7 @@ use crate::{
 pub trait MakeNextPlanarAutorouteConfiguration {
     fn next_configuration(
         &mut self,
-        autorouter: &Autorouter<impl AccessMesadata>,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Option<PlanarAutorouteConfiguration>;
 }
@@ -455,7 +455,7 @@ impl SccPermutationsPlanarAutorouteReconfigurer {
 impl MakeNextPlanarAutorouteConfiguration for SccPermutationsPlanarAutorouteReconfigurer {
     fn next_configuration(
         &mut self,
-        autorouter: &Autorouter<impl AccessMesadata>,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Option<PlanarAutorouteConfiguration> {
         // A weave continuation belongs to no SCC — there is no
@@ -605,7 +605,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
     /// their original routing order.
     fn record_blockers(
         &mut self,
-        autorouter: &Autorouter<impl AccessMesadata>,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Vec<RatlineUid> {
         let curr_ratline_index = *stepper.curr_ratline_index();
@@ -715,7 +715,19 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
         }
         self.last_recorded = Some((curr_ratline_index, obstacles.clone()));
 
+        crate::metrics::add(&crate::metrics::METRICS.blockers_recorded, obstacles.len());
+
         for obstacle in obstacles {
+            autorouter
+                .blocker_log
+                .push(crate::autorouter::BlockerRecord {
+                    seq: autorouter.blocker_log.len(),
+                    position: curr_ratline_index,
+                    failed,
+                    obstacle,
+                    blocker: band_of.get(&obstacle).copied(),
+                });
+
             // Only fixed primitives are counted: loose indices are
             // recycled as bands are undone and redrawn (and can even be
             // reused by later fixed additions), so a loose key could
@@ -879,7 +891,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
 impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorouteReconfigurer {
     fn next_configuration(
         &mut self,
-        autorouter: &Autorouter<impl AccessMesadata>,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
         stepper: &PlanarAutorouteExecutionStepper,
     ) -> Option<PlanarAutorouteConfiguration> {
         let blockers = self.record_blockers(autorouter, stepper);

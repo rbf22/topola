@@ -95,7 +95,7 @@ pub struct PlanarAutorouteConfigurationStatus {
 }
 
 /// The current status of the autoroute operation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanarAutorouteContinueStatus {
     /// The autoroute is currently running and in progress.
     Running,
@@ -183,6 +183,11 @@ impl PlanarAutorouteExecutionStepper {
 
         let extracted = self.dissolve_route_stepper_and_push_edits();
 
+        crate::metrics::add(
+            &crate::metrics::METRICS.backtraced_ratlines,
+            self.board_data_edits.len() - index,
+        );
+
         let board_edit = BoardEdit::new_from_edits(
             BoardDataEdit::merge_iter(self.board_data_edits.split_off(index)),
             LayoutEdit::merge_iter(self.layout_edits.split_off(index)),
@@ -248,8 +253,7 @@ impl PlanarAutorouteExecutionStepper {
         autorouter: &mut Autorouter<impl AccessMesadata>,
     ) -> Result<(), AutorouterError> {
         while self.curr_ratline_index < self.configuration.ratlines.len() {
-            self.attempt_ratline =
-                Some(self.configuration.ratlines[self.curr_ratline_index]);
+            self.attempt_ratline = Some(self.configuration.ratlines[self.curr_ratline_index]);
             let (origin, destination) = self
                 .configuration
                 .ratline_terminating_dots(autorouter, self.curr_ratline_index);

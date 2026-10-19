@@ -84,7 +84,10 @@ impl<M: AccessMesadata + Clone> Step<ActivityContext<'_, M>, String> for Activit
     ) -> Result<ControlFlow<String>, ActivityError> {
         match self {
             ActivityStepper::Interaction(interaction) => Ok(interaction.step(context)?),
-            ActivityStepper::Execution(execution) => Ok(execution.step(context.invoker)?),
+            ActivityStepper::Execution(execution) => Ok(match execution.step(context.invoker)? {
+                ControlFlow::Break(msg) => ControlFlow::Break(msg),
+                ControlFlow::Continue(..) => ControlFlow::Continue(()),
+            }),
         }
     }
 }

@@ -178,6 +178,22 @@ impl<PW, DW, SW, BW, CW, Cel, PI, DI, SI, BI> Geometry<PW, DW, SW, BW, CW, Cel, 
         self.graph.node_count() - self.removed_count
     }
 
+    /// Slots occupied by removal tombstones — removed-but-reversible
+    /// primitives and compounds reserved against index recycling.
+    pub fn tombstone_count(&self) -> usize {
+        self.removed_count
+    }
+
+    /// Total pending join references — joins recorded by
+    /// removed-but-reversible segs/bends that a future restoration may
+    /// replay.
+    pub fn pending_joiner_count(&self) -> usize {
+        self.pending_joiners
+            .values()
+            .map(|joiners| joiners.len())
+            .sum()
+    }
+
     /// Whether `index` still holds a primitive — false when the slot is
     /// vacant or was recycled by a compound node. Memoized verdicts
     /// embed primitive indices recorded under the ambient board state

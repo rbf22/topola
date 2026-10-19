@@ -40,8 +40,22 @@ use crate::{
     },
 };
 
+/// What a multilayer reconfiguration step actually changed — the bare
+/// `Reconfigured` status alone cannot distinguish a pass-through of an
+/// inner planar reconfiguration from a real layer-level move.
+#[derive(Clone, Copy, Debug)]
+pub enum MultilayerReconfigKind {
+    /// Only the inner planar machinery reconfigured (ordering change or
+    /// backtrace); no layer-level geometry changed.
+    Planar,
+    /// A mid-route via weave was applied or broken weaves were undone.
+    Weave,
+    /// A layer rotation / layer-map reassignment was applied.
+    LayerRotation,
+}
+
 pub type MultilayerReconfiguratorStatus =
-    ReconfiguratorStatus<(), PlanarAutorouteReconfiguratorStatus>;
+    ReconfiguratorStatus<MultilayerReconfigKind, PlanarAutorouteReconfiguratorStatus>;
 
 pub struct MultilayerAutorouteReconfigurator {
     stepper: MultilayerAutorouteExecutionStepper,
@@ -167,6 +181,10 @@ impl MultilayerAutorouteReconfigurator {
     {
         self.reconfiguration_count += 1;
 
+        crate::metrics::incr(&crate::metrics::METRICS.layer_reconfigurations);
+        let _reconfigure_timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.reconfigure_nanos);
+
         // Reset the reconfiguration trigger.
         self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
 
@@ -177,9 +195,9 @@ impl MultilayerAutorouteReconfigurator {
 
             match self.stepper.reconfigure(autorouter, configuration) {
                 Ok(_) => {
-                    return Ok(ControlFlow::Continue(
-                        ReconfiguratorStatus::Reconfigured(()),
-                    ))
+                    return Ok(ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(
+                        MultilayerReconfigKind::LayerRotation,
+                    )))
                 }
                 Err(AutorouterError::NothingToUndoForReconfiguration) => continue,
                 Err(err) => return Err(err),
@@ -234,9 +252,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                     })
                 };
 
-                if frontier.is_some()
-                    && !self.finished
-                    && !self.reconfiguration_budget_exhausted()
+                if frontier.is_some() && !self.finished && !self.reconfiguration_budget_exhausted()
                 {
                     self.reconfigurer.process_planar_result(
                         autorouter,
@@ -285,6 +301,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                 //    the connection hops layers partway through rather
                 //    than needing a whole corridor on one layer.
                 // 2. A layer rotation popped from the search queue.
+                let mut kind = MultilayerReconfigKind::Planar;
                 const STALL_LIMIT: usize = 4;
                 if self.stalls >= STALL_LIMIT && !self.finished {
                     self.stalls = 0;
@@ -297,6 +314,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                         for parent in broken {
                             self.stepper.unweave_ratline(autorouter, parent)?;
                         }
+                        kind = MultilayerReconfigKind::Weave;
                     } else {
                         let wove = stalled_ratline
                             .map(|ratline| self.stepper.weave_ratline(autorouter, ratline))
@@ -309,12 +327,14 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, MultilayerReconfi
                                 ControlFlow::Break(None) => {}
                                 ret => return Ok(ret),
                             }
+                        } else {
+                            kind = MultilayerReconfigKind::Weave;
                         }
                     }
                 }
-                Ok(ControlFlow::Continue(
-                    ReconfiguratorStatus::Reconfigured(()),
-                ))
+                Ok(ControlFlow::Continue(ReconfiguratorStatus::Reconfigured(
+                    kind,
+                )))
             }
             Err(err) => {
                 if self.finished {

@@ -118,4 +118,33 @@ pub struct Cli {
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Finish routing early after this many execution steps, keeping already routed bands. Unlike --max-seconds this is machine-independent"
+    )]
+    pub max_steps: Option<usize>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Seed for the preconfiguration ratline shuffle (single-run only; --jobs derives seeds per worker)"
+    )]
+    pub seed: Option<u64>,
+    #[arg(
+        long,
+        help = "Disable wall-clock-driven reconfiguration: per-ratline timeouts never fire, so reconfiguration is purely failure-driven. Combine with --max-steps and --seed for reproducible benchmark runs"
+    )]
+    pub deterministic: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Write a CSV time series of per-step progress (elapsed time, step kind, ratline position, unrouted/unconnected counts, geometry ledger sizes). With --jobs, one file per worker named FILE-j<N>.csv"
+    )]
+    pub progress_csv: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Write a CSV of (failing ratline, blocking ratline/obstacle) pairs recorded at each routing failure"
+    )]
+    pub blockers_csv: Option<PathBuf>,
 }

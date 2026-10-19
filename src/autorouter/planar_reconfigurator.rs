@@ -283,6 +283,10 @@ impl PlanarAutorouteReconfigurator {
         self.reconfiguration_count += 1;
         self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
 
+        crate::metrics::incr(&crate::metrics::METRICS.planar_reconfigurations);
+        let _reconfigure_timer =
+            crate::metrics::Timer::start(&crate::metrics::METRICS.reconfigure_nanos);
+
         // Bound the emit-and-apply cycle: an ordering that differs
         // from all previously emitted ones can still fail to install
         // (e.g. nothing left to undo), and an unbounded loop here
@@ -294,6 +298,7 @@ impl PlanarAutorouteReconfigurator {
         // of ending the command.
         let mut tail_candidate = None;
         for _ in 0..256 {
+            crate::metrics::incr(&crate::metrics::METRICS.emit_loop_candidates);
             let Some(mut configuration) = self
                 .reconfigurer
                 .next_configuration(autorouter, &self.stepper)

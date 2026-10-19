@@ -51,7 +51,7 @@ fn zero_timeout_reverts_in_flight_work() {
     let command = autoroute_command(invoker.autorouter().board());
 
     let timed_out = invoker
-        .execute_with_timeout(command, Some(Duration::ZERO), |_| {})
+        .execute_with_timeout(command, Some(Duration::ZERO), None, |_| {})
         .unwrap();
     assert!(timed_out);
 
@@ -73,7 +73,7 @@ fn generous_timeout_completes_normally() {
     let command = autoroute_command(invoker.autorouter().board());
 
     let timed_out = invoker
-        .execute_with_timeout(command, Some(Duration::from_secs(120)), |_| {})
+        .execute_with_timeout(command, Some(Duration::from_secs(120)), None, |_| {})
         .unwrap();
     assert!(!timed_out);
 
@@ -96,6 +96,7 @@ fn zero_reconfigurations_completes_normally() {
         .execute_with_timeout(
             Command::Autoroute(selection, options),
             Some(Duration::from_secs(120)),
+            None,
             |_| {},
         )
         .unwrap();
@@ -103,6 +104,73 @@ fn zero_reconfigurations_completes_normally() {
 
     let (mut autorouter, ..) = invoker.dissolve();
     common::assert_that_all_ratlines_besides_gnd_are_autorouted(&mut autorouter);
+}
+
+#[test]
+fn max_steps_terminates_early_and_keeps_geometry_clean() {
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+
+    let initial_node_count = invoker.autorouter().board().layout().drawing().node_count();
+    let command = autoroute_command(invoker.autorouter().board());
+
+    let mut steps = 0usize;
+    let timed_out = invoker
+        .execute_with_timeout(command, None, Some(1), |_| steps += 1)
+        .unwrap();
+    assert!(timed_out);
+    assert_eq!(steps, 1);
+
+    // Early finishing must have undone in-flight partial work.
+    assert_eq!(
+        invoker.autorouter().board().layout().drawing().node_count(),
+        initial_node_count,
+    );
+    common::assert_no_loose_nodes(invoker.autorouter());
+    invoker.undo().unwrap();
+}
+
+#[test]
+fn seeded_run_is_deterministic_across_invokers() {
+    // The step-kind sequence and resulting geometry must be a pure
+    // function of board + options when the timeout accumulator is
+    // frozen, regardless of wall-clock speed.
+    use topola::stepper::TimeoutOptions as TO;
+
+    let run = || {
+        let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+        let mut invoker = common::create_invoker_and_assert(autorouter);
+        let Command::Autoroute(selection, mut options) =
+            autoroute_command(invoker.autorouter().board())
+        else {
+            unreachable!()
+        };
+        options.timeout = TO {
+            initial: f64::INFINITY,
+            progress_bonus: 0.0,
+        };
+        options.shuffle_seed = 7;
+
+        let mut kinds = Vec::new();
+        invoker
+            .execute_with_timeout(
+                Command::Autoroute(selection, options),
+                None,
+                Some(1000),
+                |report| kinds.push(report.kind),
+            )
+            .unwrap();
+
+        (
+            kinds,
+            invoker.autorouter().board().layout().drawing().node_count(),
+        )
+    };
+
+    let (kinds_a, nodes_a) = run();
+    let (kinds_b, nodes_b) = run();
+    assert_eq!(kinds_a, kinds_b);
+    assert_eq!(nodes_a, nodes_b);
 }
 
 #[test]

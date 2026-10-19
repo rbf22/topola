@@ -9,15 +9,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     autorouter::{
-        critical_autoroute::{CriticalAutorouteExecutionStepper, CriticalAutorouteOptions},
+        critical_autoroute::{
+            CriticalAutorouteExecutionStepper, CriticalAutorouteOptions, CriticalAutorouteStatus,
+        },
         multilayer_autoroute::MultilayerAutorouteOptions,
-        multilayer_reconfigurator::MultilayerAutorouteReconfigurator,
-        planar_reconfigurator::PlanarAutorouteReconfigurator,
+        multilayer_reconfigurator::{
+            MultilayerAutorouteReconfigurator, MultilayerReconfigKind,
+            MultilayerReconfiguratorStatus,
+        },
+        planar_autoroute::PlanarAutorouteContinueStatus,
+        planar_reconfigurator::{
+            PlanarAutorouteReconfigurator, PlanarAutorouteReconfiguratorStatus,
+        },
     },
     board::{edit::BoardEdit, AccessMesadata},
     layout::via::ViaWeight,
     router::ng,
-    stepper::{Abort, EstimateProgress, GetTimeoutProgress, LinearScale, Step},
+    stepper::{
+        Abort, EstimateProgress, GetTimeoutProgress, LinearScale, ReconfiguratorStatus, Step,
+    },
 };
 
 use super::{
@@ -48,6 +58,62 @@ pub enum Command {
     MeasureLength(BandSelection),
 }
 
+/// Classification of what an [`ExecutionStepper`] step did. Returned in
+/// the `Continue` payload of [`Step`] so callers can attribute progress
+/// and time to routing phases without peeking at stepper internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepKind {
+    /// Incremental drawing of a band (no ratline completed this step).
+    Route,
+    /// A band was committed this step.
+    Routed,
+    /// The ratline was already routed and was skipped.
+    Skipped,
+    /// Planar-level reconfiguration: ordering change, backtrace, or
+    /// surgical rip-up.
+    PlanarReconfigured,
+    /// Multilayer-level reconfiguration: layer rotation, weave, or
+    /// unweave.
+    LayerReconfigured,
+    /// Non-autoroute command work (PlaceVia, ShiftComponents, ...).
+    Other,
+}
+
+fn continue_status_kind(status: PlanarAutorouteContinueStatus) -> StepKind {
+    match status {
+        PlanarAutorouteContinueStatus::Running => StepKind::Route,
+        PlanarAutorouteContinueStatus::Routed(..) => StepKind::Routed,
+        PlanarAutorouteContinueStatus::Skipped(..) => StepKind::Skipped,
+    }
+}
+
+fn planar_reconfigurator_kind(status: PlanarAutorouteReconfiguratorStatus) -> StepKind {
+    match status {
+        ReconfiguratorStatus::Running(inner) => continue_status_kind(inner),
+        ReconfiguratorStatus::Reconfigured(..) => StepKind::PlanarReconfigured,
+    }
+}
+
+fn multilayer_reconfigurator_kind(status: MultilayerReconfiguratorStatus) -> StepKind {
+    match status {
+        ReconfiguratorStatus::Running(inner) => planar_reconfigurator_kind(inner),
+        ReconfiguratorStatus::Reconfigured(kind) => match kind {
+            MultilayerReconfigKind::Planar => StepKind::PlanarReconfigured,
+            MultilayerReconfigKind::Weave | MultilayerReconfigKind::LayerRotation => {
+                StepKind::LayerReconfigured
+            }
+        },
+    }
+}
+
+fn critical_autoroute_kind(status: CriticalAutorouteStatus) -> StepKind {
+    match status {
+        CriticalAutorouteStatus::Running(inner) => continue_status_kind(inner),
+        CriticalAutorouteStatus::Reconfigured => StepKind::PlanarReconfigured,
+        CriticalAutorouteStatus::LayerReconfigured => StepKind::LayerReconfigured,
+    }
+}
+
 #[enum_dispatch(GetDebugOverlayData)]
 pub enum ExecutionStepper<M> {
     MultilayerAutoroute(MultilayerAutorouteReconfigurator),
@@ -64,29 +130,35 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
     fn step_catch_err(
         &mut self,
         autorouter: &mut Autorouter<M>,
-    ) -> Result<ControlFlow<(Option<BoardEdit>, String)>, InvokerError> {
+    ) -> Result<ControlFlow<(Option<BoardEdit>, String), StepKind>, InvokerError> {
         Ok(match self {
             ExecutionStepper::MultilayerAutoroute(autoroute) => match autoroute.step(autorouter)? {
-                ControlFlow::Continue(..) => ControlFlow::Continue(()),
+                ControlFlow::Continue(status) => {
+                    ControlFlow::Continue(multilayer_reconfigurator_kind(status))
+                }
                 ControlFlow::Break(edit) => {
                     ControlFlow::Break((edit, "finished multilayer autorouting".to_string()))
                 }
             },
             ExecutionStepper::PlanarAutoroute(autoroute) => match autoroute.step(autorouter)? {
-                ControlFlow::Continue(..) => ControlFlow::Continue(()),
+                ControlFlow::Continue(status) => {
+                    ControlFlow::Continue(planar_reconfigurator_kind(status))
+                }
                 ControlFlow::Break(edit) => {
                     ControlFlow::Break((edit, "finished planar autorouting".to_string()))
                 }
             },
             ExecutionStepper::CriticalAutoroute(autoroute) => match autoroute.step(autorouter)? {
-                ControlFlow::Continue(..) => ControlFlow::Continue(()),
+                ControlFlow::Continue(status) => {
+                    ControlFlow::Continue(critical_autoroute_kind(status))
+                }
                 ControlFlow::Break(edit) => {
                     ControlFlow::Break((edit, "finished critical autorouting".to_string()))
                 }
             },
             ExecutionStepper::TopoAutoroute(autoroute) => {
                 let ret = match autoroute.step() {
-                    ControlFlow::Continue(()) => ControlFlow::Continue(()),
+                    ControlFlow::Continue(()) => ControlFlow::Continue(StepKind::Other),
                     ControlFlow::Break(false) => {
                         ControlFlow::Break((None, "topo-autorouting failed".to_string()))
                     }
@@ -131,12 +203,15 @@ impl<M: AccessMesadata + Clone> ExecutionStepper<M> {
     }
 }
 
-impl<M: AccessMesadata + Clone> Step<Invoker<M>, String> for ExecutionStepper<M> {
+impl<M: AccessMesadata + Clone> Step<Invoker<M>, String, StepKind> for ExecutionStepper<M> {
     type Error = InvokerError;
 
-    fn step(&mut self, invoker: &mut Invoker<M>) -> Result<ControlFlow<String>, InvokerError> {
+    fn step(
+        &mut self,
+        invoker: &mut Invoker<M>,
+    ) -> Result<ControlFlow<String, StepKind>, InvokerError> {
         match self.step_catch_err(&mut invoker.autorouter) {
-            Ok(ControlFlow::Continue(())) => Ok(ControlFlow::Continue(())),
+            Ok(ControlFlow::Continue(kind)) => Ok(ControlFlow::Continue(kind)),
             Ok(ControlFlow::Break((maybe_edit, msg))) => {
                 if let (Some(command), Some(edit)) = (invoker.ongoing_command.take(), maybe_edit) {
                     invoker.history.do_(command, Some(edit));

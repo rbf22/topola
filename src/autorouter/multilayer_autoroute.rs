@@ -871,6 +871,15 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         for (ratline, layer) in layer_fixes {
             self.plan.layer_map.insert(ratline, layer);
         }
+        crate::metrics::add(&crate::metrics::METRICS.relayered_ratlines, relayered.len());
+        crate::metrics::add(
+            &crate::metrics::METRICS.reconfig_kept_wrapped,
+            wrapped_count,
+        );
+        crate::metrics::add(
+            &crate::metrics::METRICS.refanout_failures,
+            refanout_failures,
+        );
         log::debug!(
             "multilayer reconfigure: {} changed, {} relayered, {} kept wrapped, {} re-fanout failed",
             changed.len(),

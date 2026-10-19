@@ -33,6 +33,7 @@ fp-info-cache
 # ---> Topola
 *.ses
 dist/
+bench/out/
 
 # ignore manpages
 topola.1

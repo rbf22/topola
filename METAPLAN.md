@@ -1008,3 +1008,119 @@ regression test.
 - `.cmd` replay determinism under `--critical-first` is wall-clock
   dependent (probe timeouts), like the existing oscillating-board
   tests.
+
+## Performance instrumentation — implemented
+
+The CLI now exposes deterministic benchmarking and per-step telemetry.
+A run is a pure function of (board, options, seed, step budget) when
+`--deterministic` is set; wall-clock `--max-seconds` remains available
+for ordinary runs.
+
+### Flags
+
+| flag | effect |
+|---|---|
+| `--deterministic` | sets the progress-vs-time timeout accumulator to `{INFINITY, 0}` — reconfiguration becomes purely failure-driven; removes the machine-speed-dependent preemptive trigger |
+| `--max-steps N` | machine-independent step budget; the run stops after N top-level `step()` calls |
+| `--seed N` | sets both `shuffle_seed` and `layer_seed` |
+| `--progress-csv FILE` | per-step time series (throttled: state changes + ~1 s heartbeat) |
+| `--blockers-csv FILE` | blocker attribution pairs from negotiated-congestion reconfiguration |
+
+`--jobs` workers get their own `--progress-csv` files suffixed with the
+job index; sibling termination on first completion stays wall-clock
+dependent, so golden comparisons use single-job deterministic runs.
+
+### Progress CSV columns
+
+`elapsed_s,step,kind,step_ms,position,total,unrouted,unconnected,tombstones,pending_joiners`
+
+- `kind` is the `StepKind` of the step that produced the row:
+  `route` (attempt in flight), `routed`, `skipped`, `planar-reconf`,
+  `layer-reconf` (multilayer rotation/weave/relayer — distinct from
+  inner-planar pass-throughs), `other`.
+- `unrouted` counts ratlines without a `band_termseg`; `unconnected`
+  counts electrically-open ratlines across principal layers. They
+  diverge when a band exists but is a dangling weave half — a real
+  failure mode, not a reporting bug (astable deterministic run: 4
+  unrouted / 16 unconnected = 12 dangling bands).
+- `tombstones` is `geometry.removed_count` — reserved slots awaiting
+  possible reversal; `pending_joiners` counts removed-but-reversible
+  attachments pinning endpoints.
+
+### Interpreting the signals
+
+- **Plateau in `position`/`unrouted`** = stall; correlate with
+  `planar-reconf`/`layer-reconf` rows to see whether the router is
+  working or idling inside one step.
+- **Sawtooth in `unrouted`** = rip-up churn.
+- **`step_nanos_max`** (metrics dump) vs the step-time budget = the
+  deadline-lag signal — a single step that dwarfs `--max-seconds` is
+  an uninterruptible hot spot (the pre-fix A\* drain showed up here).
+- **Emit-loop `candidates`** spikes = the permutation drain — A\*
+  re-popping duplicate orderings; bounded per call, resumable.
+- **`dedup_truncations`** counts that bound firing; if it fires often
+  the emit loop is wasting budget on duplicates.
+- **`pending_joiners_held`** counts vias kept alive by pending joins —
+  each is a would-be corruption under the pre-fix regime; a large
+  value means heavy interleaving of weave/relayer edits with band
+  edits.
+
+### Reconfiguration counters (metrics dump)
+
+`reconfiguration: planar N layer M` now reports honestly —
+`MultilayerReconfigKind` distinguishes pass-through planar reconfigs,
+weaves, and true layer rotations that previously all surfaced as
+`Reconfigured(())`. Also emitted: `emit candidates`, `backtraced`
+(distance + ratline count), `blockers`, `relayered`,
+`refanout-fail`, `kept-wrapped`, `search_states stored/hits`.
+
+### Determinism audit
+
+- Seeds are hand-rolled and deterministic (splitmix64 for
+  `layer_seed`, xorshift for `shuffle_seed`); no `rand`/`thread_rng`
+  in `src/`.
+- All `HashMap`/`HashSet` uses in decision paths are keyed lookups or
+  membership sets; emitted configs use `BTreeSet`. No
+  iteration-order leaks found.
+- The one decision-affecting wall-clock read is
+  `TimeVsProgressAccumulatorTimeout::update()`
+  (`stepper.rs`); `--deterministic` neutralizes it. Other `Instant`
+  reads are the outer deadline (by design) and display-only
+  `timeout_progress` values.
+- Verified: two identical `--deterministic --max-steps` heart runs
+  produce identical step/kind CSV sequences and byte-identical `.ses`.
+- `.cmd` replay remains wall-clock dependent for probe timeouts.
+
+### Golden baselines — `bench/golden.tsv`
+
+`scripts/bench.sh` runs a fixture×mode matrix under
+`--deterministic --max-steps --seed 0`, captures
+unrouted/unconnected/`.ses` SHA, and either compares against
+`bench/golden.tsv` (`--check`) or rewrites it (`--write-golden`).
+The `.ses` SHA makes trajectory regressions visible even when counts
+match. Wall-clock rows are informational only.
+
+Golden rows are seeded from the data already in this document and the
+test suite: the critical-first results table, per-fixture test
+expectations (astable 16/16, lm317 15/15, optoisolator 20/20), and
+fresh deterministic measurements. `CANDE_DSN` env var supplies the
+external candE board; missing fixtures are skipped.
+
+Surprises surfaced by the deterministic matrix:
+
+- **Critical-first loses under frozen timeouts**: heart 164 vs 148
+  unrouted, candE 2383 vs 2365 — and candE cf costs 84–141 s vs ~4 s
+  (carving + probing overhead with no salvageable win). Under
+  wall-clock budgets cf looked neutral-to-better; the timeout
+  accumulator was doing trajectory-steering work that masked this.
+- **heart ml and mlcf produce byte-identical output** (same SHA) —
+  the critical-first flag is a no-op through the multilayer path.
+- **astable deterministic**: 4 unrouted / 16 unconnected vs 0/0
+  wall-clock — frozen timeouts expose how much that fixture's success
+  depends on preemptive reconfiguration.
+
+### Profiling hotspots
+
+For a stuck run: `sample <pid> 5` (already pinpointed the A\* drain),
+`samply record`, or `cargo flamegraph` — the release profile has
+debug info enabled.

@@ -1,0 +1,15 @@
+#board	mode	steps	seed	unrouted	unconnected	total	ses_sha256	wall_s	status
+tests/unilayer/0603_breakout/0603_breakout.dsn		20000	0	0	0	2	e3e4cd5daa48	0.001	ok
+tests/unilayer/0603_breakout/0603_breakout.dsn	--surgical-ripup	20000	0	0	0	2	e3e4cd5daa48	0.003	ok
+tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn		50000	0	4	30	36	350e51eea814	0.589	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn		60000	0	148	285	176	27b7424e3b07	1.241	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first	60000	0	164	304	176	2d49948babcc	1.585	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--multilayer	60000	0	165	310	176	5eaf08d1a558	0.543	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first --multilayer	60000	0	165	310	176	5eaf08d1a558	1.743	ok
+tests/unilayer/critical_corridor/critical_corridor.dsn	--critical-first	30000	0	12	14	14	dc47d9b2adb4	0.271	ok
+tests/external/optoisolator_4n35/optoisolator_4n35.dsn		30000	0	0	0	20	a0d433e62d39	0.044	ok
+tests/external/fasttest/fasttest.dsn	--multilayer	30000	0	58	64	83	dfaf4445d314	1.096	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer	30000	0	4	16	16	8e7bbef32e2e	0.231	ok
+tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn	--multilayer	30000	0	0	0	15	6e4659759826	0.021	ok
+/Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn		100000	0	2365	7472	2403	a8b7a65e9cea	4.068	ok
+/Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn	--critical-first	100000	0	2383	7484	2403	08dd2e8dd33d	84.344	ok
