@@ -169,6 +169,27 @@ pub struct Cli {
     pub anneal_carve_top_k: Option<usize>,
     #[arg(
         long,
+        value_name = "W",
+        requires = "anneal",
+        help = "Weight on route length / preferred-layer deviation (default 1.0); raising it pressures fanout vias down in discrete mode"
+    )]
+    pub anneal_w_length: Option<f64>,
+    #[arg(
+        long,
+        value_name = "W",
+        requires = "anneal",
+        help = "Weight on z-tortuosity (layer hops) in continuous mode (default 10.0)"
+    )]
+    pub anneal_w_via: Option<f64>,
+    #[arg(
+        long,
+        value_name = "F",
+        requires = "anneal",
+        help = "Fraction of a curve's samples below which a layer run merges into its neighbors instead of becoming a via hop (default 0.15)"
+    )]
+    pub anneal_min_run_fraction: Option<f64>,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,

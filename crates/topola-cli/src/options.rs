@@ -145,7 +145,10 @@ fn fanout_clearance(board: &Board<SpecctraMesadata>) -> f64 {
 }
 
 /// `--anneal` flag → `AnnealOptions`: the CLI exposes mode, seed,
-/// sweep count, and corridor carving; the rest stay at the
+/// sweep count, corridor carving, and the quality weights (`w_length`
+/// doubles as the layer-deviation penalty in discrete mode — the
+/// via-pressure lever — while `w_via`/`min_run_fraction` tune
+/// continuous-mode hop cost and hop merging); the rest stay at the
 /// calibrated defaults.
 pub fn make_anneal_options(args: &Cli) -> Option<AnnealOptions> {
     args.anneal.then(|| AnnealOptions {
@@ -156,6 +159,9 @@ pub fn make_anneal_options(args: &Cli) -> Option<AnnealOptions> {
         seed: args.anneal_seed.unwrap_or(0),
         iterations: args.anneal_iterations.unwrap_or(300),
         carve_top_k: args.anneal_carve_top_k.unwrap_or(0),
+        w_length: args.anneal_w_length.unwrap_or(1.0),
+        w_via: args.anneal_w_via.unwrap_or(10.0),
+        min_run_fraction: args.anneal_min_run_fraction.unwrap_or(0.15),
         ..AnnealOptions::default()
     })
 }
