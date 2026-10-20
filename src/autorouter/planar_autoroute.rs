@@ -410,33 +410,35 @@ impl PlanarAutorouteExecutionStepper {
             self.store_search_state(autorouter, origin, destination, state);
         }
 
-        // Drop the ripped-up ratlines' edit slots, preserving the
-        // per-position alignment between the edit vecs and the
-        // configuration's ratlines. The dropped entries merge into
-        // `pending_edit` before the surgical removals so each ripped
-        // band's creation and removal records coalesce into a no-op
-        // instead of resurrecting the band on undo.
-        let mut indices: Vec<_> = rip_up
+        // Drop the ripped-up ratlines' edit slots. The dropped entries
+        // merge into `pending_edit` before the surgical removals so
+        // each ripped band's creation and removal records coalesce into
+        // a no-op instead of resurrecting the band on undo.
+        //
+        // Slots are located via `slot_ratlines` — NOT by position in
+        // `configuration.ratlines`. The edit vecs are append-only in
+        // attempt order, while `install_configuration` swaps in a
+        // reordered ratline list on every reconfiguration, so a
+        // ratline's current position no longer matches the slot its
+        // edits were pushed into.
+        let mut indices: Vec<usize> = rip_up
             .iter()
-            .filter_map(|ratline| {
-                self.configuration
-                    .ratlines
+            .flat_map(|ratline| {
+                self.slot_ratlines
                     .iter()
-                    .position(|uid| uid == ratline)
-                    .map(|index| (index, *ratline))
+                    .enumerate()
+                    .filter_map(move |(index, slot)| (*slot == Some(*ratline)).then_some(index))
             })
-            .filter(|(index, _)| *index < self.layout_edits.len())
             .collect();
-        indices.sort_unstable_by_key(|(index, _)| *index);
+        indices.sort_unstable();
         indices.dedup();
 
+        debug_assert_eq!(self.slot_ratlines.len(), self.layout_edits.len());
+        debug_assert_eq!(self.slot_ratlines.len(), self.board_data_edits.len());
+
         let mut ripped_edits = BoardEdit::new();
-        for (index, ratline) in indices.iter().rev() {
-            debug_assert_eq!(
-                self.slot_ratlines.remove(*index),
-                Some(*ratline),
-                "edit slot {index} must hold the ripped ratline's edits",
-            );
+        for index in indices.iter().rev() {
+            self.slot_ratlines.remove(*index);
             ripped_edits
                 .layout_edit
                 .merge(self.layout_edits.remove(*index));

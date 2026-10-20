@@ -575,6 +575,11 @@ pub struct NegotiatedCongestionPlanarAutorouteReconfigurer {
     /// reconfigurer, which rotates blockers' layers as well as the
     /// failed ratline's.
     last_blockers: Vec<RatlineUid>,
+    /// `(fixed, total)` obstacle counts of the most recently recorded
+    /// failure. Rip-up can only remove the routed share, so a failure
+    /// dominated by fixed geometry does not benefit from ripping the
+    /// few bands that also blocked it.
+    last_obstacle_stats: (usize, usize),
     options: PlanarAutorouteOptions,
 }
 
@@ -607,6 +612,7 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             emitted,
             last_recorded: None,
             last_blockers: vec![],
+            last_obstacle_stats: (0, 0),
             options: *options,
         }
     }
@@ -719,6 +725,20 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
             .collect();
 
         self.last_blockers = blockers.clone();
+        self.last_obstacle_stats = (
+            obstacles
+                .iter()
+                .filter(|obstacle| {
+                    matches!(
+                        obstacle,
+                        PrimitiveIndex::FixedDot(_)
+                            | PrimitiveIndex::FixedSeg(_)
+                            | PrimitiveIndex::FixedBend(_)
+                    )
+                })
+                .count(),
+            obstacles.len(),
+        );
 
         if self
             .last_recorded
@@ -902,6 +922,14 @@ impl NegotiatedCongestionPlanarAutorouteReconfigurer {
     }
 }
 
+/// Whether ripping up the recorded blocking bands can plausibly free
+/// the failed ratline's corridor: the routed share of blocking
+/// obstacles must be at least a fifth. A failure whose blockers are
+/// almost all fixed pads/copper cannot be opened by rip-up.
+fn rip_up_worthwhile((fixed, total): (usize, usize)) -> bool {
+    (total - fixed) * 5 >= total
+}
+
 impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorouteReconfigurer {
     fn next_configuration(
         &mut self,
@@ -913,8 +941,15 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
         // Surgical rip-up: move the blocking ratlines to right after
         // the failed one. Applying this configuration removes only the
         // blocker bands instead of backtracing away every band routed
-        // since the first ordering difference.
-        if self.options.surgical_ripup && !blockers.is_empty() {
+        // since the first ordering difference. Skip it when the failure
+        // was dominated by fixed geometry — ripping the routed-band
+        // minority cannot open a pad-walled corridor, so the rip and
+        // the doomed reroute would just burn budget (F18: ~85% of
+        // blocker hits corpus-wide are fixed primitives).
+        if self.options.surgical_ripup
+            && !blockers.is_empty()
+            && rip_up_worthwhile(self.last_obstacle_stats)
+        {
             let failed = stepper.configuration().ratlines[*stepper.curr_ratline_index()];
             let blocker_set: BTreeSet<RatlineUid> = blockers.iter().copied().collect();
 
@@ -985,7 +1020,19 @@ impl MakeNextPlanarAutorouteConfiguration for NegotiatedCongestionPlanarAutorout
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{next_permutation, Permutations};
+    use super::{next_permutation, rip_up_worthwhile, Permutations};
+
+    /// Rip-up is worthwhile only when routed obstacles are a fifth or
+    /// more of the blocker set (F18 board-level threshold applied
+    /// per-failure): (fixed, total) with routed share below 20% skips.
+    #[test]
+    fn rip_up_gate_follows_routed_share() {
+        assert!(rip_up_worthwhile((8, 10))); // 2/10 routed = 20%
+        assert!(rip_up_worthwhile((0, 5))); // all routed
+        assert!(!rip_up_worthwhile((9, 10))); // 1/10 routed
+        assert!(!rip_up_worthwhile((10, 10))); // all fixed
+        assert!(rip_up_worthwhile((0, 0))); // vacuous: no obstacles recorded
+    }
 
     /// Full-permutation enumeration must yield all n! distinct
     /// orderings, first the identity, each exactly once.

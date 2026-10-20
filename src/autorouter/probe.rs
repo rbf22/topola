@@ -339,20 +339,24 @@ impl<M: AccessMesadata + Clone> Autorouter<M> {
     /// The unrouted ratlines of the principal-layer ratsnest, in edge
     /// order — the work list shared by the sequential and parallel
     /// probe drivers.
+    ///
+    /// Routed-ness is decided by the board's band registry, not the
+    /// ratline's `band_termseg` mark: the mark lives outside the edit
+    /// record, so undoing a band's creation leaves it stale (see the
+    /// note in `planar_reconfigurer`). The registry is the same source
+    /// `planar_autoroute` consults when skipping already-routed pairs.
     fn unrouted_ratlines(&self) -> Vec<RatlineUid> {
-        let ratsnest = self.ratsnests.on_principal_layer(0);
-        ratsnest
+        self.ratsnests
+            .on_principal_layer(0)
             .graph()
             .edge_indices()
-            .filter(|&index| {
-                ratsnest
-                    .graph()
-                    .edge_weight(index)
-                    .is_some_and(|weight| weight.band_termseg.is_none())
-            })
             .map(|index| RatlineUid {
                 principal_layer: 0,
                 index,
+            })
+            .filter(|ratline| {
+                let (origin, destination) = ratline.ref_(self).endpoint_dots();
+                self.board.band_between_nodes(origin, destination).is_none()
             })
             .collect()
     }
