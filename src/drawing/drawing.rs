@@ -1446,14 +1446,14 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 self.infringements_among(
                     node,
                     self.locate_possible_infringees(node)
-                        .filter_map(|n| {
+                        .filter_map(|(aabb, n)| {
                             if let GenericNode::Primitive(primitive_node) = n {
-                                Some(primitive_node)
+                                Some((aabb, primitive_node))
                             } else {
                                 None
                             }
                         })
-                        .filter(|primitive_node| {
+                        .filter(|(_, primitive_node)| {
                             matches!(
                                 primitive_node,
                                 PrimitiveIndex::LooseDot(..)

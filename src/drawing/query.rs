@@ -4,6 +4,7 @@
 
 use geo::Line;
 use petgraph::visit::Walker;
+use rstar::{Envelope, AABB};
 use specctra_core::rules::{Conditions, GetConditions};
 
 use crate::{
@@ -15,6 +16,7 @@ use crate::{
     },
     geometry::{
         primitive::{AccessPrimitiveShape, PrimitiveShape, SegShape},
+        shape::AccessShape,
         GenericNode, GetLayer,
     },
     graph::GenericIndex,
@@ -188,9 +190,9 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         self.overlapees_among(
             infringer,
             self.locate_possible_infringees(infringer)
-                .filter_map(move |infringee_node| {
+                .filter_map(move |(aabb, infringee_node)| {
                     if let GenericNode::Primitive(primitive_node) = infringee_node {
-                        Some(primitive_node)
+                        Some((aabb, primitive_node))
                     } else {
                         None
                     }
@@ -202,16 +204,16 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
                 //
                 // Infringement with loose dots resulted in false positives for
                 // line-of-sight paths.
-                .filter(|&infringee| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
-                .filter(move |&infringee| !self.are_connectable(infringer, infringee))
-                .filter(move |infringee| predicate(self, infringer, *infringee)),
+                .filter(|&(_, infringee)| !matches!(infringee, PrimitiveIndex::LooseDot(..)))
+                .filter(move |&(_, infringee)| !self.are_connectable(infringer, infringee))
+                .filter(move |&(_, infringee)| predicate(self, infringer, infringee)),
         )
     }
 
     pub(super) fn infringements_among<'a>(
         &'a self,
         infringer: PrimitiveIndex,
-        it: impl Iterator<Item = PrimitiveIndex> + 'a,
+        it: impl Iterator<Item = (AABB<[f64; 3]>, PrimitiveIndex)> + 'a,
     ) -> impl Iterator<Item = Infringement> + 'a {
         self.overlapees_among(infringer, it)
             .filter(move |infringement| {
@@ -240,27 +242,28 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
         self.overlapees_among(
             overlapper,
             self.locate_possible_infringees(overlapper)
-                .filter_map(move |infringee_node| {
+                .filter_map(move |(aabb, infringee_node)| {
                     if let GenericNode::Primitive(primitive_node) = infringee_node {
-                        Some(primitive_node)
+                        Some((aabb, primitive_node))
                     } else {
                         None
                     }
                 })
-                .filter(move |&overlapee| overlapper != overlapee),
+                .filter(move |&(_, overlapee)| overlapper != overlapee),
         )
     }
 
     pub(super) fn overlapees_among<'a>(
         &'a self,
         intersector: PrimitiveIndex,
-        it: impl Iterator<Item = PrimitiveIndex> + 'a,
+        it: impl Iterator<Item = (AABB<[f64; 3]>, PrimitiveIndex)> + 'a,
     ) -> impl Iterator<Item = Infringement> + 'a {
         let intersector_primitive = intersector.primitive_ref(self);
         let conditions = intersector_primitive.conditions();
         let intersector_shape = intersector_primitive.shape();
+        let intersector_bbox = intersector_shape.bbox_without_margin();
 
-        it.filter_map(move |primitive_node| {
+        it.filter_map(move |(infringee_aabb, primitive_node)| {
             crate::metrics::incr(&crate::metrics::METRICS.infringement_candidates);
             let _timer =
                 crate::metrics::Timer::start(&crate::metrics::METRICS.infringement_candidate_nanos);
@@ -268,19 +271,45 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             let infringee_conditions = infringee_primitive.conditions();
 
             let epsilon = 1.0;
-            let inflated_infringer_shape =
-                intersector_shape.inflate(match (&conditions, infringee_conditions) {
-                    (None, _) | (_, None) => return None,
-                    (Some(lhs), Some(rhs)) => {
-                        let clearance = self.rules().clearance(lhs, &rhs)?;
+            let margin = match (&conditions, infringee_conditions) {
+                (None, _) | (_, None) => return None,
+                (Some(lhs), Some(rhs)) => {
+                    let clearance = self.rules().clearance(lhs, &rhs)?;
 
-                        // Note the epsilon comparison.
-                        // XXX: Epsilon is probably too large. But what should
-                        // it be exactly then?
-                        (clearance - epsilon).clamp(0.0, f64::INFINITY)
-                    }
-                });
+                    // Note the epsilon comparison.
+                    // XXX: Epsilon is probably too large. But what should
+                    // it be exactly then?
+                    (clearance - epsilon).clamp(0.0, f64::INFINITY)
+                }
+            };
 
+            // Cheap necessary-condition reject: `inflate` grows each
+            // shape's 2D bbox by exactly `margin` per side, so if the
+            // inflated bbox misses the candidate's stored R-tree
+            // envelope, the full `intersects` cannot succeed. The
+            // R-tree query itself is inflated by the *largest*
+            // clearance, so this per-candidate test with the pair's
+            // actual clearance rejects what the query over-admitted.
+            let inflated_bbox = AABB::from_corners(
+                [
+                    intersector_bbox.lower()[0] - margin,
+                    intersector_bbox.lower()[1] - margin,
+                ],
+                [
+                    intersector_bbox.upper()[0] + margin,
+                    intersector_bbox.upper()[1] + margin,
+                ],
+            );
+            let candidate_bbox = AABB::from_corners(
+                [infringee_aabb.lower()[0], infringee_aabb.lower()[1]],
+                [infringee_aabb.upper()[0], infringee_aabb.upper()[1]],
+            );
+            if !inflated_bbox.intersects(&candidate_bbox) {
+                crate::metrics::incr(&crate::metrics::METRICS.infringement_bbox_rejects);
+                return None;
+            }
+
+            let inflated_infringer_shape = intersector_shape.inflate(margin);
             let infringee_shape = infringee_primitive.shape();
 
             inflated_infringer_shape
@@ -296,7 +325,12 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
     pub(super) fn locate_possible_infringees(
         &self,
         node: PrimitiveIndex,
-    ) -> impl Iterator<Item = GenericNode<PrimitiveIndex, GenericIndex<CW>>> + '_ {
+    ) -> impl Iterator<
+        Item = (
+            AABB<[f64; 3]>,
+            GenericNode<PrimitiveIndex, GenericIndex<CW>>,
+        ),
+    > + '_ {
         let node_primitive = node.primitive_ref(self);
         let limiting_shape = node_primitive.shape().inflate(
             node_primitive
@@ -310,7 +344,7 @@ impl<CW: Clone, Cel: Copy, R: AccessRules> Drawing<CW, Cel, R> {
             .locate_in_envelope_intersecting(
                 &limiting_shape.envelope_3d(0.0, node_primitive.layer()),
             )
-            .map(|wrapper| wrapper.data)
+            .map(|wrapper| (wrapper.geom().aabb, wrapper.data))
     }
 
     pub(super) fn detect_collision_except(
