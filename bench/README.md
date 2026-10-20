@@ -127,6 +127,21 @@ Completion-first is still the right default (unrouted dominates the
 metrics), but expect longer traces; `--critical-first` routes shorter
 on the nets it completes.
 
+Annealer quality knobs (all `--anneal`-only, defaults unchanged when
+omitted; deterministic under `--seed`):
+
+- `--anneal-w-length W` (default 1.0): route-length weight; in
+  discrete mode it is also the preferred-layer-deviation penalty —
+  raising it pressures fanout vias down, trading completion for
+  fewer/straighter escapes. Measured live: on a mid-size board,
+  W=5.0 shifted a run 63→60 unrouted with 44→42 vias and
+  wlen 2386→2669.
+- `--anneal-w-via W` (default 10.0): z-tortuosity/layer-hop cost in
+  continuous mode.
+- `--anneal-min-run-fraction F` (default 0.15): runs shorter than F
+  of a curve's samples merge into neighbors instead of becoming a
+  via hop — via consolidation in continuous mode.
+
 ## Golden rows
 
 `bench/golden.tsv` is the committed regression set — one validated
