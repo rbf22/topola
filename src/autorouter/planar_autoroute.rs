@@ -22,22 +22,26 @@ use crate::{
         dot::FixedDotIndex,
         graph::{MakePrimitiveRef, PrimitiveIndex},
     },
-    geometry::{edit::Edit, primitive::PrimitiveShape, GetLayer},
+    geometry::{
+        edit::{ApplyGeometryEdit, Edit},
+        primitive::PrimitiveShape,
+        GetLayer,
+    },
     graph::MakeRef,
     layout::LayoutEdit,
     router::{
         navcord::{Navcord, NavcordSearchState},
         navmesh::{Navmesh, NavmeshError},
         prenavmesh::PrenavmeshBases,
-        thetastar::ThetastarStepper,
+        thetastar::{ThetastarError, ThetastarStepper},
         RouteStepper, Router,
     },
     stepper::{Abort, EstimateProgress, LinearScale, Reconfigure, Step},
 };
 
 use super::{
-    invoker::GetDebugOverlayData, pad_entry, ratline::RatlineUid, Autorouter, AutorouterError,
-    PlanarAutorouteOptions,
+    escape_stubs, invoker::GetDebugOverlayData, pad_entry, ratline::RatlineUid, Autorouter,
+    AutorouterError, PlanarAutorouteOptions,
 };
 
 #[derive(Clone, Debug)]
@@ -137,6 +141,23 @@ pub struct PlanarAutorouteExecutionStepper {
     /// constraint edges; it is invalidated by rip-ups and extended
     /// incrementally as more bands commit.
     prenavmesh_bases: PrenavmeshBases,
+    /// Lazy escape stubs: the crowded-pad survey, populated when the
+    /// option is set. No stub is laid until an attempt on a crowded
+    /// pad fails or finds its endpoint navmesh-unreachable.
+    lazy_stubs: Option<escape_stubs::PadEscapeAnalysis>,
+    /// Pads already stubbed: pad dot → stub dot. Re-asserted into each
+    /// installed configuration's `terminating_dot_map`, since emitted
+    /// orderings reset that map.
+    stubbed: BTreeMap<FixedDotIndex, FixedDotIndex>,
+    /// Pads a lazy stub was attempted for but could not be placed —
+    /// keeps `stubbed` for successes alone and still bounds retries to
+    /// one per pad.
+    stub_failed: BTreeSet<FixedDotIndex>,
+    /// Geometry of lazily laid stubs. Kept out of the per-ratline
+    /// slots so backtracing never drops a stub that
+    /// `terminating_dot_map` still points at; merged into the produced
+    /// edit, reversed on abort.
+    stub_edit: LayoutEdit,
 }
 
 impl PlanarAutorouteExecutionStepper {
@@ -149,6 +170,11 @@ impl PlanarAutorouteExecutionStepper {
             return Err(AutorouterError::NothingToRoute);
         };
 
+        // Eager stubbing wins when both flags are set — the survey is
+        // only worth its cost when stubs can actually be laid lazily.
+        let lazy_stubs = (options.lazy_escape_stubs && !options.escape_stubs)
+            .then(|| escape_stubs::analyze_pads(autorouter, &configuration.ratlines, &options));
+
         let mut this = Self {
             configuration,
             curr_ratline_index: 0,
@@ -157,6 +183,10 @@ impl PlanarAutorouteExecutionStepper {
             board_data_edits: vec![],
             slot_ratlines: vec![],
             attempt_ratline: None,
+            lazy_stubs,
+            stubbed: BTreeMap::new(),
+            stub_failed: BTreeSet::new(),
+            stub_edit: LayoutEdit::new(),
             options,
             pending_edit: BoardEdit::new(),
             prenavmesh_bases: PrenavmeshBases::default(),
@@ -261,8 +291,25 @@ impl PlanarAutorouteExecutionStepper {
                 match self.make_navmesh(autorouter.board.layout(), origin, destination) {
                     Ok(ok) => ok,
                     Err(AutorouterError::Navmesh(
-                        NavmeshError::UnreachableOrigin | NavmeshError::UnreachableDestination,
+                        unreach @ (NavmeshError::UnreachableOrigin
+                        | NavmeshError::UnreachableDestination),
                     )) => {
+                        // A sealed endpoint is exactly what lazy escape
+                        // stubs are for: if the failing endpoint is a
+                        // crowded pad, lay its stub and retry the same
+                        // position against the retargeted dot.
+                        let (source, target) = self.configuration.ratlines[self.curr_ratline_index]
+                            .ref_(autorouter)
+                            .endpoint_dots();
+                        let candidates = if matches!(unreach, NavmeshError::UnreachableOrigin) {
+                            [source, target]
+                        } else {
+                            [target, source]
+                        };
+                        if self.try_lazy_stub(autorouter, candidates)? {
+                            continue;
+                        }
+
                         // The endpoint is sealed off — e.g. a pad
                         // ringed by foreign geometry. Leave the ratline
                         // unrouted and move on: erroring here retries
@@ -322,16 +369,27 @@ impl PlanarAutorouteExecutionStepper {
     /// ratline's terminating dots, so the caller can store it against
     /// the right board snapshot — after any board reversion that
     /// immediately follows the dissolve.
-    fn dissolve_route_stepper_and_push_edits(
+    /// Folds the in-flight attempt's recorded geometry into
+    /// `pending_edit` and drops the stepper, returning its endpoints
+    /// and reusable search state. Pushes no slot — use this when the
+    /// current position is being retried in place (lazy stubs), so the
+    /// position still produces exactly one slot when it finishes.
+    fn dissolve_route_stepper(
         &mut self,
     ) -> Option<(FixedDotIndex, FixedDotIndex, NavcordSearchState)> {
-        let extracted = self.route.take().map(|taken_route| {
+        self.route.take().map(|taken_route| {
             let (thetastar, mut navcord, ..) = taken_route.dissolve();
             let state = navcord.take_search_state();
             self.pending_edit.layout_edit.merge(navcord.recorder);
             let navmesh = thetastar.graph();
             (navmesh.origin(), navmesh.destination(), state)
-        });
+        })
+    }
+
+    fn dissolve_route_stepper_and_push_edits(
+        &mut self,
+    ) -> Option<(FixedDotIndex, FixedDotIndex, NavcordSearchState)> {
+        let extracted = self.dissolve_route_stepper();
 
         let pending = std::mem::replace(&mut self.pending_edit, BoardEdit::new());
         self.layout_edits.push(pending.layout_edit);
@@ -340,17 +398,121 @@ impl PlanarAutorouteExecutionStepper {
         extracted
     }
 
-    /// Dissolves the failed in-flight attempt into an edit slot and
-    /// re-arms routing at the same position. Callers that retarget the
-    /// current ratline's terminating dot mid-run — lazy escape stubs —
-    /// use this to retry it immediately instead of spending a
-    /// reconfiguration.
-    pub fn retry_current_ratline(
+    /// Lazy escape stubs: when the in-flight ratline terminates at a
+    /// crowded pad that has no stub yet, lays the stub now and
+    /// retargets the ratline (and every other ratline on the pad) at
+    /// the stub dot, so the retry only has to reach open space. The
+    /// stub goes into `stub_edit` — kept out of the per-ratline slots
+    /// so backtracing never drops a stub the terminating-dot map still
+    /// points at — and the remap is re-asserted on every installed
+    /// ordering by `restore_stub_remaps`. Returns `true` when a stub
+    /// was laid; one attempt per pad bounds retries.
+    fn try_lazy_stub(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
-    ) -> Result<(), AutorouterError> {
-        self.dissolve_route_stepper_and_push_edits();
-        self.start_routing_ratline(autorouter)
+        candidates: [FixedDotIndex; 2],
+    ) -> Result<bool, AutorouterError> {
+        if self.lazy_stubs.is_none() {
+            return Ok(false);
+        }
+        let width = self.options.router.routed_band_width;
+
+        for pad in candidates {
+            let Some(analysis) = &self.lazy_stubs else {
+                break;
+            };
+            let Some(directions) = analysis.crowded.get(&pad) else {
+                continue;
+            };
+            if self.stubbed.contains_key(&pad) || self.stub_failed.contains(&pad) {
+                continue;
+            }
+
+            let Some(stub) = escape_stubs::stub_pad(
+                autorouter,
+                &mut self.stub_edit,
+                pad,
+                analysis.positions[&pad],
+                analysis.radius,
+                directions,
+                width,
+            ) else {
+                self.stub_failed.insert(pad);
+                continue;
+            };
+
+            self.stubbed.insert(pad, stub);
+            for ratline in &self.lazy_stubs.as_ref().unwrap().pad_ratlines[&pad] {
+                // A ratline whose band already exists keeps resolving
+                // to the pad — its band is registered under the pad
+                // dot, so remapping it would orphan the band from
+                // rip-up resolution.
+                let (source, target) = ratline.ref_(autorouter).endpoint_dots();
+                let map = &self.configuration.terminating_dot_map;
+                let source = map.get(&(*ratline, source)).copied().unwrap_or(source);
+                let target = map.get(&(*ratline, target)).copied().unwrap_or(target);
+                if autorouter
+                    .board
+                    .band_between_nodes(source, target)
+                    .is_some()
+                {
+                    continue;
+                }
+                self.configuration
+                    .terminating_dot_map
+                    .insert((*ratline, pad), stub);
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Re-asserts stub remaps on a freshly installed ordering: emitted
+    /// configurations carry their own `terminating_dot_map`, which
+    /// drops mid-run stub remaps — without this a requeued stubbed
+    /// ratline would re-attempt the sealed pad it just failed on, and
+    /// rip-ups would miss its band (registered under the stub dot).
+    /// Existing entries win: a multilayer via remap supersedes a stub,
+    /// and a ratline whose band is registered under the un-remapped
+    /// pad is left alone so rip-ups still find it.
+    fn restore_stub_remaps(
+        &self,
+        autorouter: &Autorouter<impl AccessMesadata>,
+        configuration: &mut PlanarAutorouteConfiguration,
+    ) {
+        if self.stubbed.is_empty() {
+            return;
+        }
+        let Some(analysis) = &self.lazy_stubs else {
+            return;
+        };
+        for (pad, stub) in &self.stubbed {
+            for ratline in analysis.pad_ratlines.get(pad).into_iter().flatten() {
+                let (source, target) = ratline.ref_(autorouter).endpoint_dots();
+                let source = configuration
+                    .terminating_dot_map
+                    .get(&(*ratline, source))
+                    .copied()
+                    .unwrap_or(source);
+                let target = configuration
+                    .terminating_dot_map
+                    .get(&(*ratline, target))
+                    .copied()
+                    .unwrap_or(target);
+                if autorouter
+                    .board
+                    .band_between_nodes(source, target)
+                    .is_some()
+                {
+                    continue;
+                }
+                configuration
+                    .terminating_dot_map
+                    .entry((*ratline, *pad))
+                    .or_insert(*stub);
+            }
+        }
     }
 
     /// Finishes routing early: the in-flight ratline's partial band is
@@ -503,7 +665,7 @@ impl PlanarAutorouteExecutionStepper {
     pub fn install_configuration(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
-        new_configuration: PlanarAutorouteConfiguration,
+        mut new_configuration: PlanarAutorouteConfiguration,
     ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
         let attempted = self
             .configuration
@@ -512,6 +674,7 @@ impl PlanarAutorouteExecutionStepper {
             .copied();
         let first_requeued = new_configuration.rip_up.first().copied();
         let rip_up_count = new_configuration.rip_up.len();
+        self.restore_stub_remaps(autorouter, &mut new_configuration);
 
         let result = PlanarAutorouteConfigurationStatus {
             configuration: std::mem::replace(&mut self.configuration, new_configuration),
@@ -597,7 +760,7 @@ impl PlanarAutorouteExecutionStepper {
     pub fn install_tail_configuration(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
-        new_configuration: PlanarAutorouteConfiguration,
+        mut new_configuration: PlanarAutorouteConfiguration,
     ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
         let new_index = new_configuration
             .ratlines
@@ -605,6 +768,7 @@ impl PlanarAutorouteExecutionStepper {
             .zip(self.configuration.ratlines.iter())
             .position(|(permuted, original)| *permuted != *original)
             .unwrap_or(usize::MAX);
+        self.restore_stub_remaps(autorouter, &mut new_configuration);
 
         let result = PlanarAutorouteConfigurationStatus {
             configuration: std::mem::replace(&mut self.configuration, new_configuration),
@@ -716,12 +880,14 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
             // rip them up — records already handed out must not be
             // reverted and dropped, which would leave dead creations
             // in the committed edit.
+            let mut layout_edit = LayoutEdit::merge_iter(self.layout_edits.drain(..));
+            layout_edit.merge(std::mem::take(&mut self.stub_edit));
             return Ok(ControlFlow::Break(Some(BoardEdit::new_from_edits(
                 BoardDataEdit::merge_iter(self.board_data_edits.drain(..)),
                 // FIXME: This is a large clone. We probably need some
                 // high-level, say `AutorouteEdit`, struct to store sequences
                 // of edits.
-                LayoutEdit::merge_iter(self.layout_edits.drain(..)),
+                layout_edit,
             ))));
         }
 
@@ -741,13 +907,44 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
         } else {
             let band_termseg = {
                 let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
+                route.step(&mut router)
+            };
 
-                let ControlFlow::Break(band_termseg) = route.step(&mut router)? else {
+            let band_termseg = match band_termseg {
+                Ok(ControlFlow::Break(band_termseg)) => band_termseg,
+                Ok(ControlFlow::Continue(())) => {
                     return Ok(ControlFlow::Continue(
                         PlanarAutorouteContinueStatus::Running,
                     ));
-                };
-                band_termseg
+                }
+                Err(err) => {
+                    // A stub on a crowded endpoint may unblock the
+                    // retry: dissolve the failed attempt and re-arm at
+                    // the same position. Only `NotFound` is worth
+                    // retrying — other errors describe geometry or
+                    // state no stub changes.
+                    let candidates = self
+                        .attempt_ratline
+                        .and_then(|ratline| {
+                            let (source, target) = ratline.ref_(autorouter).endpoint_dots();
+                            Some([source, target])
+                        })
+                        .unwrap_or([origin, destination]);
+                    if matches!(err, ThetastarError::NotFound)
+                        && self.try_lazy_stub(autorouter, candidates)?
+                    {
+                        // Fold the failed attempt's debris into
+                        // `pending_edit` without pushing a slot: the
+                        // position produces its single slot only when
+                        // it finishes.
+                        self.dissolve_route_stepper();
+                        self.start_routing_ratline(autorouter)?;
+                        return Ok(ControlFlow::Continue(
+                            PlanarAutorouteContinueStatus::Running,
+                        ));
+                    }
+                    return Err(err.into());
+                }
             };
 
             let band = autorouter
@@ -801,6 +998,11 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
 impl<M: AccessMesadata> Abort<Autorouter<M>> for PlanarAutorouteExecutionStepper {
     fn abort(&mut self, autorouter: &mut Autorouter<M>) {
         self.backtrace_to_index(autorouter, 0);
+        autorouter
+            .board
+            .layout_mut()
+            .apply(&self.stub_edit.reverse());
+        self.stub_edit = LayoutEdit::new();
         self.curr_ratline_index = self.configuration.ratlines.len();
     }
 }
@@ -812,7 +1014,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for PlanarAutorouteExecutionS
     fn reconfigure(
         &mut self,
         autorouter: &mut Autorouter<M>,
-        new_configuration: PlanarAutorouteConfiguration,
+        mut new_configuration: PlanarAutorouteConfiguration,
     ) -> Result<PlanarAutorouteConfigurationStatus, AutorouterError> {
         if !new_configuration.rip_up.is_empty() {
             self.surgical_rip_up(autorouter, &new_configuration.rip_up)?;
@@ -827,6 +1029,7 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for PlanarAutorouteExecutionS
         else {
             return Err(AutorouterError::NothingToUndoForReconfiguration);
         };
+        self.restore_stub_remaps(autorouter, &mut new_configuration);
 
         let result = PlanarAutorouteConfigurationStatus {
             configuration: std::mem::replace(&mut self.configuration, new_configuration),
@@ -990,6 +1193,14 @@ mod tests {
         autorouter: &mut Autorouter<SpecctraMesadata>,
         ratlines: Vec<RatlineUid>,
     ) -> PlanarAutorouteExecutionStepper {
+        stepper_for_options(autorouter, ratlines, options_0603())
+    }
+
+    fn stepper_for_options(
+        autorouter: &mut Autorouter<SpecctraMesadata>,
+        ratlines: Vec<RatlineUid>,
+        options: PlanarAutorouteOptions,
+    ) -> PlanarAutorouteExecutionStepper {
         PlanarAutorouteExecutionStepper::new(
             autorouter,
             PlanarAutorouteConfiguration {
@@ -999,7 +1210,7 @@ mod tests {
                 rip_up: vec![],
                 protected: BTreeSet::new(),
             },
-            options_0603(),
+            options,
         )
         .unwrap()
     }
@@ -1100,5 +1311,61 @@ mod tests {
         // Without the gap check `curr_ratline_index` would land at 3,
         // leaving `c` (position 2, unattempted) forever unrouted.
         assert_eq!(stepper.curr_ratline_index, 2);
+    }
+
+    /// A lazy stub's terminating-dot remap lives only in the installed
+    /// configuration — emitted orderings carry their own map, which
+    /// drops it. Without re-assertion a requeued stubbed ratline would
+    /// re-attempt the sealed pad it just failed on, and rip-ups would
+    /// miss its band (registered under the stub dot).
+    #[test]
+    fn lazy_stub_remap_survives_configuration_install() {
+        let mut autorouter = {
+            let design_file = File::open(
+                "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",
+            )
+            .unwrap();
+            let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+            Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+        };
+        let ratlines = board_ratlines(&autorouter, 12);
+
+        let mut options = options_0603();
+        options.lazy_escape_stubs = true;
+        let mut stepper = stepper_for_options(&mut autorouter, ratlines.clone(), options);
+
+        // Lay a stub directly on a crowded pad from the survey, the
+        // same call `step()` makes when an attempt fails.
+        let (pad, pad_ratlines) = {
+            let analysis = stepper.lazy_stubs.as_ref().unwrap();
+            let pad = *analysis.crowded.keys().next().unwrap();
+            (pad, analysis.pad_ratlines[&pad].clone())
+        };
+        assert!(stepper.try_lazy_stub(&mut autorouter, [pad, pad]).unwrap());
+        let stub = stepper.stubbed[&pad];
+
+        // An emitted ordering arrives with its own
+        // terminating-dot map — the mid-run stub remap is absent.
+        let mut emitted = ratlines;
+        emitted.rotate_left(1);
+        stepper
+            .install_configuration(
+                &mut autorouter,
+                PlanarAutorouteConfiguration {
+                    ratlines: emitted,
+                    terminating_dot_map: BTreeMap::new(),
+                    obstacle_penalties: BTreeMap::new(),
+                    rip_up: vec![],
+                    protected: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+
+        for ratline in pad_ratlines {
+            assert_eq!(
+                stepper.configuration().terminating_dot_map[&(ratline, pad)],
+                stub
+            );
+        }
     }
 }

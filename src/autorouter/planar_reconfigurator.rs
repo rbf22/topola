@@ -28,13 +28,8 @@ use crate::{
     board::edit::{BoardDataEdit, BoardEdit},
     drawing::{dot::FixedDotIndex, graph::PrimitiveIndex},
     geometry::{edit::Edit, primitive::PrimitiveShape},
-    graph::MakeRef,
     layout::LayoutEdit,
-    router::{
-        navcord::Navcord,
-        navmesh::Navmesh,
-        thetastar::{ThetastarError, ThetastarStepper},
-    },
+    router::{navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper},
     stepper::{
         Abort, EstimateProgress, GetTimeoutProgress, LinearScale, ReconfiguratorStatus,
         Reconfigure, Step, TimeVsProgressAccumulatorTimeout,
@@ -54,15 +49,6 @@ pub struct PlanarAutorouteReconfigurator {
     /// removes stubs that `terminating_dot_map` still points at; merged
     /// into the command's edit when it is produced, reversed on abort.
     escape_stub_edit: LayoutEdit,
-    /// Lazy escape stubs: the crowded-pad survey computed at
-    /// preconfigure when `lazy_escape_stubs` is set. No stub is laid
-    /// until a ratline terminating at a crowded pad fails — eager
-    /// stubbing is net-negative on dense boards because every stub is
-    /// a permanent foreign-net constraint, needed or not.
-    lazy_stub_analysis: Option<escape_stubs::PadEscapeAnalysis>,
-    /// Pads a lazy stub was already attempted for. Monotone — bounds
-    /// lazy retries to one per pad.
-    lazy_stubbed: BTreeSet<FixedDotIndex>,
     /// Set by [`PlanarAutorouteReconfigurator::finish_early`] to prevent any
     /// further reconfiguration once early finishing is requested.
     finished: bool,
@@ -124,9 +110,9 @@ impl PlanarAutorouteReconfigurator {
             log::debug!("escape stubs: {stats:?}");
         }
 
-        let lazy_stub_analysis = (options.lazy_escape_stubs && !options.escape_stubs)
-            .then(|| escape_stubs::analyze_pads(autorouter, &preconfiguration.ratlines, &options));
-
+        // The lazy escape-stub survey lives on the inner stepper: it
+        // alone sees endpoint-unreachable skips, which never surface
+        // as errors here.
         configuration_override(autorouter, &mut preconfiguration);
 
         let protected = preconfiguration.protected.clone();
@@ -144,8 +130,6 @@ impl PlanarAutorouteReconfigurator {
             reconfigurer,
             options,
             escape_stub_edit,
-            lazy_stub_analysis,
-            lazy_stubbed: BTreeSet::new(),
             finished: false,
             reconfiguration_count: 0,
             protected,
@@ -217,54 +201,6 @@ impl PlanarAutorouteReconfigurator {
     /// commit.
     pub fn insert_ratline_after(&mut self, ratline: RatlineUid, after: RatlineUid) {
         self.reconfigurer.insert_ratline_after(ratline, after);
-    }
-
-    /// Lazy escape stubs: when the just-failed ratline terminates at a
-    /// crowded pad that has no stub yet, lay the stub now, retarget the
-    /// ratline at the stub dot, and re-arm its attempt — the re-route
-    /// only has to reach open space. Stub geometry goes into
-    /// `escape_stub_edit`, so it shares eager stubs' lifecycle: kept
-    /// across backtracing (a dropped stub would dangle the retained
-    /// terminating-dot remap) and only unwound with the command.
-    /// Returns `true` when the ratline was re-armed; `false` falls
-    /// through to ordinary reconfiguration.
-    fn try_lazy_stub<M: AccessMesadata>(
-        &mut self,
-        autorouter: &mut Autorouter<M>,
-    ) -> Result<bool, AutorouterError> {
-        let Some(analysis) = &self.lazy_stub_analysis else {
-            return Ok(false);
-        };
-        let Some(ratline) = *self.stepper.attempt_ratline() else {
-            return Ok(false);
-        };
-        let (source, target) = ratline.ref_(autorouter).endpoint_dots();
-
-        let Some(pad) = [source, target]
-            .into_iter()
-            .find(|dot| analysis.crowded.contains_key(dot) && !self.lazy_stubbed.contains(dot))
-        else {
-            return Ok(false);
-        };
-
-        // One lazy-stub attempt per pad, placed or not — bounds retries.
-        self.lazy_stubbed.insert(pad);
-
-        let Some(stub) = escape_stubs::stub_pad(
-            autorouter,
-            &mut self.escape_stub_edit,
-            pad,
-            analysis.positions[&pad],
-            analysis.radius,
-            &analysis.crowded[&pad],
-            self.options.router.routed_band_width,
-        ) else {
-            return Ok(false);
-        };
-
-        self.remap_terminating_dots(&BTreeMap::from([((ratline, pad), stub)]));
-        self.stepper.retry_current_ratline(autorouter)?;
-        Ok(true)
     }
 
     /// Drops a mid-run-created ratline from the reconfigurer's stored
@@ -595,15 +531,6 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                 if self.finished {
                     return Err(err);
                 }
-                // A lazy stub retries the same ratline at the same
-                // position — it spends no reconfiguration, so it also
-                // applies when permutation is off, where a NotFound
-                // otherwise fails the whole command outright.
-                if matches!(err, AutorouterError::Thetastar(ThetastarError::NotFound))
-                    && self.try_lazy_stub(autorouter)?
-                {
-                    return self.step(autorouter);
-                }
                 if !self.options.permutate {
                     return Err(err);
                 }
@@ -726,8 +653,9 @@ mod tests {
     /// Lazy escape stubs fire on demand: with every attempt capped at
     /// one router step the first ratline's crowded pad gets stubbed
     /// and the ratline re-armed against the stub dot — and when the
-    /// retry also fails the command still finishes early instead of
+    /// retries also fail the command still finishes early instead of
     /// erroring, with the stub geometry folded into the produced edit.
+    /// Since no attempt completes, every seg in the edit is a stub.
     #[test]
     fn lazy_escape_stubs_fire_on_route_failure() {
         let mut autorouter = autorouter_led_matrix();
@@ -737,12 +665,6 @@ mod tests {
             .planar_autoroute(&selection, options(Some(1), true))
             .unwrap();
 
-        let analysis = reconfigurator
-            .lazy_stub_analysis
-            .as_ref()
-            .expect("lazy stubbing should survey crowded pads at preconfigure");
-        assert!(!analysis.crowded.is_empty());
-
         let mut maybe_edit = None;
         for _ in 0..10_000 {
             if let ControlFlow::Break(edit) = reconfigurator.step(&mut autorouter).unwrap() {
@@ -751,23 +673,17 @@ mod tests {
             }
         }
 
-        assert!(maybe_edit.is_some(), "the command should finish early");
+        let edit = maybe_edit
+            .expect("the command should finish early")
+            .expect("a finished command yields its edit");
         assert!(
-            !reconfigurator.lazy_stubbed.is_empty(),
-            "a crowded pad of the failed ratline should have been stubbed"
-        );
-        assert!(
-            reconfigurator
-                .escape_stub_edit
-                .created_segs()
-                .next()
-                .is_some(),
-            "the stub seg should be recorded in the escape-stub edit"
+            edit.layout_edit.created_segs().next().is_some(),
+            "the produced edit should hold the lazily laid stub segs"
         );
     }
 
     /// With lazy stubbing off the same forced failure must not lay
-    /// anything: the analysis is skipped and the stub set stays empty.
+    /// anything: the produced edit carries no geometry at all.
     #[test]
     fn lazy_escape_stubs_off_lays_nothing() {
         let mut autorouter = autorouter_led_matrix();
@@ -777,8 +693,6 @@ mod tests {
             .planar_autoroute(&selection, options(Some(1), false))
             .unwrap();
 
-        assert!(reconfigurator.lazy_stub_analysis.is_none());
-
         let mut maybe_edit = None;
         for _ in 0..10_000 {
             if let ControlFlow::Break(edit) = reconfigurator.step(&mut autorouter).unwrap() {
@@ -787,12 +701,9 @@ mod tests {
             }
         }
 
-        assert!(maybe_edit.is_some());
-        assert!(reconfigurator.lazy_stubbed.is_empty());
-        assert!(reconfigurator
-            .escape_stub_edit
-            .created_segs()
-            .next()
-            .is_none());
+        let edit = maybe_edit
+            .expect("the command should finish early")
+            .expect("a finished command yields its edit");
+        assert!(edit.layout_edit.created_segs().next().is_none());
     }
 }
