@@ -49,6 +49,16 @@ const INTERIOR_MAX_GAP: f64 = std::f64::consts::PI;
 /// How many gap directions are tried per pad, each at three lengths.
 const MAX_GAP_CANDIDATES: usize = 4;
 
+/// Compass fallback directions tried after the endpoint-gap bearings —
+/// the gap survey only sees endpoint pads, so a corridor that misses
+/// every gap center (e.g. aligned off-axis or ringed by non-endpoint
+/// copper) is only reachable this way.
+const COMPASS_DIRECTIONS: usize = 8;
+
+/// Minimum angular separation between tried directions — deduplicates
+/// compass bearings that land on an already-tried gap center.
+const MIN_DIRECTION_SEPARATION: f64 = 0.1;
+
 /// The crowded-pad analysis shared by eager and lazy escape stubbing.
 /// Computed once at preconfigure; laying geometry is deferred in lazy
 /// mode so stubs are only paid for pads whose ratlines actually fail.
@@ -186,8 +196,14 @@ pub fn analyze_pads(
 }
 
 /// Tries to lay a stub for `pad` along `directions`, each at the three
-/// candidate lengths derived from `radius`. On success the drawn dot
-/// and seg are merged into `recorder` and the stub dot is returned.
+/// candidate lengths derived from `radius`. When `compass_fallback` is
+/// set, the 8 compass bearings are appended after the gap directions —
+/// worthwhile on demand (a failing ratline has nothing to lose) but
+/// harmful in the eager pass, where each extra stub is more un-rippable
+/// foreign-net geometry (see FINDINGS I17).
+///
+/// On success the drawn dot and seg are merged into `recorder` and the
+/// stub dot is returned.
 pub fn stub_pad(
     autorouter: &mut Autorouter<impl AccessMesadata>,
     recorder: &mut LayoutEdit,
@@ -196,17 +212,49 @@ pub fn stub_pad(
     radius: f64,
     directions: &[f64],
     width: f64,
+    compass_fallback: bool,
 ) -> Option<FixedDotIndex> {
-    directions
-        .iter()
-        .take(MAX_GAP_CANDIDATES)
+    stub_direction_candidates(directions, compass_fallback)
+        .into_iter()
         .flat_map(|direction| {
-            [radius, radius * 0.5, radius * 0.25].map(move |length| (*direction, length))
+            [radius, radius * 0.5, radius * 0.25].map(move |length| (direction, length))
         })
         .find_map(|(direction, length)| {
             try_stub(autorouter, recorder, pad, pos, direction, length, width)
         })
         .map(|(_, stub)| stub)
+}
+
+/// The ordered bearings tried for a stub: the first
+/// `MAX_GAP_CANDIDATES` gap centers, then — only with
+/// `compass_fallback` — the 8 compass directions, deduplicated to
+/// `MIN_DIRECTION_SEPARATION`.
+fn stub_direction_candidates(directions: &[f64], compass_fallback: bool) -> Vec<f64> {
+    let mut tried: Vec<f64> = Vec::new();
+    let mut push = |direction: f64| {
+        let direction = direction.rem_euclid(std::f64::consts::TAU);
+        let novel = tried
+            .iter()
+            .all(|&t| angular_distance(t, direction) >= MIN_DIRECTION_SEPARATION);
+        if novel {
+            tried.push(direction);
+        }
+    };
+
+    directions
+        .iter()
+        .take(MAX_GAP_CANDIDATES)
+        .for_each(|&d| push(d));
+    if compass_fallback {
+        (0..COMPASS_DIRECTIONS).for_each(|i| push(i as f64 * std::f64::consts::FRAC_PI_4));
+    }
+    tried
+}
+
+/// Absolute angular separation between two bearings, in `[0, π]`.
+fn angular_distance(a: f64, b: f64) -> f64 {
+    let diff = (a - b).rem_euclid(std::f64::consts::TAU);
+    diff.min(std::f64::consts::TAU - diff)
 }
 
 /// Lays escape stubs for the surrounded endpoint pads of `ratlines`,
@@ -243,6 +291,7 @@ pub fn anteroute_escape_stubs(
             analysis.radius,
             &analysis.crowded[&pad],
             width,
+            false,
         ) else {
             stats.failed_pads += 1;
             continue;
@@ -323,5 +372,58 @@ fn try_stub(
     } else {
         layout.apply(&scratch.reverse());
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    #[test]
+    fn angular_distance_wraps_around() {
+        assert!(angular_distance(0.0, std::f64::consts::TAU - 0.05) < 0.06);
+        assert!((angular_distance(0.0, PI) - PI).abs() < 1e-9);
+    }
+
+    /// With the fallback on, gap directions come first and compass
+    /// bearings that don't collide with them are appended — a corridor
+    /// off every gap center is still reachable.
+    #[test]
+    fn stub_candidates_include_compass_fallbacks() {
+        let gaps = [0.13, 1.7, 3.9];
+        let candidates = stub_direction_candidates(&gaps, true);
+
+        assert_eq!(&candidates[..3], &[0.13, 1.7, 3.9]);
+        assert!(candidates.len() >= 8);
+        for i in 1..8 {
+            let compass = i as f64 * FRAC_PI_4;
+            let near_gap = gaps
+                .iter()
+                .any(|&g| angular_distance(g, compass) < MIN_DIRECTION_SEPARATION);
+            assert_eq!(candidates.contains(&compass), !near_gap);
+        }
+    }
+
+    /// Without the fallback only the gap bearings are tried — the
+    /// eager pass must not sprawl into un-surveyed directions.
+    #[test]
+    fn stub_candidates_skip_compass_when_fallback_off() {
+        let gaps = [0.13, 1.7];
+        assert_eq!(stub_direction_candidates(&gaps, false), vec![0.13, 1.7]);
+    }
+
+    /// A gap bearing landing on a compass direction suppresses the
+    /// duplicate — each bearing is tried at most once.
+    #[test]
+    fn stub_candidates_dedup_near_identical_bearings() {
+        let gaps = [FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02];
+        let candidates = stub_direction_candidates(&gaps, true);
+
+        let near_vertical = candidates
+            .iter()
+            .filter(|&&d| angular_distance(d, FRAC_PI_2) < 0.2)
+            .count();
+        assert_eq!(near_vertical, 1, "the two near-vertical gaps collapse");
     }
 }

@@ -436,6 +436,7 @@ impl PlanarAutorouteExecutionStepper {
                 analysis.radius,
                 directions,
                 width,
+                true,
             ) else {
                 self.stub_failed.insert(pad);
                 continue;

@@ -30,8 +30,8 @@ tests/external/pcbench/sizif128/sizif128.dsn	--corridor-presort	50000	0	232	354	
 tests/external/pcbench/smartwatch/smartwatch.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	40000	0	165	400	234	eeef69b59fe9	0.304	ok	189	1466	1565922	84	639	1626475
 tests/external/pcbench/tinytracker/tinytracker.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	30000	0	61	156	161	08c4868a4869	0.300	ok	97	990	913504	37	316	650015
 tests/external/pcbench/uprogrammer/uprogrammer.dsn	--multilayer --anneal --anneal-mode discrete --surgical-ripup	30000	0	111	160	189	b43154348661	0.326	ok	127	1203	1753447	64	337	2025792
-tests/external/pcbench/vc4000multirom/vc4000multirom.dsn	--multilayer --escape-stubs	40000	0	210	346	228	1940a73f22f1	0.205	ok	30	875	2281317	111	414	6503916
-tests/external/freerouting/avionics_hub/avionics_hub.dsn	--multilayer --escape-stubs	60000	0	352	2112	393	e3fbe706263e	0.228	ok	0	1489	2187774	11	963	6163789
+tests/external/pcbench/vc4000multirom/vc4000multirom.dsn	--multilayer --escape-stubs	40000	0	210	346	228	143543cc2322	0.205	ok	30	875	2281317	111	414	6503916
+tests/external/freerouting/avionics_hub/avionics_hub.dsn	--multilayer --escape-stubs	60000	0	352	2112	393	42ccc2ae3894	0.228	ok	0	1489	2187774	11	963	6163789
 tests/external/freerouting/board_unrouted/board_unrouted.dsn	--multilayer --anneal --anneal-mode discrete	110000	0	572	1008	702	137d98fdebba	0.603	ok	5	1140	2574411	0	0	0
 tests/external/freerouting/cnh_tester/cnh_tester.dsn	--preprobe	40000	0	151	448	201	cf70ae1c3344	0.247	ok	0	842	2129556	0	8	63937
 tests/external/freerouting/contribution/contribution.dsn	--multilayer --anneal --anneal-mode discrete	150000	0	815	1630	1125	f419ed879777	1.741	ok	2205	9385	8871049	0	0	0
