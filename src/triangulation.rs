@@ -103,7 +103,6 @@ impl<
         // the edge itself.
         self.add_vertex(from)?;
         self.add_vertex(to)?;
-
         Ok(!self
             .cdt
             .try_add_constraint(
@@ -121,6 +120,21 @@ impl<
     }
 
     pub fn intersects_constraint(&self, from: &VW, to: &VW) -> bool {
+        // Prefer the handle-based intersection iterator: it walks
+        // incident edges directly and never calls `locate`, whose
+        // position lookup can walk forever on some triangulation
+        // states (lvds2tmds panic — spade's
+        // `locate_with_hint_option_core` "Failed to locate position").
+        // Handles are absent only for endpoint vertices not yet
+        // inserted (e.g. same-net pad-boundary vertices); those fall
+        // back to the position-based check.
+        if let (Some(from_handle), Some(to_handle)) = (
+            self.trianvertex_to_handle[from.node_index()],
+            self.trianvertex_to_handle[to.node_index()],
+        ) {
+            return !self.cdt.can_add_constraint(from_handle, to_handle);
+        }
+
         self.cdt
             .intersects_constraint(from.position(), to.position())
     }
