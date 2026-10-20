@@ -1,17 +1,49 @@
 #board	mode	steps	seed	unrouted	unconnected	total	ses_sha256	wall_s	status
-tests/unilayer/0603_breakout/0603_breakout.dsn		20000	0	0	0	2	e3e4cd5daa48	0.001	ok
-tests/unilayer/0603_breakout/0603_breakout.dsn	--surgical-ripup	20000	0	0	0	2	e3e4cd5daa48	0.003	ok
-tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn		50000	0	4	30	36	350e51eea814	0.589	ok
-tests/unilayer/red_led_heart/red_led_heart.dsn		60000	0	148	285	176	27b7424e3b07	1.241	ok
-tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first	60000	0	164	304	176	2d49948babcc	1.585	ok
-tests/unilayer/red_led_heart/red_led_heart.dsn	--multilayer	60000	0	165	310	176	5eaf08d1a558	0.543	ok
-tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first --multilayer	60000	0	165	310	176	5eaf08d1a558	1.743	ok
-tests/unilayer/critical_corridor/critical_corridor.dsn	--critical-first	30000	0	12	14	14	dc47d9b2adb4	0.271	ok
-tests/external/optoisolator_4n35/optoisolator_4n35.dsn		30000	0	0	0	20	a0d433e62d39	0.044	ok
-tests/external/fasttest/fasttest.dsn	--multilayer	30000	0	58	64	83	dfaf4445d314	1.096	ok
-tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer	30000	0	4	16	16	8e7bbef32e2e	0.231	ok
-tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn	--multilayer	30000	0	0	0	15	6e4659759826	0.021	ok
-/Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn		100000	0	2365	7472	2403	a8b7a65e9cea	4.068	ok
-/Users/robert_fenwick/SWE/personal-misc/synth/hardware/modcore/candE.dsn	--critical-first	100000	0	2383	7484	2403	08dd2e8dd33d	84.344	ok
-tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode continuous	30000	0	5	12	16	1a3c320c71d0	2.980	ok
-tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	1	14	16	15ebf4beec51	0.160	ok
+tests/unilayer/0603_breakout/0603_breakout.dsn		20000	0	0	0	2	e3e4cd5daa48	0.000	ok
+tests/unilayer/0603_breakout/0603_breakout.dsn	--surgical-ripup	20000	0	0	0	2	e3e4cd5daa48	0.001	ok
+tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn		50000	0	8	38	36	5eff92bb37e5	0.378	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn		60000	0	126	234	176	a60fb85d6645	0.905	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first	60000	0	164	304	176	2d49948babcc	1.383	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--multilayer	60000	0	164	310	176	71aa894401f5	0.472	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--critical-first --multilayer	60000	0	164	310	176	71aa894401f5	1.667	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--multilayer --anneal --anneal-mode continuous	60000	0	168	322	178	96ef7314280c	92.374	ok
+tests/unilayer/red_led_heart/red_led_heart.dsn	--multilayer --anneal --anneal-mode discrete	60000	0	136	268	176	b9657bfef176	0.663	ok
+tests/unilayer/critical_corridor/critical_corridor.dsn	--critical-first	30000	0	12	14	14	dc47d9b2adb4	0.097	ok
+tests/external/optoisolator_4n35/optoisolator_4n35.dsn		30000	0	0	0	20	2b0c344f3ec3	0.036	ok
+tests/external/fasttest/fasttest.dsn	--multilayer	30000	0	58	64	83	dfaf4445d314	0.531	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer	30000	0	4	14	16	37551ffd91dc	0.174	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode continuous	30000	0	2	22	16	49119e2390ce	1.046	ok
+tests/multilayer/astable_multivibrator/astable_multivibrator.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	0	22	16	b796d0cf69cd	0.160	ok
+tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn	--multilayer	30000	0	0	0	15	4306f4c7a64a	0.012	ok
+tests/external/pcbench/arf154/arf154.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	30000	0	51	192	93	bc5fd434e41e	0.286	ok
+tests/external/pcbench/beer_gauge/beer_gauge.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	40000	0	55	324	204	051ec930f755	0.701	ok
+tests/external/pcbench/esp12_breakout/esp12_breakout.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	0	0	26	09ce4623c2a1	0.019	ok
+tests/external/pcbench/lvds2tmds/lvds2tmds.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	23	56	47	f1036038a061	0.120	ok
+tests/external/pcbench/miniboard_stm32/miniboard_stm32.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	34	78	58	518fef945232	0.099	ok
+tests/external/pcbench/modular_bus/modular_bus.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	0	0	159	3764c4948aca	0.141	ok
+tests/external/pcbench/opamp_bench_supply/opamp_bench_supply.dsn	--corridor-presort	30000	0	61	50	161	0c1bb12be789	0.245	ok
+tests/external/pcbench/poncho_fpga/poncho_fpga.dsn	--surgical-ripup	60000	0	343	470	413	ac68bbfb8e06	1.348	ok
+tests/external/pcbench/prog_rig/prog_rig.dsn	--surgical-ripup	150000	0	747	1904	995	75f8901feca9	12.236	ok
+tests/external/pcbench/reworkctf/reworkctf.dsn	--multilayer --surgical-ripup	50000	0	213	853	323	10fb9c30cb96	0.951	ok
+tests/external/pcbench/sensors_96boards/sensors_96boards.dsn	--multilayer --surgical-ripup	40000	0	220	300	277	060cbf2323ad	0.569	ok
+tests/external/pcbench/sizif128/sizif128.dsn	--corridor-presort	50000	0	232	354	326	c8509795cc5e	0.418	ok
+tests/external/pcbench/smartwatch/smartwatch.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	40000	0	165	400	234	eeef69b59fe9	0.489	ok
+tests/external/pcbench/tinytracker/tinytracker.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	30000	0	47	256	161	52a482fd116c	0.343	ok
+tests/external/pcbench/uprogrammer/uprogrammer.dsn	--multilayer --anneal --anneal-mode discrete --surgical-ripup	30000	0	111	160	189	b43154348661	0.514	ok
+tests/external/pcbench/vc4000multirom/vc4000multirom.dsn	--multilayer --escape-stubs	40000	0	206	338	228	fa2fb9f3a355	0.328	ok
+tests/external/freerouting/avionics_hub/avionics_hub.dsn	--multilayer --escape-stubs	60000	0	352	2112	393	e3fbe706263e	0.325	ok
+tests/external/freerouting/board_unrouted/board_unrouted.dsn	--multilayer --anneal --anneal-mode discrete	110000	0	572	1008	702	137d98fdebba	0.903	ok
+tests/external/freerouting/cnh_tester/cnh_tester.dsn	--preprobe	40000	0	151	448	201	cf70ae1c3344	0.357	ok
+tests/external/freerouting/contribution/contribution.dsn	--multilayer --anneal --anneal-mode discrete	150000	0	815	1630	1125	f419ed879777	2.551	ok
+tests/external/freerouting/fq101/fq101.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	60000	0	347	368	409	af4c5fa1789d	0.786	ok
+tests/external/freerouting/gp8b/gp8b.dsn	--multilayer --anneal --anneal-mode discrete	110000	0	710	2376	759	cddf5c4f79b2	5.638	ok
+tests/external/freerouting/issue208/issue208.dsn	--multilayer --anneal --anneal-mode discrete	60000	0	413	738	422	dd51201722f3	0.868	ok
+tests/external/freerouting/issue684/issue684.dsn	--multilayer --anneal --anneal-mode discrete	30000	0	62	300	75	5bb7b45a239b	11.566	ok
+tests/external/freerouting/j2_reference/j2_reference.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	30000	0	4	24	33	29c675c8e930	0.132	ok
+tests/external/freerouting/linepcb/linepcb.dsn	--multilayer --anneal --anneal-mode discrete	40000	0	145	194	226	5cd3c017a097	1.637	ok
+tests/external/freerouting/logicboard/logicboard.dsn	--multilayer --anneal --anneal-mode discrete --preprobe	150000	0	897	2972	991	7156ebdcc159	15.108	ok
+tests/external/freerouting/myboard/myboard.dsn	--multilayer --anneal --anneal-mode discrete --surgical-ripup	30000	0	142	284	161	39dbb0995401	0.364	ok
+tests/external/freerouting/relaymodule/relaymodule.dsn	--multilayer --escape-stubs	30000	0	52	64	88	fa744476dd23	1.859	ok
+tests/external/freerouting/smoothieboard/smoothieboard.dsn	--multilayer --surgical-ripup	120000	0	681	2684	803	b89685d351cb	8.177	ok
+tests/external/freerouting/tairakb/tairakb.dsn	--multilayer --surgical-ripup	30000	0	114	255	196	eb420efcbc40	0.376	ok
+tests/external/freerouting/wavefolder/wavefolder.dsn	--multilayer	30000	0	48	72	80	732a9661882c	0.186	ok

@@ -1,0 +1,44 @@
+# Benchmark corpus manifest.
+# Columns:
+#   slug          vendored directory/file stem under tests/external/
+#   source        pcbench | freerouting | local
+#   src           source file relative to bench/corpora-src/ (corpus)
+#                 or repo-relative dsn path (local)
+#   layers        copper layer count
+#   ratlines      unrouted-connection count measured on the vendored dsn
+#   step_budget   --max-steps per sweep run (deterministic)
+#   class         coarse board-class tags (layers:size:style)
+#   notes         curation notes
+#slug	source	src	layers	ratlines	step_budget	class	notes
+modular_bus	pcbench	PCBench/PCBs/modular_bus_board_bus/processed.kicad_pcb	2	159	30000	2l:small:connector-dense	199 pins on 9 nets — dense connector field
+esp12_breakout	pcbench	PCBench/PCBs/esp12-breakout_ESP12Breakout/processed.kicad_pcb	2	26	30000	2l:small:smd	apache-2.0
+miniboard_stm32	pcbench	PCBench/PCBs/miniboard-stm32f0_miniboard-stm32f0/processed.kicad_pcb	2	58	30000	2l:small:mcu	mit
+lvds2tmds	pcbench	PCBench/PCBs/LVDS2TMDS_LVDS2TMDS/processed.kicad_pcb	2	47	30000	2l:small:smd	mit
+opamp_bench_supply	pcbench	PCBench/PCBs/OpAmpPassXsistorBenchSupply_OpAmpPassXsistorBenchSupply/processed.kicad_pcb	2	161	30000	2l:medium:analog	mit
+arf154	pcbench	PCBench/PCBs/arf154_arf154/processed.kicad_pcb	4	93	30000	4l:medium:mixed	mit
+tinytracker	pcbench	PCBench/PCBs/TinyTracker_ub-minimal/processed.kicad_pcb	4	161	30000	4l:medium:smd	mit
+beer_gauge	pcbench	PCBench/PCBs/beer-gauge_beer-gauge/processed.kicad_pcb	4	204	40000	4l:medium:mixed	mit
+smartwatch	pcbench	PCBench/PCBs/Smart-Watch_SmartWatch/processed.kicad_pcb	4	234	40000	4l:medium:dense	bsd-3-clause
+uprogrammer	pcbench	PCBench/PCBs/UProgrammer-Hardware_Programmer/processed.kicad_pcb	2	189	30000	2l:medium:mixed	mit
+sizif128	pcbench	PCBench/PCBs/zx-sizif-128_sizif128/processed.kicad_pcb	2	326	50000	2l:large:dense	446 pins, mit (replaces KiCad10-unloadable mod1base/mod12003)
+sensors_96boards	pcbench	PCBench/PCBs/96boards-sensors_Sensors/processed.kicad_pcb	2	277	40000	2l:medium:dense	bsd-2-clause
+vc4000multirom	pcbench	PCBench/PCBs/VC4000MultiROM_MultiRomCard/processed.kicad_pcb	2	228	40000	2l:large:tht	mit
+reworkctf	pcbench	PCBench/PCBs/reworkctf_reworkctf/processed.kicad_pcb	4	323	50000	4l:large:dense	bsd-3-clause
+poncho_fpga	pcbench	PCBench/PCBs/poncho_fpga_fpga-dongle/processed.kicad_pcb	2	413	60000	2l:large:fpga	apache-2.0
+prog_rig	pcbench	PCBench/PCBs/mini_mass_prog_bench_prog_rig/processed.kicad_pcb	4	995	150000	4l:xlarge:dense	1307 pins — largest pcbench pick, mit
+j2_reference	freerouting	freerouting/fixtures/Issue026-J2_reference.dsn	2	33	30000	2l:small:mixed	has .ses reference in corpus
+wavefolder	freerouting	freerouting/fixtures/Issue153-wavefolder.dsn	2	80	30000	2l:medium:analog	embedded routing (solved pair)
+tairakb	freerouting	freerouting/fixtures/Issue054-tairakb.dsn	2	196	30000	2l:medium:mixed	embedded routing
+linepcb	freerouting	freerouting/fixtures/Issue157-TeamAdapt-LinePCB.dsn	2	226	40000	2l:medium:dense	283 pins
+myboard	freerouting	freerouting/fixtures/Issue297-myboard.dsn	2	161	30000	2l:medium:mixed	embedded routing
+relaymodule	freerouting	freerouting/fixtures/Issue110-RelayModule.dsn	2	88	30000	2l:medium:tht	ascii-named Issue110 variant
+board_unrouted	freerouting	freerouting/fixtures/Issue103-Board-Unrouted.dsn	2	702	110000	2l:large:oddnet	classic freerouting demo board
+contribution	freerouting	freerouting/fixtures/Issue420-contribution-board.dsn	2	1125	150000	2l:xlarge:sparse	rect boundary
+issue208	freerouting	freerouting/fixtures/Issue208-freerouting.dsn	2	422	60000	2l:large:sparse	many nets few pins
+fq101	freerouting	freerouting/fixtures/Issue070-Autorouter_FQ101_PCB_2022-05-13.dsn	2	409	60000	2l:large:dense	(type protect) nets stripped — GND/VIN route as signals: harder than upstream
+logicboard	freerouting	freerouting/fixtures/Issue219-LogicBoard_smt.dsn	4	991	150000	4l:large:dense	replaces pcb1 (rstar panic on load — engine bug)
+smoothieboard	freerouting	freerouting/fixtures/Issue145-smoothieboard.dsn	4	803	120000	4l:large:mixed	3d-printer control board
+gp8b	freerouting	freerouting/fixtures/Issue066-Project_GP8B.dsn	4	759	110000	4l:large:dense	embedded routing
+cnh_tester	freerouting	freerouting/fixtures/Issue230-CNH_Functional_Tester_1.dsn	4	201	40000	4l:medium:oddnet	764 net decls but 201 ratlines
+avionics_hub	freerouting	freerouting/fixtures/Issue754-avionics_hub.dsn	6	393	60000	6l:large:mixed	6-layer pick, embedded routing
+issue684	freerouting	freerouting/fixtures/Issue684-Autorouter_PCB1_2026-5-8.dsn	4	75	30000	4l:small:mixed	EasyEDA Pro export — exercises undeclared-quoting parser path (I15) + zero-length-seg load path (I7)

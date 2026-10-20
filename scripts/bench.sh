@@ -36,10 +36,8 @@ for arg in "$@"; do
     esac
 done
 
-if [[ ! -x "$BIN" ]]; then
-    echo "building topola-cli --release --features metrics ..." >&2
-    cargo build --release -p topola-cli --features metrics >&2
-fi
+source "$ROOT/scripts/bench_lib.sh"
+ensure_binary
 
 # ROW := <dsn path>|<mode flag string>|<step budget>
 ROWS=(
@@ -50,6 +48,8 @@ ROWS=(
     "tests/unilayer/red_led_heart/red_led_heart.dsn|--critical-first|60000"
     "tests/unilayer/red_led_heart/red_led_heart.dsn|--multilayer|60000"
     "tests/unilayer/red_led_heart/red_led_heart.dsn|--critical-first --multilayer|60000"
+    "tests/unilayer/red_led_heart/red_led_heart.dsn|--multilayer --anneal --anneal-mode continuous|60000"
+    "tests/unilayer/red_led_heart/red_led_heart.dsn|--multilayer --anneal --anneal-mode discrete|60000"
     "tests/unilayer/critical_corridor/critical_corridor.dsn|--critical-first|30000"
     "tests/external/optoisolator_4n35/optoisolator_4n35.dsn||30000"
     "tests/external/fasttest/fasttest.dsn|--multilayer|30000"
@@ -59,23 +59,54 @@ ROWS=(
     "tests/multilayer/prerouted_lm317_breakout/unrouted_lm317_breakout.dsn|--multilayer|30000"
 )
 
+# Corpus rows: one validated config per vendored board, chosen from the
+# phase-2 sweep as each board's min-unrouted config at seed 0 (issue208
+# uses anneal-discrete instead of its winning anneal-continuous row —
+# 24min wall is impractical for a regression matrix).
+# Budgets match bench/corpus.tsv. See bench/README.md for the table.
+ROWS+=(
+    "tests/external/pcbench/arf154/arf154.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|30000"
+    "tests/external/pcbench/beer_gauge/beer_gauge.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|40000"
+    "tests/external/pcbench/esp12_breakout/esp12_breakout.dsn|--multilayer --anneal --anneal-mode discrete|30000"
+    "tests/external/pcbench/lvds2tmds/lvds2tmds.dsn|--multilayer --anneal --anneal-mode discrete|30000"
+    "tests/external/pcbench/miniboard_stm32/miniboard_stm32.dsn|--multilayer --anneal --anneal-mode discrete|30000"
+    "tests/external/pcbench/modular_bus/modular_bus.dsn|--multilayer --anneal --anneal-mode discrete|30000"
+    "tests/external/pcbench/opamp_bench_supply/opamp_bench_supply.dsn|--corridor-presort|30000"
+    "tests/external/pcbench/poncho_fpga/poncho_fpga.dsn|--surgical-ripup|60000"
+    "tests/external/pcbench/prog_rig/prog_rig.dsn|--surgical-ripup|150000"
+    "tests/external/pcbench/reworkctf/reworkctf.dsn|--multilayer --surgical-ripup|50000"
+    "tests/external/pcbench/sensors_96boards/sensors_96boards.dsn|--multilayer --surgical-ripup|40000"
+    "tests/external/pcbench/sizif128/sizif128.dsn|--corridor-presort|50000"
+    "tests/external/pcbench/smartwatch/smartwatch.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|40000"
+    "tests/external/pcbench/tinytracker/tinytracker.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|30000"
+    "tests/external/pcbench/uprogrammer/uprogrammer.dsn|--multilayer --anneal --anneal-mode discrete --surgical-ripup|30000"
+    "tests/external/pcbench/vc4000multirom/vc4000multirom.dsn|--multilayer --escape-stubs|40000"
+    "tests/external/freerouting/avionics_hub/avionics_hub.dsn|--multilayer --escape-stubs|60000"
+    "tests/external/freerouting/board_unrouted/board_unrouted.dsn|--multilayer --anneal --anneal-mode discrete|110000"
+    "tests/external/freerouting/cnh_tester/cnh_tester.dsn|--preprobe|40000"
+    "tests/external/freerouting/contribution/contribution.dsn|--multilayer --anneal --anneal-mode discrete|150000"
+    "tests/external/freerouting/fq101/fq101.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|60000"
+    "tests/external/freerouting/gp8b/gp8b.dsn|--multilayer --anneal --anneal-mode discrete|110000"
+    "tests/external/freerouting/issue208/issue208.dsn|--multilayer --anneal --anneal-mode discrete|60000"
+    "tests/external/freerouting/issue684/issue684.dsn|--multilayer --anneal --anneal-mode discrete|30000"
+    "tests/external/freerouting/j2_reference/j2_reference.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|30000"
+    "tests/external/freerouting/linepcb/linepcb.dsn|--multilayer --anneal --anneal-mode discrete|40000"
+    "tests/external/freerouting/logicboard/logicboard.dsn|--multilayer --anneal --anneal-mode discrete --preprobe|150000"
+    "tests/external/freerouting/myboard/myboard.dsn|--multilayer --anneal --anneal-mode discrete --surgical-ripup|30000"
+    "tests/external/freerouting/relaymodule/relaymodule.dsn|--multilayer --escape-stubs|30000"
+    "tests/external/freerouting/smoothieboard/smoothieboard.dsn|--multilayer --surgical-ripup|120000"
+    "tests/external/freerouting/tairakb/tairakb.dsn|--multilayer --surgical-ripup|30000"
+    "tests/external/freerouting/wavefolder/wavefolder.dsn|--multilayer|30000"
+)
+
 # External boards outside the repo (set env to include):
 [[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN||100000")
 [[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--critical-first|100000")
+[[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--multilayer|100000")
+[[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--multilayer --anneal --anneal-mode continuous --anneal-iterations 60|100000")
+[[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--multilayer --anneal --anneal-mode discrete|100000")
 
-sha256_file() {
-    if command -v shasum >/dev/null; then
-        shasum -a 256 "$1" | cut -d' ' -f1
-    else
-        sha256sum "$1" | cut -d' ' -f1
-    fi
-}
-
-slug() {
-    basename "$1" .dsn
-}
-
-printf '%-42s %-4s %7s %9s %11s %8s %8s  %s\n' \
+printf '%-36s %-58s %7s %9s %11s %8s %8s  %s\n' \
     "board" "mode" "steps" "unrouted" "unconnected" "wall_s" "ses_sha" "status" >&2
 
 RESULTS=()
@@ -86,40 +117,12 @@ for row in "${ROWS[@]}"; do
     name="$(slug "$dsn")$(echo -n "$modes" | tr ' -' '__' | tr -d '\n')"
     [[ -n "${ROW_FILTER:-}" && "$name" != *"$ROW_FILTER"* ]] && continue
     if [[ ! -f "$dsn" ]]; then
-        printf '%-42s %-4s %7s %9s %11s %8s %8s  %s\n' \
+        printf '%-36s %-58s %7s %9s %11s %8s %8s  %s\n' \
             "$name" "-" "-" "-" "-" "-" "-" "missing" >&2
         continue
     fi
 
-    csv="$OUT_DIR/$name.progress.csv"
-    blockers="$OUT_DIR/$name.blockers.csv"
-    ses="$OUT_DIR/$name.ses"
-    log="$OUT_DIR/$name.log"
-
-    # shellcheck disable=SC2086
-    "$BIN" "$dsn" $modes --deterministic --max-steps "$budget" \
-        --seed "${SEED:-0}" \
-        --progress-csv "$csv" --blockers-csv "$blockers" \
-        -o "$ses" 2>"$log" || true
-
-    finished=$(grep -o 'finished: [0-9]* ratlines total, [0-9]* unrouted, [0-9]* unconnected' "$log" | tail -1 || true)
-    # "finished: 16 ratlines total, 4 unrouted, 16 unconnected"
-    total=$(echo "$finished" | awk '{print $2}')
-    unrouted=$(echo "$finished" | awk '{print $5}')
-    unconnected=$(echo "$finished" | awk '{print $7}')
-    [[ -z "$unrouted" ]] && unrouted="-"
-    [[ -z "$unconnected" ]] && unconnected="-"
-    [[ -z "$total" ]] && total="-"
-    steps=$(tail -1 "$csv" 2>/dev/null | cut -d, -f2)
-    wall=$(tail -1 "$csv" 2>/dev/null | cut -d, -f1)
-    sha=$([[ -f "$ses" ]] && sha256_file "$ses" | cut -c1-12 || echo "-")
-    status="ok"
-    grep -q "panicked" "$log" && status="PANIC"
-
-    printf '%-42s %-4s %7s %9s %11s %8s %8s  %s\n' \
-        "$name" "$modes" "${steps:--}" "$unrouted" "$unconnected" "${wall:--}" "$sha" "$status" >&2
-
-    RESULTS+=("$dsn|$modes|$budget|${SEED:-0}|$unrouted|$unconnected|$total|$sha|${wall:-}|$status")
+    RESULTS+=("$(run_row "$dsn" "$modes" "$budget" "${SEED:-0}" "$name")")
 done
 
 if [[ "$WRITE_GOLDEN" == 1 ]]; then
