@@ -1251,6 +1251,7 @@ mod tests {
                 improve_pad_entry: false,
                 pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
                 escape_stubs: false,
+                lazy_escape_stubs: false,
                 per_ratline_step_limit: None,
                 navmesh_step_factor: None,
                 surgical_ripup: false,

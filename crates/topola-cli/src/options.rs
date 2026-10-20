@@ -127,6 +127,7 @@ pub fn make_planar_options(args: &Cli, board: &Board<SpecctraMesadata>) -> Plana
         improve_pad_entry: args.pad_entry,
         pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
         escape_stubs: args.escape_stubs,
+        lazy_escape_stubs: args.lazy_escape_stubs,
         per_ratline_step_limit: args.per_ratline_steps.map(|n| n as usize),
         navmesh_step_factor: args.navmesh_step_factor,
         surgical_ripup: args.surgical_ripup,

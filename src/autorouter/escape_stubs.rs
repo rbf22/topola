@@ -49,6 +49,20 @@ const INTERIOR_MAX_GAP: f64 = std::f64::consts::PI;
 /// How many gap directions are tried per pad, each at three lengths.
 const MAX_GAP_CANDIDATES: usize = 4;
 
+/// The crowded-pad analysis shared by eager and lazy escape stubbing.
+/// Computed once at preconfigure; laying geometry is deferred in lazy
+/// mode so stubs are only paid for pads whose ratlines actually fail.
+pub struct PadEscapeAnalysis {
+    /// Every endpoint dot's center on the principal layer.
+    pub positions: BTreeMap<FixedDotIndex, Point>,
+    /// Endpoint dot → ratlines terminating at it.
+    pub pad_ratlines: BTreeMap<FixedDotIndex, Vec<RatlineUid>>,
+    /// 2.5 × median endpoint pitch — the longest stub length tried.
+    pub radius: f64,
+    /// Crowded pad → escape bearings, widest gap first.
+    pub crowded: BTreeMap<FixedDotIndex, Vec<f64>>,
+}
+
 /// Outcome of the escape-stub pre-routing pass.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EscapeStubStats {
@@ -60,18 +74,15 @@ pub struct EscapeStubStats {
     pub failed_pads: usize,
 }
 
-/// Lays escape stubs for the surrounded endpoint pads of `ratlines`,
-/// recording drawn geometry into `recorder` and remapping the affected
-/// ratlines' terminating dots in `terminating_dot_map`.
-pub fn anteroute_escape_stubs(
-    autorouter: &mut Autorouter<impl AccessMesadata>,
-    recorder: &mut LayoutEdit,
+/// Surveys `ratlines`' endpoint pads on the principal layer: positions,
+/// per-pad ratline lists, the pitch-adaptive neighborhood radius, and
+/// for every surrounded pad the ranked escape bearings. Pure analysis —
+/// places no geometry.
+pub fn analyze_pads(
+    autorouter: &Autorouter<impl AccessMesadata>,
     ratlines: &[RatlineUid],
-    terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
     options: &PlanarAutorouteOptions,
-) -> EscapeStubStats {
-    let width = options.router.routed_band_width;
-
+) -> PadEscapeAnalysis {
     // Endpoint dots of the selected ratlines on the principal layer,
     // each paired with the ratlines touching it.
     let mut pad_ratlines: BTreeMap<FixedDotIndex, Vec<RatlineUid>> = BTreeMap::new();
@@ -113,28 +124,12 @@ pub fn anteroute_escape_stubs(
         })
         .collect();
 
-    if pitches.is_empty() {
-        return EscapeStubStats::default();
-    }
-
     pitches.sort_by(|a, b| a.total_cmp(b));
-    let pitch = pitches[pitches.len() / 2];
+    let radius = pitches.get(pitches.len() / 2).copied().unwrap_or(0.0) * 2.5;
 
-    let radius = 2.5 * pitch;
-    let mut stats = EscapeStubStats::default();
+    let mut crowded = BTreeMap::new();
 
-    // Crowded-first: interior pads escape before outer pads' stubs can
-    // wall them in.
-    let mut pads: Vec<_> = pad_ratlines.keys().copied().collect();
-    pads.sort_by(|a, b| {
-        crowding(&positions, *b, radius)
-            .cmp(&crowding(&positions, *a, radius))
-            .then(a.cmp(b))
-    });
-
-    for pad in pads {
-        let pos = positions[&pad];
-
+    for (&pad, &pos) in &positions {
         let mut neighbors: Vec<(f64, f64)> = positions
             .iter()
             .filter(|(other, _)| **other != pad)
@@ -176,25 +171,86 @@ pub fn anteroute_escape_stubs(
             continue;
         }
 
+        crowded.insert(
+            pad,
+            gaps.into_iter().map(|(_, direction)| direction).collect(),
+        );
+    }
+
+    PadEscapeAnalysis {
+        positions,
+        pad_ratlines,
+        radius,
+        crowded,
+    }
+}
+
+/// Tries to lay a stub for `pad` along `directions`, each at the three
+/// candidate lengths derived from `radius`. On success the drawn dot
+/// and seg are merged into `recorder` and the stub dot is returned.
+pub fn stub_pad(
+    autorouter: &mut Autorouter<impl AccessMesadata>,
+    recorder: &mut LayoutEdit,
+    pad: FixedDotIndex,
+    pos: Point,
+    radius: f64,
+    directions: &[f64],
+    width: f64,
+) -> Option<FixedDotIndex> {
+    directions
+        .iter()
+        .take(MAX_GAP_CANDIDATES)
+        .flat_map(|direction| {
+            [radius, radius * 0.5, radius * 0.25].map(move |length| (*direction, length))
+        })
+        .find_map(|(direction, length)| {
+            try_stub(autorouter, recorder, pad, pos, direction, length, width)
+        })
+        .map(|(_, stub)| stub)
+}
+
+/// Lays escape stubs for the surrounded endpoint pads of `ratlines`,
+/// recording drawn geometry into `recorder` and remapping the affected
+/// ratlines' terminating dots in `terminating_dot_map`.
+pub fn anteroute_escape_stubs(
+    autorouter: &mut Autorouter<impl AccessMesadata>,
+    recorder: &mut LayoutEdit,
+    ratlines: &[RatlineUid],
+    terminating_dot_map: &mut BTreeMap<(RatlineUid, FixedDotIndex), FixedDotIndex>,
+    options: &PlanarAutorouteOptions,
+) -> EscapeStubStats {
+    let width = options.router.routed_band_width;
+    let analysis = analyze_pads(autorouter, ratlines, options);
+    let mut stats = EscapeStubStats::default();
+
+    // Crowded-first: interior pads escape before outer pads' stubs can
+    // wall them in.
+    let mut pads: Vec<_> = analysis.crowded.keys().copied().collect();
+    pads.sort_by(|a, b| {
+        crowding(&analysis.positions, *b, analysis.radius)
+            .cmp(&crowding(&analysis.positions, *a, analysis.radius))
+            .then(a.cmp(b))
+    });
+
+    for pad in pads {
         stats.crowded_pads += 1;
 
-        let Some((_, stub)) = gaps
-            .iter()
-            .take(MAX_GAP_CANDIDATES)
-            .flat_map(|(_, direction)| {
-                [radius, radius * 0.5, radius * 0.25].map(move |length| (*direction, length))
-            })
-            .find_map(|(direction, length)| {
-                try_stub(autorouter, recorder, pad, pos, direction, length, width)
-            })
-        else {
+        let Some(stub) = stub_pad(
+            autorouter,
+            recorder,
+            pad,
+            analysis.positions[&pad],
+            analysis.radius,
+            &analysis.crowded[&pad],
+            width,
+        ) else {
             stats.failed_pads += 1;
             continue;
         };
 
         stats.stubbed_pads += 1;
 
-        for ratline in &pad_ratlines[&pad] {
+        for ratline in &analysis.pad_ratlines[&pad] {
             terminating_dot_map.insert((*ratline, pad), stub);
         }
     }

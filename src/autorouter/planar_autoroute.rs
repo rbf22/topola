@@ -340,6 +340,19 @@ impl PlanarAutorouteExecutionStepper {
         extracted
     }
 
+    /// Dissolves the failed in-flight attempt into an edit slot and
+    /// re-arms routing at the same position. Callers that retarget the
+    /// current ratline's terminating dot mid-run — lazy escape stubs —
+    /// use this to retry it immediately instead of spending a
+    /// reconfiguration.
+    pub fn retry_current_ratline(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+    ) -> Result<(), AutorouterError> {
+        self.dissolve_route_stepper_and_push_edits();
+        self.start_routing_ratline(autorouter)
+    }
+
     /// Finishes routing early: the in-flight ratline's partial band is
     /// undone, while already routed bands are kept. The stepper must be
     /// stepped once more so that it produces the accumulated edit.
@@ -908,6 +921,7 @@ mod tests {
             improve_pad_entry: false,
             pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
             escape_stubs: false,
+            lazy_escape_stubs: false,
             per_ratline_step_limit: None,
             navmesh_step_factor: None,
             surgical_ripup: false,

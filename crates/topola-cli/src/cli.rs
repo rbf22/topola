@@ -114,6 +114,11 @@ pub struct Cli {
     pub escape_stubs: bool,
     #[arg(
         long,
+        help = "Survey crowded pads up front but lay an escape stub only when a ratline terminating at one actually fails, then retry it against the stub (lazy BGA escape)"
+    )]
+    pub lazy_escape_stubs: bool,
+    #[arg(
+        long,
         help = "Rip up only blocking bands on failure instead of backtracing (negotiated congestion)"
     )]
     pub surgical_ripup: bool,

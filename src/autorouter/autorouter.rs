@@ -115,6 +115,17 @@ pub struct PlanarAutorouteOptions {
     /// before outer pads can wall them in.
     #[serde(default)]
     pub escape_stubs: bool,
+    /// Lazy variant of [`PlanarAutorouteOptions::escape_stubs`]: the
+    /// crowded-pad survey runs at preconfigure but no stub is laid
+    /// until a ratline terminating at a crowded pad actually fails —
+    /// then a stub is placed, the ratline is retargeted at the stub
+    /// dot, and it is re-attempted at the same position without
+    /// spending a reconfiguration. Eager stubs wall off channels for
+    /// pads that never needed them (fixed segs are invisible to
+    /// rip-up); lazy stubs bound that cost to demonstrated failures.
+    /// Ignored when `escape_stubs` is set (eager wins).
+    #[serde(default)]
+    pub lazy_escape_stubs: bool,
     /// Per-attempt cap on router steps spent on a single ratline's
     /// search. Without one, a ratline whose frontier keeps expanding
     /// can consume the entire command budget before later ratlines are
