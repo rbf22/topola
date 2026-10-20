@@ -152,6 +152,20 @@ impl SegShape {
     fn corners(&self) -> [Point; 4] {
         let tangent_vector = self.to - self.from;
         let tangent_vector_norm = Euclidean::distance(&tangent_vector, &point! {x: 0.0, y: 0.0});
+        // A zero-length seg has no tangent direction; its footprint is
+        // a disc of diameter `width`. Emit the disc's bounding square
+        // directly — normalizing the zero vector would produce NaN
+        // corners and poison every later R-tree rebalance.
+        if tangent_vector_norm == 0.0 {
+            let half = self.width / 2.0;
+            let (x, y) = (self.from.x(), self.from.y());
+            return [
+                point! {x: x - half, y: y - half},
+                point! {x: x - half, y: y + half},
+                point! {x: x + half, y: y + half},
+                point! {x: x + half, y: y - half},
+            ];
+        }
         let unit_tangent_vector = tangent_vector / tangent_vector_norm;
 
         // Rotating (x, y) by -90 degrees yields (y, -x).
@@ -445,9 +459,14 @@ impl MeasureLength for BendShape {
 impl AccessShape for BendShape {
     fn center(&self) -> Point {
         let sum = (self.from - self.inner_circle.pos) + (self.to - self.inner_circle.pos);
-        self.inner_circle.pos
-            + (sum / Euclidean::distance(&sum, &geo::point! { x: 0.0, y: 0.0 }))
-                * self.inner_circle.r
+        let sum_norm = Euclidean::distance(&sum, &geo::point! { x: 0.0, y: 0.0 });
+        // A 180-degree bend's `from`/`to` sit diametrically opposite the
+        // arc center, so `sum` vanishes and the midpoint direction is
+        // undefined — fall back to the arc center rather than NaN.
+        if sum_norm == 0.0 {
+            return self.inner_circle.pos;
+        }
+        self.inner_circle.pos + (sum / sum_norm) * self.inner_circle.r
     }
 
     fn contains_point(&self, p: Point) -> bool {
@@ -610,5 +629,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A zero-length seg has no tangent direction; its footprint is a
+    /// disc. `corners` must still produce finite geometry — a NaN corner
+    /// poisons every subsequent R-tree rebalance (`rstar`'s reinsertion
+    /// `partial_cmp` unwraps on it). Regression test for the pcb1 /
+    /// board_unrouted load-time `rstar.rs` panic.
+    #[test]
+    fn zero_length_seg_has_finite_bbox() {
+        let seg = SegShape {
+            from: point! {x: 300.0, y: -700.0},
+            to: point! {x: 300.0, y: -700.0},
+            width: 8.0,
+        };
+
+        let bbox = seg.bbox_without_margin();
+        for coord in bbox.lower().iter().chain(bbox.upper().iter()) {
+            assert!(coord.is_finite(), "non-finite bbox coord in {:?}", bbox);
+        }
+        // The footprint is a disc: bbox is the square pos ± width/2.
+        assert_eq!(bbox.lower(), [296.0, -704.0]);
+        assert_eq!(bbox.upper(), [304.0, -696.0]);
+
+        for corner in seg.corners() {
+            assert!(corner.x().is_finite() && corner.y().is_finite());
+        }
+
+        // Intersection queries against degenerate segs stay finite too.
+        let other = SegShape {
+            from: point! {x: 0.0, y: 0.0},
+            to: point! {x: 0.0, y: 0.0},
+            width: 1.0,
+        };
+        let _ = seg.rect_intersects_rect(&other);
+    }
+
+    /// A 180-degree bend's `from`/`to` sit diametrically opposite the
+    /// arc center, so the midpoint direction is a 0/0 — `center` must
+    /// fall back to a finite point instead of producing NaN.
+    #[test]
+    fn half_turn_bend_has_finite_center() {
+        let bend = BendShape {
+            from: point! {x: 10.0, y: 0.0},
+            to: point! {x: -10.0, y: 0.0},
+            inner_circle: Circle {
+                pos: point! {x: 0.0, y: 0.0},
+                r: 10.0,
+            },
+            width: 2.0,
+        };
+
+        let center = AccessShape::center(&bend);
+        assert!(center.x().is_finite() && center.y().is_finite());
     }
 }
