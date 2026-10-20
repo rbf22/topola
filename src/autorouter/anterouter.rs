@@ -39,6 +39,13 @@ pub struct AnterouterOptions {
     /// 0 keeps the innermost-ring-only behavior.
     #[serde(default)]
     pub fanout_rings: usize,
+    /// Total angle count for the fine radial sweep retried after the
+    /// eight compass directions fail: `16` samples every 22.5°. The
+    /// compass directions land the via exactly one clearance past the
+    /// pad edge; between those eight spots the free landing zone may
+    /// sit just off-axis. 0 keeps the compass-only behavior.
+    #[serde(default)]
+    pub fanout_angles: usize,
 }
 
 /// An endpoint's fanout via or seg could not be placed — the
@@ -266,6 +273,37 @@ impl Anterouter {
             .is_ok()
         {
             return Ok(());
+        }
+
+        // Fine radial sweep: the eight compass directions may all be
+        // blocked while a via spot exists just off-axis — pads ring a
+        // circle around the source, not an octagon. Sample
+        // `fanout_angles` evenly spaced directions starting at the
+        // ratline's own heading, on the pad's small bbox (the closest
+        // legal ring).
+        if options.fanout_angles > 0 {
+            let base = ratline_delta.y().atan2(ratline_delta.x());
+            for k in 0..options.fanout_angles {
+                let angle = base + k as f64 * std::f64::consts::TAU / options.fanout_angles as f64;
+                let direction = point! {x: angle.cos(), y: angle.sin()};
+                if self
+                    .anteroute_fanout_on_bbox_in_direction(
+                        autorouter,
+                        recorder,
+                        ratvertex,
+                        ratline,
+                        source_dot,
+                        small_bbox,
+                        target_layer,
+                        direction,
+                        options,
+                        terminating_dot_map,
+                    )
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
         }
 
         // Ring fallback: every direction sweep so far anchored the via
@@ -629,6 +667,7 @@ mod tests {
         let options = AnterouterOptions {
             fanout_clearance: 200.0,
             fanout_rings: 3,
+            fanout_angles: 0,
         };
 
         // Pick a ratline whose first endpoint carries a net — a netted

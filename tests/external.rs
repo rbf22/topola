@@ -205,6 +205,7 @@ fn autoroute_external_relaymodule_surgical_ripup_does_not_panic() {
             anterouter: topola::autorouter::anterouter::AnterouterOptions {
                 fanout_clearance: 200.0,
                 fanout_rings: 0,
+                fanout_angles: 0,
             },
             planar: PlanarAutorouteOptions {
                 principal_layer: 0,
@@ -301,6 +302,7 @@ fn autoroute_external_arf154_multilayer_anneal_does_not_panic() {
             anterouter: topola::autorouter::anterouter::AnterouterOptions {
                 fanout_clearance: 200.0,
                 fanout_rings: 0,
+                fanout_angles: 0,
             },
             planar: PlanarAutorouteOptions {
                 principal_layer: 0,

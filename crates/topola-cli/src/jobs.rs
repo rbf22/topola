@@ -74,6 +74,7 @@ pub fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::i
         let multilayer = args.multilayer;
         let critical_first = args.critical_first;
         let fanout_rings = args.fanout_rings;
+        let fanout_angles = args.fanout_angles;
         let max_seconds = args.max_seconds;
         let max_steps = args.max_steps;
         let deterministic = args.deterministic;
@@ -109,6 +110,7 @@ pub fn run_parallel_jobs(args: &Cli) -> Result<Invoker<SpecctraMesadata>, std::i
                     planar_options,
                     i as u64,
                     fanout_rings,
+                    fanout_angles,
                     anneal,
                     &board,
                 );

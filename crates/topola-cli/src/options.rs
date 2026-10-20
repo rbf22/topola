@@ -171,6 +171,7 @@ fn make_multilayer_options(
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
     fanout_rings: usize,
+    fanout_angles: usize,
     anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> MultilayerAutorouteOptions {
@@ -178,6 +179,7 @@ fn make_multilayer_options(
         anterouter: AnterouterOptions {
             fanout_clearance: fanout_clearance(board),
             fanout_rings,
+            fanout_angles,
         },
         planar: planar_options,
         timeout: timeout_options(
@@ -202,6 +204,7 @@ pub fn make_command(
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
     fanout_rings: usize,
+    fanout_angles: usize,
     anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> Command {
@@ -216,6 +219,7 @@ pub fn make_command(
                         planar_options,
                         layer_seed,
                         fanout_rings,
+                        fanout_angles,
                         anneal,
                         board,
                     )
@@ -237,6 +241,7 @@ pub fn make_command(
                 planar_options,
                 layer_seed,
                 fanout_rings,
+                fanout_angles,
                 anneal,
                 board,
             ),

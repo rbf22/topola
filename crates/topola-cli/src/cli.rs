@@ -198,6 +198,14 @@ pub struct Cli {
     pub fanout_rings: usize,
     #[arg(
         long,
+        value_name = "N",
+        default_value_t = 0,
+        requires = "multilayer",
+        help = "Fine radial sweep retried after the eight compass directions fail; N directions sampled evenly around the pad at the innermost ring (e.g. 16 = every 22.5°, 0 = compass directions only)"
+    )]
+    pub fanout_angles: usize,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,

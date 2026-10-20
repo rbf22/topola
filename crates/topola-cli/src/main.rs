@@ -63,6 +63,7 @@ fn main() -> Result<(), std::io::Error> {
                 make_planar_options(&args, &board),
                 args.layer_seed.unwrap_or(0),
                 args.fanout_rings,
+                args.fanout_angles,
                 make_anneal_options(&args),
                 &board,
             );
