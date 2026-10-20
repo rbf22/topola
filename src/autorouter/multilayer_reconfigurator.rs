@@ -246,8 +246,12 @@ impl MultilayerAutorouteReconfigurator {
             // unroutable: keep layer rotations from re-attempting them
             // so the frontier advances instead of cycling the same
             // sealed ratline through every layer forever.
-            let dead = self.stepper.planar().dead_ratlines();
+            let dead = self.stepper.planar().dead_ratlines().clone();
             if !dead.is_empty() {
+                // Dead ratlines' fanout vias are pure debris blocking
+                // the very spots later rotations want — retract them
+                // before the new configuration's re-fanouts run.
+                self.stepper.retract_dead_fanouts(autorouter, &dead);
                 configuration
                     .planar
                     .ratlines

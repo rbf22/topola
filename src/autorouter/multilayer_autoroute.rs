@@ -812,6 +812,40 @@ impl MultilayerAutorouteExecutionStepper {
         self.woven.clear();
     }
 
+    /// Retracts fanout vias and stubs belonging to dead ratlines. A
+    /// dead ratline never routes again, so its fanout geometry is the
+    /// same fixed-copper debris dead escape stubs were — and it blocks
+    /// every later via placement within its footprint. Unwrapped
+    /// edits revert; a fanout another band already wraps stays as
+    /// load-bearing copper, exactly like the reconfigure wrap check.
+    pub fn retract_dead_fanouts(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        dead: &BTreeSet<RatlineUid>,
+    ) {
+        for ratline in dead {
+            // Continuation edits are owned by the weave record —
+            // `unweave_ratline` handles their lifecycle.
+            if self.woven.contains(ratline) {
+                continue;
+            }
+            let wrapped = self.anteroute_edits.get(ratline).is_some_and(|edit| {
+                crate::autorouter::carve::edit_is_wrapped(
+                    autorouter.board.layout().drawing(),
+                    &edit.layout_edit,
+                )
+            });
+            if wrapped {
+                continue;
+            }
+            if let Some(edit) = self.anteroute_edits.remove(ratline) {
+                autorouter.board.apply_edit(&edit.reverse());
+                self.anteroute_edit.merge(edit.clone());
+                self.anteroute_edit.merge(edit.reverse());
+            }
+        }
+    }
+
     /// Drops failure-attribution records that name a ratsnest edge
     /// which no longer exists. `BlockerRecord`s persist on the
     /// `Autorouter` past the continuation edges they reference, and
@@ -1174,7 +1208,11 @@ impl GetDebugOverlayData for MultilayerAutorouteExecutionStepper {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs::File, io::BufReader};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs::File,
+        io::BufReader,
+    };
 
     use specctra_core::mesadata::SpecctraMesadata;
 
@@ -1199,39 +1237,19 @@ mod tests {
         Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
     }
 
-    /// Moving a ratline to another layer removes its old fanout vias
-    /// and places new ones. Every `terminating_dot_map` value must
-    /// afterwards resolve to a live dot on the layer the stepper's
-    /// recorded plan claims — before the purge fix a dead
-    /// `FixedDotIndex` survived in the map until a later `add_via`
-    /// recycled its node slot into a compound and `primitive_weight`
-    /// panicked.
-    #[test]
-    fn reconfigure_refreshes_terminating_dot_map() {
-        let mut autorouter = astable();
-        let layer_count = autorouter.board().layout().drawing().layer_count();
+    fn led_matrix() -> Autorouter<SpecctraMesadata> {
+        let design_file =
+            File::open("tests/multilayer/5x5_1206_led_matrix/5x5_1206_led_matrix.dsn").unwrap();
+        let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+        Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+    }
 
-        let ratlines: BTreeSet<RatlineUid> = (0..layer_count)
-            .flat_map(|layer| {
-                autorouter
-                    .ratsnests()
-                    .on_principal_layer(layer)
-                    .graph()
-                    .edge_indices()
-                    .take(2)
-                    .map(move |index| RatlineUid {
-                        principal_layer: layer,
-                        index,
-                    })
-            })
-            .take(3)
-            .collect();
-        let rotated = *ratlines.iter().next().unwrap();
-
-        let options = MultilayerAutorouteOptions {
+    fn options() -> MultilayerAutorouteOptions {
+        MultilayerAutorouteOptions {
             anterouter: AnterouterOptions {
                 fanout_clearance: 200.0,
                 fanout_rings: 0,
+                fanout_angles: 0,
             },
             planar: PlanarAutorouteOptions {
                 principal_layer: 0,
@@ -1264,7 +1282,39 @@ mod tests {
             },
             layer_seed: 0,
             anneal: None,
-        };
+        }
+    }
+
+    /// Moving a ratline to another layer removes its old fanout vias
+    /// and places new ones. Every `terminating_dot_map` value must
+    /// afterwards resolve to a live dot on the layer the stepper's
+    /// recorded plan claims — before the purge fix a dead
+    /// `FixedDotIndex` survived in the map until a later `add_via`
+    /// recycled its node slot into a compound and `primitive_weight`
+    /// panicked.
+    #[test]
+    fn reconfigure_refreshes_terminating_dot_map() {
+        let mut autorouter = astable();
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+
+        let ratlines: BTreeSet<RatlineUid> = (0..layer_count)
+            .flat_map(|layer| {
+                autorouter
+                    .ratsnests()
+                    .on_principal_layer(layer)
+                    .graph()
+                    .edge_indices()
+                    .take(2)
+                    .map(move |index| RatlineUid {
+                        principal_layer: layer,
+                        index,
+                    })
+            })
+            .take(3)
+            .collect();
+        let rotated = *ratlines.iter().next().unwrap();
+
+        let options = options();
 
         let plan = MultilayerPreconfigurer::new(
             &autorouter,
@@ -1327,5 +1377,86 @@ mod tests {
                 "rotated ratline has no terminating-dot map entries"
             );
         }
+    }
+
+    /// A dead ratline's fanout is fixed-copper debris: the via and
+    /// stub it placed at anteroute time stay on the board forever,
+    /// shrinking the landing zone every later rotation probes.
+    /// `retract_dead_fanouts` must revert those edits — unless a
+    /// foreign band already wraps them, which is the same condition
+    /// reconfigure's swap path honors. Driven on the SMD matrix
+    /// fixture: layer-1 assignments place real fanout vias (THT
+    /// pads would terminate statically with empty edits).
+    #[test]
+    fn retract_dead_fanouts_removes_their_vias() {
+        let mut autorouter = led_matrix();
+        let layer_count = autorouter.board().layout().drawing().layer_count();
+
+        let ratlines: BTreeSet<RatlineUid> = (0..layer_count)
+            .flat_map(|layer| {
+                autorouter
+                    .ratsnests()
+                    .on_principal_layer(layer)
+                    .graph()
+                    .edge_indices()
+                    .take(4)
+                    .map(move |index| RatlineUid {
+                        principal_layer: layer,
+                        index,
+                    })
+            })
+            .collect();
+
+        let mut plan = MultilayerPreconfigurer::new(
+            &autorouter,
+            MultilayerAutoroutePreconfigurerInput {
+                ratlines: ratlines.clone(),
+            },
+        )
+        .plan()
+        .clone();
+        // Assign every ratline to the opposite side so anteroute has
+        // to fan every SMD pad out with a via + stub.
+        for (_, layer) in plan.layer_map.iter_mut() {
+            *layer = (*layer + 1) % layer_count;
+        }
+
+        let mut stepper = MultilayerAutorouteExecutionStepper::new(
+            &mut autorouter,
+            MultilayerAutorouteConfiguration {
+                plan,
+                planar: PlanarAutoroutePreconfigurerInput {
+                    ratlines: ratlines.clone(),
+                    terminating_dot_map: BTreeMap::new(),
+                },
+            },
+            options(),
+        )
+        .unwrap();
+
+        let fanned: BTreeSet<RatlineUid> = stepper
+            .anteroute_edits
+            .iter()
+            .filter(|(_, edit)| edit.layout_edit.created_segs().next().is_some())
+            .map(|(ratline, _)| *ratline)
+            .collect();
+        assert!(
+            !fanned.is_empty(),
+            "the fixture must place real fanout stubs, not static terminations"
+        );
+
+        let nodes_before = autorouter.board().layout().drawing().node_count();
+        stepper.retract_dead_fanouts(&mut autorouter, &fanned);
+
+        for ratline in &fanned {
+            assert!(
+                !stepper.anteroute_edits.contains_key(ratline),
+                "a retracted fanout must leave the per-ratline edit map"
+            );
+        }
+        assert!(
+            autorouter.board().layout().drawing().node_count() < nodes_before,
+            "retraction must remove the fanout via dots from the board"
+        );
     }
 }
