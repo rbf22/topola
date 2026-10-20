@@ -135,7 +135,7 @@ impl MultilayerAutorouteExecutionStepper {
     /// protected set.
     pub fn new_with_planar_override<M: AccessMesadata>(
         autorouter: &mut Autorouter<M>,
-        configuration: MultilayerAutorouteConfiguration,
+        mut configuration: MultilayerAutorouteConfiguration,
         options: MultilayerAutorouteOptions,
         planar_override: impl FnOnce(&mut Autorouter<M>, &mut PlanarAutorouteConfiguration),
     ) -> Result<Self, AutorouterError> {
@@ -145,6 +145,12 @@ impl MultilayerAutorouteExecutionStepper {
         let mut terminating_dot_map = BTreeMap::new();
 
         let mut unplaceable = BTreeSet::new();
+        // Layer assignments the fanout actually achieved when it
+        // differs from the plan's: the recorded plan must match the
+        // vias on the board, or `weave_ratline` reads a layer the
+        // ratline's terminating dots are not on and builds a
+        // cross-layer endpoint pair.
+        let mut layer_corrections = vec![];
         for (ratline, layer) in configuration.plan.layer_map.clone() {
             let mut ratline_edit = BoardEdit::new();
             // `anteroute_ratline` writes terminating-dot entries during
@@ -170,14 +176,19 @@ impl MultilayerAutorouteExecutionStepper {
                     anteroute_edit.merge(ratline_edit.reverse());
                     ratline_edit = BoardEdit::new();
                     terminating_dot_map = entries_before.clone();
-                    anterouter.anteroute_ratline(
+                    let fallback = ratline.ref_(autorouter).preferred_layer();
+                    let retried = anterouter.anteroute_ratline(
                         autorouter,
                         &mut ratline_edit,
                         ratline,
-                        ratline.ref_(autorouter).preferred_layer(),
+                        fallback,
                         &options.anterouter,
                         &mut terminating_dot_map,
-                    )
+                    );
+                    if retried.is_ok() && fallback != layer {
+                        layer_corrections.push((ratline, fallback));
+                    }
+                    retried
                 });
             if matches!(placed, Err(Err(_))) {
                 // No room for a fanout via on either layer — drop the
@@ -192,6 +203,12 @@ impl MultilayerAutorouteExecutionStepper {
             }
             anteroute_edit.merge(ratline_edit.clone());
             anteroute_edits.insert(ratline, ratline_edit);
+        }
+        for (ratline, layer) in layer_corrections {
+            configuration.plan.layer_map.insert(ratline, layer);
+        }
+        for ratline in &unplaceable {
+            configuration.plan.layer_map.remove(ratline);
         }
 
         Ok(Self {
@@ -931,6 +948,13 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         // `add_via` may recycle as a compound — dereferencing it
         // panics in `Geometry::primitive_weight`.
         let mut relayered = vec![];
+        // Ratlines that lost every reachable layer: no fanout survived
+        // on the new or the old layer and their endpoints do not share
+        // a bare-pad layer. Dropped from the plan, the stored
+        // preconfigurations, and the requeue order below — keeping one
+        // would resolve its endpoints to pads on different layers and
+        // panic at navmesh.
+        let mut unroutable = vec![];
         let mut wrapped_count = 0usize;
         for ratline in &changed {
             // The gears the old edit created — and that its reversal
@@ -1009,6 +1033,27 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
                     self.anteroute_edit.merge(ratline_edit.reverse());
                     ratline_edit = BoardEdit::new();
                     new_entries = entries_before_restore;
+
+                    // No fanouts survive on either layer — the ratline
+                    // can only terminate where its endpoints natively
+                    // do. Record that layer so `layer_map` stays
+                    // honest: a stale assignment would have
+                    // `weave_ratline` anchor a cross-layer endpoint
+                    // pair. Endpoints that disagree have no routable
+                    // layer at all — drop the ratline from the plan
+                    // and the requeue order rather than panic.
+                    let drawing = autorouter.board().layout().drawing();
+                    let endpoints = ratline.ref_(autorouter).endpoint_dots();
+                    let pad_layers = (
+                        endpoints.0.primitive_ref(drawing).layer(),
+                        endpoints.1.primitive_ref(drawing).layer(),
+                    );
+                    if pad_layers.0 == pad_layers.1 {
+                        layer_fixes.push((*ratline, pad_layers.0));
+                    } else {
+                        unroutable.push(*ratline);
+                    }
+                    continue;
                 }
                 layer_fixes.push((*ratline, old_layer));
             }
@@ -1026,13 +1071,14 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
 
         {
             let ripped: BTreeSet<RatlineUid> = routed_changed.iter().copied().collect();
+            let unroutable_set: BTreeSet<RatlineUid> = unroutable.iter().copied().collect();
             let mut order: Vec<RatlineUid> = self
                 .planar
                 .configuration()
                 .ratlines
                 .iter()
                 .copied()
-                .filter(|ratline| !ripped.contains(ratline))
+                .filter(|ratline| !ripped.contains(ratline) && !unroutable_set.contains(ratline))
                 .collect();
             let insert_at = self
                 .planar
@@ -1046,7 +1092,13 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
                         .map(|index| index + 1)
                 })
                 .unwrap_or(order.len());
-            order.splice(insert_at..insert_at, routed_changed.iter().copied());
+            order.splice(
+                insert_at..insert_at,
+                routed_changed
+                    .iter()
+                    .copied()
+                    .filter(|ratline| !unroutable_set.contains(ratline)),
+            );
 
             self.planar.commit_surgical_reconfiguration(
                 autorouter,
@@ -1064,6 +1116,14 @@ impl<M: AccessMesadata> Reconfigure<Autorouter<M>> for MultilayerAutorouteExecut
         // recorded plan matches the vias actually on the board.
         for (ratline, layer) in layer_fixes {
             self.plan.layer_map.insert(ratline, layer);
+        }
+        for ratline in &unroutable {
+            self.plan.layer_map.remove(ratline);
+            self.plan
+                .static_terminating_dot_map
+                .retain(|(key, _, _), _| key != ratline);
+            self.planar.remove_ratline(*ratline);
+            Self::drop_dead_ratline_refs(autorouter, *ratline);
         }
         crate::metrics::add(&crate::metrics::METRICS.relayered_ratlines, relayered.len());
         crate::metrics::add(
@@ -1191,6 +1251,8 @@ mod tests {
                 improve_pad_entry: false,
                 pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
                 escape_stubs: false,
+                per_ratline_step_limit: None,
+                navmesh_step_factor: None,
                 surgical_ripup: false,
                 shuffle_seed: 0,
             },
