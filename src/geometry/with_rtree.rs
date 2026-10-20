@@ -657,6 +657,16 @@ impl<
         // and attaching to an inexistent bend will result in a crash.
         for (bend, (.., maybe_new_data)) in &edit.bends {
             if let Some(((.., maybe_inner), ..)) = maybe_new_data {
+                // A restore reference to a slot this edit leaves
+                // permanently removed — e.g. a surgically ripped band
+                // whose creation and removal records coalesce away —
+                // cannot be honored: the bend keeps its post-removal
+                // inner (the live unwrap target recorded by the
+                // removal), which is the consistent post-window state.
+                if maybe_inner.is_some_and(|inner| !self.geometry.slot_is_live_bend(inner.index()))
+                {
+                    continue;
+                }
                 self.geometry.reattach_bend(*bend, *maybe_inner);
             }
         }

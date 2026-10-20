@@ -274,6 +274,18 @@ impl<
         }
     }
 
+    /// Whether a graph slot currently holds a live bend primitive.
+    /// Used by edit replay to detect restore references that point at
+    /// nodes the merged edit removes permanently (e.g. a surgically
+    /// ripped band whose creation and removal records coalesce away).
+    pub(crate) fn slot_is_live_bend(&self, index: usize) -> bool {
+        matches!(
+            self.graph.node_weight(index.into()),
+            Some(GenericNode::Primitive(weight))
+                if <PW as TryInto<BW>>::try_into(*weight).is_ok()
+        )
+    }
+
     /// An `*_at_index` creation write requires a vacant or tombstone
     /// slot: `update_node` on a live occupied slot swaps the weight
     /// in place while keeping the incumbent's edges, silently
