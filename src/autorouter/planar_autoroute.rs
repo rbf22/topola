@@ -21,6 +21,7 @@ use crate::{
         band::BandTermsegIndex,
         dot::FixedDotIndex,
         graph::{MakePrimitiveRef, PrimitiveIndex},
+        primitive::GetLimbs,
     },
     geometry::{
         edit::{ApplyGeometryEdit, Edit},
@@ -153,11 +154,12 @@ pub struct PlanarAutorouteExecutionStepper {
     /// keeps `stubbed` for successes alone and still bounds retries to
     /// one per pad.
     stub_failed: BTreeSet<FixedDotIndex>,
-    /// Geometry of lazily laid stubs. Kept out of the per-ratline
-    /// slots so backtracing never drops a stub that
-    /// `terminating_dot_map` still points at; merged into the produced
-    /// edit, reversed on abort.
-    stub_edit: LayoutEdit,
+    /// Geometry of lazily laid stubs, one edit per pad so a stub that
+    /// no band ever used can be retracted alone. Kept out of the
+    /// per-ratline slots so backtracing never drops a stub that
+    /// `terminating_dot_map` still points at; live stubs merge into
+    /// the produced edit, all remaining stubs reverse on abort.
+    stub_edits: BTreeMap<FixedDotIndex, LayoutEdit>,
 }
 
 impl PlanarAutorouteExecutionStepper {
@@ -186,7 +188,7 @@ impl PlanarAutorouteExecutionStepper {
             lazy_stubs,
             stubbed: BTreeMap::new(),
             stub_failed: BTreeSet::new(),
-            stub_edit: LayoutEdit::new(),
+            stub_edits: BTreeMap::new(),
             options,
             pending_edit: BoardEdit::new(),
             prenavmesh_bases: PrenavmeshBases::default(),
@@ -402,11 +404,12 @@ impl PlanarAutorouteExecutionStepper {
     /// crowded pad that has no stub yet, lays the stub now and
     /// retargets the ratline (and every other ratline on the pad) at
     /// the stub dot, so the retry only has to reach open space. The
-    /// stub goes into `stub_edit` — kept out of the per-ratline slots
-    /// so backtracing never drops a stub the terminating-dot map still
-    /// points at — and the remap is re-asserted on every installed
-    /// ordering by `restore_stub_remaps`. Returns `true` when a stub
-    /// was laid; one attempt per pad bounds retries.
+    /// stub goes into a per-pad `stub_edits` entry — kept out of the
+    /// per-ratline slots so backtracing never drops a stub the
+    /// terminating-dot map still points at, and retractable if no band
+    /// ever reaches it — and the remap is re-asserted on every
+    /// installed ordering by `restore_stub_remaps`. Returns `true`
+    /// when a stub was laid; one attempt per pad bounds retries.
     fn try_lazy_stub(
         &mut self,
         autorouter: &mut Autorouter<impl AccessMesadata>,
@@ -428,9 +431,10 @@ impl PlanarAutorouteExecutionStepper {
                 continue;
             }
 
+            let mut stub_edit = LayoutEdit::new();
             let Some(stub) = escape_stubs::stub_pad(
                 autorouter,
-                &mut self.stub_edit,
+                &mut stub_edit,
                 pad,
                 analysis.positions[&pad],
                 analysis.radius,
@@ -443,6 +447,7 @@ impl PlanarAutorouteExecutionStepper {
             };
 
             self.stubbed.insert(pad, stub);
+            self.stub_edits.insert(pad, stub_edit);
             for ratline in &self.lazy_stubs.as_ref().unwrap().pad_ratlines[&pad] {
                 // A ratline whose band already exists keeps resolving
                 // to the pad — its band is registered under the pad
@@ -513,6 +518,36 @@ impl PlanarAutorouteExecutionStepper {
                     .entry((*ratline, *pad))
                     .or_insert(*stub);
             }
+        }
+    }
+
+    /// Retracts stubs no routed band ever reached: a stub that carries
+    /// no band limb is dead fixed-geometry debris — an unnecessary
+    /// foreign-net obstacle in the produced board. The stub's edit is
+    /// reverse-applied and its remap dropped so a post-`Break` restart
+    /// (the multilayer reconfigurator reuses this stepper) cannot
+    /// re-assert a mapping onto a removed dot.
+    fn retract_dead_stubs(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
+        let dead: Vec<FixedDotIndex> = self
+            .stubbed
+            .iter()
+            .filter(|(_, stub)| {
+                stub.primitive_ref(autorouter.board().layout().drawing())
+                    .limbs()
+                    .len()
+                    <= 1
+            })
+            .map(|(&pad, _)| pad)
+            .collect();
+
+        for pad in dead {
+            self.stubbed.remove(&pad);
+            if let Some(edit) = self.stub_edits.remove(&pad) {
+                autorouter.board.layout_mut().apply(&edit.reverse());
+            }
+            self.configuration
+                .terminating_dot_map
+                .retain(|&(_, dot), _| dot != pad);
         }
     }
 
@@ -881,8 +916,14 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
             // rip them up — records already handed out must not be
             // reverted and dropped, which would leave dead creations
             // in the committed edit.
+            // Retract stubs whose ratlines never routed a band to them:
+            // dead fixed-geometry debris otherwise committed into the
+            // produced edit.
+            self.retract_dead_stubs(autorouter);
             let mut layout_edit = LayoutEdit::merge_iter(self.layout_edits.drain(..));
-            layout_edit.merge(std::mem::take(&mut self.stub_edit));
+            layout_edit.merge(LayoutEdit::merge_iter(
+                std::mem::take(&mut self.stub_edits).into_values(),
+            ));
             return Ok(ControlFlow::Break(Some(BoardEdit::new_from_edits(
                 BoardDataEdit::merge_iter(self.board_data_edits.drain(..)),
                 // FIXME: This is a large clone. We probably need some
@@ -999,11 +1040,9 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
 impl<M: AccessMesadata> Abort<Autorouter<M>> for PlanarAutorouteExecutionStepper {
     fn abort(&mut self, autorouter: &mut Autorouter<M>) {
         self.backtrace_to_index(autorouter, 0);
-        autorouter
-            .board
-            .layout_mut()
-            .apply(&self.stub_edit.reverse());
-        self.stub_edit = LayoutEdit::new();
+        for edit in std::mem::take(&mut self.stub_edits).into_values() {
+            autorouter.board.layout_mut().apply(&edit.reverse());
+        }
         self.curr_ratline_index = self.configuration.ratlines.len();
     }
 }
@@ -1368,5 +1407,62 @@ mod tests {
                 stub
             );
         }
+    }
+
+    /// A stub no band ever reaches is dead fixed-geometry debris. At
+    /// `Break` it is retracted: reverse-applied from the board, absent
+    /// from the produced edit, and its pad's remap dropped so a
+    /// post-`Break` restart cannot resurrect a mapping onto a removed
+    /// dot.
+    #[test]
+    fn dead_lazy_stub_retracts_at_break() {
+        let mut autorouter = {
+            let design_file = File::open(
+                "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",
+            )
+            .unwrap();
+            let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+            Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+        };
+        let ratlines = board_ratlines(&autorouter, 12);
+
+        let mut options = options_0603();
+        options.lazy_escape_stubs = true;
+        let mut stepper = stepper_for_options(&mut autorouter, ratlines, options);
+
+        let pad = *stepper
+            .lazy_stubs
+            .as_ref()
+            .unwrap()
+            .crowded
+            .keys()
+            .next()
+            .unwrap();
+        assert!(stepper.try_lazy_stub(&mut autorouter, [pad, pad]).unwrap());
+        assert!(stepper.stub_edits.contains_key(&pad));
+
+        // Nothing routes a band to the stub: finishing early produces
+        // the edit with the stub still unused.
+        stepper.finish_early(&mut autorouter);
+        let edit = match stepper.step(&mut autorouter).unwrap() {
+            ControlFlow::Break(edit) => edit.unwrap(),
+            ControlFlow::Continue(_) => panic!("a finished stepper must produce its edit"),
+        };
+
+        assert!(!stepper.stubbed.contains_key(&pad));
+        assert!(!stepper.stub_edits.contains_key(&pad));
+        assert!(
+            stepper
+                .configuration()
+                .terminating_dot_map
+                .keys()
+                .all(|&(_, dot)| dot != pad),
+            "the retracted pad's remaps must be dropped"
+        );
+        assert!(
+            edit.layout_edit.created_segs().next().is_none()
+                && edit.layout_edit.created_dots().next().is_none(),
+            "the retracted stub must not land in the produced edit"
+        );
     }
 }

@@ -654,8 +654,9 @@ mod tests {
     /// one router step the first ratline's crowded pad gets stubbed
     /// and the ratline re-armed against the stub dot — and when the
     /// retries also fail the command still finishes early instead of
-    /// erroring, with the stub geometry folded into the produced edit.
-    /// Since no attempt completes, every seg in the edit is a stub.
+    /// erroring. Since no band ever reaches a stub, every one of them
+    /// is dead at `Break` and retracted: the produced edit carries no
+    /// stub geometry at all.
     #[test]
     fn lazy_escape_stubs_fire_on_route_failure() {
         let mut autorouter = autorouter_led_matrix();
@@ -665,20 +666,27 @@ mod tests {
             .planar_autoroute(&selection, options(Some(1), true))
             .unwrap();
 
+        let mut stub_fired = false;
         let mut maybe_edit = None;
         for _ in 0..10_000 {
             if let ControlFlow::Break(edit) = reconfigurator.step(&mut autorouter).unwrap() {
                 maybe_edit = Some(edit);
                 break;
             }
+            stub_fired |= !reconfigurator.stepper.stubbed().is_empty();
         }
 
-        let edit = maybe_edit
+        assert!(
+            stub_fired,
+            "a crowded pad's failed attempt should have laid a stub"
+        );
+        let _edit = maybe_edit
             .expect("the command should finish early")
             .expect("a finished command yields its edit");
         assert!(
-            edit.layout_edit.created_segs().next().is_some(),
-            "the produced edit should hold the lazily laid stub segs"
+            reconfigurator.stepper.stubbed().is_empty()
+                && reconfigurator.stepper.stub_edits().is_empty(),
+            "dead stubs retract at Break — none may remain claimed"
         );
     }
 
