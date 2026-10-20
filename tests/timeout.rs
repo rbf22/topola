@@ -5,7 +5,10 @@
 use std::time::Duration;
 
 use topola::{
-    autorouter::{execution::Command, selection::PinSelection, PlanarAutorouteOptions, PresortBy},
+    autorouter::{
+        execution::Command, planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER,
+        selection::PinSelection, PlanarAutorouteOptions, PresortBy,
+    },
     board::Board,
     router::RouterOptions,
     specctra::mesadata::SpecctraMesadata,
@@ -41,6 +44,7 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
             navmesh_step_factor: None,
             surgical_ripup: false,
             shuffle_seed: 0,
+            deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
         },
     )
 }

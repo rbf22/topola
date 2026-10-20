@@ -14,6 +14,7 @@ use topola::autorouter::anterouter::AnterouterOptions;
 use topola::autorouter::critical_autoroute::CriticalAutorouteOptions;
 use topola::autorouter::execution::Command;
 use topola::autorouter::multilayer_autoroute::MultilayerAutorouteOptions;
+use topola::autorouter::planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER;
 use topola::autorouter::selection::PinSelection;
 use topola::autorouter::{PlanarAutorouteOptions, PresortBy};
 use topola::board::AccessMesadata;
@@ -132,6 +133,7 @@ pub fn make_planar_options(args: &Cli, board: &Board<SpecctraMesadata>) -> Plana
         navmesh_step_factor: args.navmesh_step_factor,
         surgical_ripup: args.surgical_ripup,
         shuffle_seed: args.seed.unwrap_or(0),
+        deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
     }
 }
 

@@ -11,6 +11,7 @@ use specctra_core::mesadata::AccessMesadata;
 
 use crate::{
     autorouter::{
+        connected_components::ConnectedComponents,
         escape_stubs,
         invoker::GetDebugOverlayData,
         planar_autoroute::{
@@ -26,14 +27,19 @@ use crate::{
         Autorouter, AutorouterError, PlanarAutorouteOptions,
     },
     board::edit::{BoardDataEdit, BoardEdit},
-    drawing::{dot::FixedDotIndex, graph::PrimitiveIndex},
+    drawing::{
+        dot::FixedDotIndex,
+        graph::{GetMaybeNet, MakePrimitiveRef, PrimitiveIndex},
+    },
     geometry::{edit::Edit, primitive::PrimitiveShape},
+    graph::{GetIndex, MakeRef},
     layout::LayoutEdit,
     router::{navcord::Navcord, navmesh::Navmesh, thetastar::ThetastarStepper},
     stepper::{
         Abort, EstimateProgress, GetTimeoutProgress, LinearScale, ReconfiguratorStatus,
         Reconfigure, Step, TimeVsProgressAccumulatorTimeout,
     },
+    triangulation::GetTrianvertexNodeIndex,
 };
 
 pub type PlanarAutorouteReconfiguratorStatus =
@@ -62,39 +68,58 @@ pub struct PlanarAutorouteReconfigurator {
     /// introspection; protection is monotone-shrinking so a revoked
     /// ratline is never re-protected by this reconfigurator.
     desperated: BTreeSet<RatlineUid>,
-    /// Route-attempt failures per ratline since it last failed while
-    /// no band had been routed in between — `(streak,
-    /// routed_at_last_failure)`. A ratline only accumulates the streak
-    /// while the whole board is frozen: any successful route resets
-    /// everyone's patience, so ratlines rescued mid-churn are never
-    /// declared dead. Without a bound, a permanently sealed ratline
-    /// reconfigures forever: each emitted ordering retries it, it
-    /// fails, and the cycle repeats until the step budget is gone
-    /// (under `--deterministic` the timeout never fires, so this loop
-    /// is unbounded there).
-    failure_counts: BTreeMap<RatlineUid, (usize, usize)>,
-    /// Bands committed so far — the progress watermark the failure
-    /// streaks reset against. Only first-time ratlines count: a band
-    /// ripped and re-routed is churn, not progress, and must not buy
-    /// a sealed ratline infinite patience.
-    routed_count: usize,
-    /// Ratlines that have routed at least once — re-routes after
-    /// rip-up are excluded from `routed_count` via this set.
-    routed_ever: BTreeSet<RatlineUid>,
+    /// Route-attempt failures per ratline since it last routed
+    /// successfully — its own success is the only evidence that it
+    /// remains viable, so only that resets the count. Without a bound,
+    /// a permanently sealed ratline reconfigures forever: each emitted
+    /// ordering retries it, it fails, and the cycle repeats until the
+    /// step budget is gone (under `--deterministic` the timeout never
+    /// fires, so this loop is unbounded there).
+    failure_counts: BTreeMap<RatlineUid, usize>,
     /// Ratlines that exhausted their failure budget — declared
     /// unroutable for this command and dropped from every emitted
     /// configuration so the frontier can advance past them.
     dead: BTreeSet<RatlineUid>,
+    /// Endpoint pairs already tried to death, per ratsnest
+    /// (`principal_layer`). Before a ratline is declared dead the
+    /// reconfigurator tries to respan it — rewire its edge to the
+    /// shortest same-net vertex pair bridging two still-disjoint
+    /// components — and dead pairs are never proposed again, so the
+    /// respan→fail→respan chain terminates once a net's alternates
+    /// are exhausted.
+    dead_pairs: BTreeMap<
+        usize,
+        BTreeSet<(
+            petgraph::graph::NodeIndex<usize>,
+            petgraph::graph::NodeIndex<usize>,
+        )>,
+    >,
+    /// Respans already granted per ratline. Uncapped, a uid could walk
+    /// a large net's pair space one deadline-cycle at a time — the
+    /// same unbounded stall dead-marking exists to prevent — so a uid
+    /// dies after [`MAX_RESPANS_PER_RATLINE`] rewires even while the
+    /// net still has untried pairs.
+    respan_counts: BTreeMap<RatlineUid, usize>,
 }
 
-/// Consecutive failures (with no first-time route in between) a
-/// ratline may accumulate per routing layer before it is declared
-/// dead. Layered boards legitimately retry a ratline under several
-/// layer assignments, so the budget scales with layer count. Measured:
-/// astable's hardest ratline needs ~54 stalled failures before it
-/// routes — 64/layer leaves that headroom while still bounding the
-/// candE-style deadlock (sealed ratlines stall at thousands of cycles).
-const DEADLINE_FAILURES_PER_LAYER: usize = 64;
+/// Alternate endpoint pairs a ratline may try before it is declared
+/// dead. Candidates are proposed shortest-first, so the first few are
+/// the plausible bridges; the long tail of a big net's pair space is
+/// geometrically unlikely to route and not worth a full failure budget
+/// each.
+const MAX_RESPANS_PER_RATLINE: usize = 3;
+
+/// Default for
+/// [`crate::autorouter::PlanarAutorouteOptions::deadline_failures_per_layer`]:
+/// consecutive failures (with no success of the same ratline in
+/// between) a ratline may accumulate per routing layer before it is
+/// respanned or declared dead. Layered boards legitimately retry a
+/// ratline under several layer assignments, so the budget scales with
+/// layer count. Measured: astable's hardest ratline needs ~54 stalled
+/// failures before it routes — 64/layer leaves that headroom while
+/// still bounding the candE-style deadlock (sealed ratlines stall at
+/// thousands of cycles).
+pub const DEADLINE_FAILURES_PER_LAYER: usize = 64;
 
 impl PlanarAutorouteReconfigurator {
     pub fn new(
@@ -167,9 +192,9 @@ impl PlanarAutorouteReconfigurator {
             protected,
             desperated: BTreeSet::new(),
             failure_counts: BTreeMap::new(),
-            routed_count: 0,
-            routed_ever: BTreeSet::new(),
             dead: BTreeSet::new(),
+            dead_pairs: BTreeMap::new(),
+            respan_counts: BTreeMap::new(),
         })
     }
 
@@ -320,32 +345,144 @@ impl PlanarAutorouteReconfigurator {
     }
 
     /// Counts a route-attempt failure for the ratline at the stepper's
-    /// current position; declares it dead once it has failed
-    /// [`DEADLINE_FAILURES_PER_LAYER`] times per board layer.
-    fn note_route_failure(&mut self, autorouter: &Autorouter<impl AccessMesadata>) {
+    /// current position; once the streak reaches
+    /// [`crate::autorouter::PlanarAutorouteOptions::deadline_failures_per_layer`]
+    /// per board layer the ratline is respanned onto an alternate
+    /// same-net pair, and declared dead once those are exhausted.
+    fn note_route_failure(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
         let index = *self.stepper.curr_ratline_index();
         let Some(&ratline) = self.stepper.configuration().ratlines.get(index) else {
             return;
         };
-        let entry = self
-            .failure_counts
-            .entry(ratline)
-            .or_insert((0, self.routed_count));
-        if entry.1 < self.routed_count {
-            // Another ratline routed since this one's last failure —
-            // the board is still moving, so its retries are healthy
-            // exploration, not a stall.
-            *entry = (1, self.routed_count);
-        } else {
-            entry.0 += 1;
-        }
-        let streak = entry.0;
+        // The streak counts this ratline's failures since it last
+        // routed successfully — its own success is the only evidence
+        // it remains viable, so nothing else may reset it. A ratline
+        // that keeps failing while the rest of the board advances is
+        // still converging on dead; this is what lets sealed ratlines
+        // be detected on slowly-progressing boards at all.
+        let streak = {
+            let entry = self.failure_counts.entry(ratline).or_insert(0);
+            *entry += 1;
+            *entry
+        };
         let layers = autorouter.board.layout().drawing().layer_count().max(1);
-        if streak >= DEADLINE_FAILURES_PER_LAYER * layers {
-            if self.dead.insert(ratline) {
+        if streak >= self.options.deadline_failures_per_layer * layers {
+            // The ratsnest fixes which pad pairs become ratlines — a
+            // sealed pair retries the same endpoints forever even when
+            // the same net could be bridged elsewhere. Respan first:
+            // rewire the edge to the best untried bridging pair.
+            let respans = *self.respan_counts.get(&ratline).unwrap_or(&0);
+            if respans < MAX_RESPANS_PER_RATLINE && self.try_respan_ratline(autorouter, ratline) {
+                self.respan_counts.insert(ratline, respans + 1);
+                self.failure_counts.remove(&ratline);
+                log::debug!("ratline {ratline:?} respanned after {streak} stalled attempts");
+            } else if self.dead.insert(ratline) {
                 log::debug!("ratline {ratline:?} declared dead after {streak} stalled attempts",);
             }
         }
+    }
+
+    /// Tries to respan `ratline`: rewire its ratsnest edge to the
+    /// shortest same-net vertex pair that bridges two components the
+    /// board's union-find still keeps apart. The freed `EdgeIndex` is
+    /// reused, so the `RatlineUid` — and with it the ordering slots,
+    /// layer assignment and bookkeeping — survives; only the endpoint
+    /// pair changes. Pairs already tried to death are never proposed
+    /// again (`dead_pairs`), so repeated respans walk the net's
+    /// alternates once and then fall through to dead-marking. Returns
+    /// false when the net has no remaining candidate — including weave
+    /// continuations, whose weave bookkeeping is bound to their
+    /// endpoints.
+    fn try_respan_ratline(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        ratline: RatlineUid,
+    ) -> bool {
+        let ratsnest = autorouter
+            .ratsnests
+            .on_principal_layer(ratline.principal_layer);
+        if ratsnest
+            .graph()
+            .edge_weight(ratline.index)
+            .is_none_or(|weight| weight.continuation || weight.band_termseg.is_some())
+        {
+            return false;
+        }
+        let Some((origin, destination)) = ratsnest.graph().edge_endpoints(ratline.index) else {
+            return false;
+        };
+        let dead_pair = (origin.min(destination), origin.max(destination));
+        let Some(net) = ratline
+            .ref_(autorouter)
+            .endpoint_dots()
+            .0
+            .primitive_ref(autorouter.board.layout().drawing())
+            .maybe_net()
+        else {
+            return false;
+        };
+
+        let conncomps = ConnectedComponents::new(autorouter.board());
+        let vertex_info = |vertex: petgraph::graph::NodeIndex<usize>| {
+            let weight = ratsnest.graph().node_weight(vertex).unwrap();
+            let dot = match weight.node_index() {
+                crate::autorouter::ratsnest::RatvertexNodeIndex::FixedDot(dot) => dot,
+                crate::autorouter::ratsnest::RatvertexNodeIndex::Poly(poly) => {
+                    poly.ref_(autorouter.board.layout()).apex()
+                }
+            };
+            (conncomps.unionfind().find(dot.index()), weight.pos, dot)
+        };
+
+        // Same-net vertices grouped by their connected component. A
+        // respan candidate must bridge two different components — a
+        // pair inside one component adds a redundant edge.
+        let mut per_component: BTreeMap<usize, Vec<_>> = BTreeMap::new();
+        for vertex in ratsnest.graph().node_indices() {
+            let (component, pos, dot) = vertex_info(vertex);
+            let vertex_net = dot
+                .primitive_ref(autorouter.board.layout().drawing())
+                .maybe_net();
+            if vertex_net == Some(net) {
+                per_component
+                    .entry(component)
+                    .or_default()
+                    .push((vertex, pos));
+            }
+        }
+
+        let dead_pairs = self.dead_pairs.entry(ratline.principal_layer).or_default();
+        dead_pairs.insert(dead_pair);
+
+        let mut best: Option<(f64, _, _)> = None;
+        let components: Vec<_> = per_component.into_values().collect();
+        for (i, side_a) in components.iter().enumerate() {
+            for side_b in &components[i + 1..] {
+                for (a, pos_a) in side_a {
+                    for (b, pos_b) in side_b {
+                        let pair = ((*a).min(*b), (*a).max(*b));
+                        if dead_pairs.contains(&pair)
+                            || ratsnest.graph().find_edge(*a, *b).is_some()
+                        {
+                            continue;
+                        }
+                        let distance = (pos_a.x() - pos_b.x()).hypot(pos_a.y() - pos_b.y());
+                        if best.is_none_or(|(best_distance, _, _)| distance < best_distance) {
+                            best = Some((distance, *a, *b));
+                        }
+                    }
+                }
+            }
+        }
+        let Some((_, a, b)) = best else {
+            return false;
+        };
+
+        autorouter
+            .ratsnests
+            .on_principal_layer_mut(ratline.principal_layer)
+            .rewire_edge(ratline.index, a, b);
+        true
     }
 
     /// Whether the number of reconfigurations has reached
@@ -617,13 +754,14 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
             }))),
             Ok(ControlFlow::Continue(status)) => {
                 if matches!(status, PlanarAutorouteContinueStatus::Routed(_)) {
-                    match self.stepper.attempt_ratline() {
-                        Some(ratline) => {
-                            if self.routed_ever.insert(*ratline) {
-                                self.routed_count += 1;
-                            }
-                        }
-                        None => self.routed_count += 1,
+                    // A successful (re-)route is the only reset for the
+                    // ratline's failure streak: it just proved it can
+                    // still route in the current board state.
+                    // `attempt_ratline` already names the next attempt
+                    // when this status returns, so use the stepper's
+                    // record of which ratline actually routed.
+                    if let Some(ratline) = self.stepper.last_routed_ratline() {
+                        self.failure_counts.remove(ratline);
                     }
                 }
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status)))
@@ -740,6 +878,7 @@ mod tests {
             navmesh_step_factor: None,
             surgical_ripup: false,
             shuffle_seed: 0,
+            deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
         }
     }
 
@@ -817,6 +956,97 @@ mod tests {
         assert!(edit.layout_edit.created_segs().next().is_none());
     }
 
+    /// A ratline that keeps failing isn't necessarily unroutable — only
+    /// its endpoint pair is. Respanning must rewire the edge in place
+    /// (same `EdgeIndex`, so the `RatlineUid` and its ordering slot
+    /// survive) to a different vertex pair of the same net, and never
+    /// propose the just-died pair again.
+    #[test]
+    fn dead_end_ratline_respans_to_alternate_pair_of_same_net() {
+        let mut autorouter = autorouter_led_matrix();
+        let selection = PinSelection::new_select_layer(autorouter.board(), 0);
+
+        let mut reconfigurator = autorouter
+            .planar_autoroute(&selection, options(None, false))
+            .unwrap();
+
+        // Any ratline of a net with at least three vertices — the
+        // fixture's ROW/COLUMN nets have five — has alternate pairs.
+        let ratline = autorouter
+            .ratsnests()
+            .on_principal_layer(0)
+            .graph()
+            .edge_indices()
+            .find(|index| {
+                let uid = RatlineUid {
+                    principal_layer: 0,
+                    index: *index,
+                };
+                let net = uid.ref_(&autorouter).endpoint_dots().0;
+                let net = net
+                    .primitive_ref(autorouter.board.layout().drawing())
+                    .maybe_net();
+                autorouter
+                    .ratsnests()
+                    .on_principal_layer(0)
+                    .graph()
+                    .node_indices()
+                    .filter(|vertex| {
+                        let weight = autorouter
+                            .ratsnests()
+                            .on_principal_layer(0)
+                            .graph()
+                            .node_weight(*vertex)
+                            .unwrap();
+                        let dot = match weight.node_index() {
+                            crate::autorouter::ratsnest::RatvertexNodeIndex::FixedDot(dot) => dot,
+                            crate::autorouter::ratsnest::RatvertexNodeIndex::Poly(poly) => {
+                                poly.ref_(autorouter.board.layout()).apex()
+                            }
+                        };
+                        dot.primitive_ref(autorouter.board.layout().drawing())
+                            .maybe_net()
+                            == net
+                    })
+                    .count()
+                    >= 3
+            })
+            .map(|index| RatlineUid {
+                principal_layer: 0,
+                index,
+            })
+            .expect("fixture should have a multi-pin net");
+        let before = ratline.ref_(&autorouter).endpoint_indices();
+
+        assert!(reconfigurator.try_respan_ratline(&mut autorouter, ratline));
+
+        let after = ratline.ref_(&autorouter).endpoint_indices();
+        assert_ne!(
+            before, after,
+            "respan should move at least one endpoint to a different vertex"
+        );
+        assert!(
+            autorouter
+                .ratsnests()
+                .on_principal_layer(0)
+                .graph()
+                .edge_endpoints(ratline.index)
+                .is_some(),
+            "the rewired edge keeps its index and stays in the graph"
+        );
+        assert!(
+            !reconfigurator.dead.contains(&ratline),
+            "a respanned ratline must not be dead-marked"
+        );
+
+        // The exhausted pair is remembered: another respan of the same
+        // uid must pick yet another pair, never the original one.
+        let second = ratline.ref_(&autorouter).endpoint_indices();
+        let second = (second.0.min(second.1), second.0.max(second.1));
+        let before = (before.0.min(before.1), before.0.max(before.1));
+        assert_ne!(before, second);
+    }
+
     /// A ratline that keeps failing route attempts must not re-permute
     /// forever. Once its cumulative failures reach the deadline it is
     /// declared dead and dropped from every emitted configuration — the
@@ -829,12 +1059,15 @@ mod tests {
         let selection = PinSelection::new_select_layer(autorouter.board(), 0);
 
         // A bounded per-attempt step limit keeps each failure cheap;
-        // an unbounded reconfiguration budget lets the loop run. The
-        // fixture's unroutable ratlines must hit the deadline and drop
-        // out of the emitted orderings, letting the command end instead
-        // of permuting them forever.
+        // an unbounded reconfiguration budget lets the loop run. A
+        // short failure deadline keeps the respan chain (deadline ×
+        // MAX_RESPANS attempts per ratline) within the iteration bound.
+        // The fixture's unroutable ratlines must hit the deadline and
+        // drop out of the emitted orderings, letting the command end
+        // instead of permuting them forever.
         let mut opts = options(Some(500), false);
         opts.max_reconfigurations = None;
+        opts.deadline_failures_per_layer = 4;
         let mut reconfigurator = autorouter.planar_autoroute(&selection, opts).unwrap();
 
         let mut maybe_edit = None;

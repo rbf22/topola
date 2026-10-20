@@ -263,7 +263,14 @@ impl Ratsnest {
         let node = self.graph.add_node(RatvertexWeight { vertex, pos });
         (
             node,
-            self.graph.add_edge(node, target, RatlineWeight::default()),
+            self.graph.add_edge(
+                node,
+                target,
+                RatlineWeight {
+                    continuation: true,
+                    ..RatlineWeight::default()
+                },
+            ),
         )
     }
 
@@ -272,5 +279,21 @@ impl Ratsnest {
     pub fn remove_continuation(&mut self, vertex: NodeIndex<usize>, edge: EdgeIndex<usize>) {
         self.graph.remove_edge(edge);
         self.graph.remove_node(vertex);
+    }
+
+    /// Rewires `edge` to connect vertices `a`–`b` in place: the removal
+    /// frees the edge's slot and `StableUnGraph`'s LIFO free list makes
+    /// the following `add_edge` reuse the same `EdgeIndex`, so the
+    /// `RatlineUid`, its position in every ordering, and the layer map
+    /// all survive — only the endpoint pair changes.
+    pub fn rewire_edge(
+        &mut self,
+        edge: EdgeIndex<usize>,
+        a: NodeIndex<usize>,
+        b: NodeIndex<usize>,
+    ) {
+        self.graph.remove_edge(edge);
+        let reused = self.graph.add_edge(a, b, RatlineWeight::default());
+        debug_assert_eq!(reused, edge);
     }
 }

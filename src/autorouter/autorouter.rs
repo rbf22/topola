@@ -76,6 +76,10 @@ fn default_pad_entry_min_angle() -> f64 {
     std::f64::consts::FRAC_PI_4
 }
 
+fn default_deadline_failures_per_layer() -> usize {
+    crate::autorouter::planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct PlanarAutorouteOptions {
     pub principal_layer: usize,
@@ -155,6 +159,14 @@ pub struct PlanarAutorouteOptions {
     /// traverse different ordering trajectories.
     #[serde(default)]
     pub shuffle_seed: u64,
+    /// Consecutive route-attempt failures (with no success of the same
+    /// ratline in between) a ratline may accumulate per routing layer
+    /// before the reconfigurator tries to respan it onto an alternate
+    /// same-net pad pair — and eventually declares it dead. Scaled per
+    /// layer because layered boards legitimately retry a ratline under
+    /// several layer assignments.
+    #[serde(default = "default_deadline_failures_per_layer")]
+    pub deadline_failures_per_layer: usize,
 }
 
 impl PlanarAutorouteOptions {

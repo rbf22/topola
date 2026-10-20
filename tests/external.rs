@@ -12,7 +12,8 @@ use rstest_reuse::{self, *};
 use topola::{
     autorouter::Autorouter,
     autorouter::{
-        connected_components::ConnectedComponents, execution::Command, ratline::RatlineUid,
+        connected_components::ConnectedComponents, execution::Command,
+        planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER, ratline::RatlineUid,
         selection::PinSelection, PlanarAutorouteOptions, PresortBy,
     },
     board::AccessMesadata,
@@ -148,6 +149,7 @@ fn autoroute_external_lvds2tmds_does_not_panic() {
             navmesh_step_factor: None,
             surgical_ripup: false,
             shuffle_seed: 0,
+            deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
         },
     );
 
@@ -231,6 +233,7 @@ fn autoroute_external_relaymodule_surgical_ripup_does_not_panic() {
                 navmesh_step_factor: None,
                 surgical_ripup: true,
                 shuffle_seed: 0,
+                deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
             },
             timeout: TimeoutOptions {
                 initial: f64::INFINITY,
@@ -328,6 +331,7 @@ fn autoroute_external_arf154_multilayer_anneal_does_not_panic() {
                 navmesh_step_factor: None,
                 surgical_ripup: true,
                 shuffle_seed: 0,
+                deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
             },
             timeout: TimeoutOptions {
                 initial: f64::INFINITY,

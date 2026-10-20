@@ -1222,6 +1222,7 @@ mod tests {
             multilayer_preconfigurer::{
                 MultilayerAutoroutePreconfigurerInput, MultilayerPreconfigurer,
             },
+            planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER,
             PresortBy, ReconfigureBy,
         },
         drawing::graph::MakePrimitiveRef,
@@ -1275,6 +1276,7 @@ mod tests {
                 navmesh_step_factor: None,
                 surgical_ripup: false,
                 shuffle_seed: 0,
+                deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
             },
             timeout: TimeoutOptions {
                 initial: 10.0,

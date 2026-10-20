@@ -128,6 +128,11 @@ pub struct PlanarAutorouteExecutionStepper {
     slot_ratlines: Vec<Option<RatlineUid>>,
     /// Debug: the ratline currently in flight or just dissolved.
     attempt_ratline: Option<RatlineUid>,
+    /// The ratline whose band the last `Routed` status committed —
+    /// unlike `attempt_ratline` (which already names the *next*
+    /// attempt when a status is returned), this stays with the routed
+    /// ratline so bookkeeping attributes progress correctly.
+    last_routed_ratline: Option<RatlineUid>,
     /// The options for the autorouting process, defining how routing should be carried out.
     options: PlanarAutorouteOptions,
     /// Edits applied outside any ratline's route — board data updates
@@ -185,6 +190,7 @@ impl PlanarAutorouteExecutionStepper {
             board_data_edits: vec![],
             slot_ratlines: vec![],
             attempt_ratline: None,
+            last_routed_ratline: None,
             lazy_stubs,
             stubbed: BTreeMap::new(),
             stub_failed: BTreeSet::new(),
@@ -1009,13 +1015,12 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteCo
                 .find_loose_band_uid(band_termseg.into())
                 .expect("a completely routed band should've Seg's as ends");
 
+            let ratline = self.configuration().ratlines[self.curr_ratline_index];
             autorouter
                 .ratsnests
                 .on_principal_layer_mut(self.options.principal_layer)
-                .assign_band_termseg_to_ratline(
-                    self.configuration().ratlines[self.curr_ratline_index].index,
-                    band_termseg,
-                );
+                .assign_band_termseg_to_ratline(ratline.index, band_termseg);
+            self.last_routed_ratline = Some(ratline);
 
             let mut board_data_edit = BoardDataEdit::new();
 
@@ -1143,7 +1148,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        autorouter::{PresortBy, ReconfigureBy},
+        autorouter::{
+            planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER, PresortBy, ReconfigureBy,
+        },
         board::edit::BoardEdit,
         drawing::dot::FixedDotIndex,
         router::RouterOptions,
@@ -1182,6 +1189,7 @@ mod tests {
             navmesh_step_factor: None,
             surgical_ripup: false,
             shuffle_seed: 0,
+            deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
         }
     }
 

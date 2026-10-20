@@ -304,7 +304,10 @@ fn test_astable_board_state_restored_exactly_after_undo_all() {
 #[test]
 fn test_probe_channels_after_undo_still_finds_ratlines() {
     use topola::{
-        autorouter::{selection::PinSelection, PlanarAutorouteOptions, PresortBy},
+        autorouter::{
+            planar_reconfigurator::DEADLINE_FAILURES_PER_LAYER, selection::PinSelection,
+            PlanarAutorouteOptions, PresortBy,
+        },
         router::RouterOptions,
         stepper::TimeoutOptions,
     };
@@ -347,6 +350,7 @@ fn test_probe_channels_after_undo_still_finds_ratlines() {
                 navmesh_step_factor: None,
                 surgical_ripup: false,
                 shuffle_seed: 0,
+                deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
             },
         ))
         .unwrap();

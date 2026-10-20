@@ -27,6 +27,11 @@ pub struct RatlineUid {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RatlineWeight {
     pub band_termseg: Option<BandTermsegIndex>,
+    /// Edge created by [`Ratsnest::add_continuation`] for a mid-route
+    /// via split — its weave bookkeeping (via vertex ownership, parent
+    /// destination remaps) is tied to the current endpoints, so the
+    /// reconfigurator's dead-end respanning must leave it alone.
+    pub continuation: bool,
 }
 
 impl<'a, M: AccessMesadata + 'a> MakeRef<'a, Autorouter<M>> for RatlineUid {
