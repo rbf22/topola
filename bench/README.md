@@ -142,6 +142,23 @@ omitted; deterministic under `--seed`):
   of a curve's samples merge into neighbors instead of becoming a
   via hop — via consolidation in continuous mode.
 
+Layer/fanout controls (`--multilayer` only; measured on the candE
+synth board — see FINDINGS F35/F37):
+
+- `--layer-seed N` (default 0): nonzero uses conflict-directed layer
+  assignment — ratlines with colliding corridors plan on different
+  layers; 0 keeps every pad's preferred layer. Measured on candE:
+  spreads attempts across layers (+986 vias placed) but *worsened*
+  unrouted 2139→2192 — extra fanout vias consume budget and space
+  without rescuing the ratline. Keep 0 unless diagnosing layer-
+  starvation.
+- `--fanout-rings N` (default 0): retries fanout-via placement on N
+  extra bbox rings grown outward by a via diameter when the inner
+  ring is blocked. Measured on candE: monotonically *worse* with N
+  (0/1/3 → 2109/2206/2219 unrouted) — failed fanouts cost 4×
+  placement attempts and placed-but-unrouted vias become fixed
+  debris. Opt-in rescue knob, not a default candidate.
+
 ## Golden rows
 
 `bench/golden.tsv` is the committed regression set — one validated
