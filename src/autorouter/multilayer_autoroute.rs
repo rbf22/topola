@@ -1231,6 +1231,7 @@ mod tests {
         let options = MultilayerAutorouteOptions {
             anterouter: AnterouterOptions {
                 fanout_clearance: 200.0,
+                fanout_rings: 0,
             },
             planar: PlanarAutorouteOptions {
                 principal_layer: 0,

@@ -170,12 +170,14 @@ fn make_multilayer_options(
     deterministic: bool,
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
+    fanout_rings: usize,
     anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> MultilayerAutorouteOptions {
     MultilayerAutorouteOptions {
         anterouter: AnterouterOptions {
             fanout_clearance: fanout_clearance(board),
+            fanout_rings,
         },
         planar: planar_options,
         timeout: timeout_options(
@@ -199,6 +201,7 @@ pub fn make_command(
     selection: PinSelection,
     planar_options: PlanarAutorouteOptions,
     layer_seed: u64,
+    fanout_rings: usize,
     anneal: Option<AnnealOptions>,
     board: &Board<SpecctraMesadata>,
 ) -> Command {
@@ -212,6 +215,7 @@ pub fn make_command(
                         deterministic,
                         planar_options,
                         layer_seed,
+                        fanout_rings,
                         anneal,
                         board,
                     )
@@ -228,7 +232,14 @@ pub fn make_command(
     } else if multilayer {
         Command::MultilayerAutoroute(
             selection,
-            make_multilayer_options(deterministic, planar_options, layer_seed, anneal, board),
+            make_multilayer_options(
+                deterministic,
+                planar_options,
+                layer_seed,
+                fanout_rings,
+                anneal,
+                board,
+            ),
         )
     } else {
         Command::Autoroute(selection, planar_options)

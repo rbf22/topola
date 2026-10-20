@@ -62,6 +62,7 @@ fn main() -> Result<(), std::io::Error> {
                 selection.clone(),
                 make_planar_options(&args, &board),
                 args.layer_seed.unwrap_or(0),
+                args.fanout_rings,
                 make_anneal_options(&args),
                 &board,
             );

@@ -190,6 +190,14 @@ pub struct Cli {
     pub anneal_min_run_fraction: Option<f64>,
     #[arg(
         long,
+        value_name = "N",
+        default_value_t = 0,
+        requires = "multilayer",
+        help = "Extra outward rings retried when a fanout via can't be placed at the pad edge; each ring grows the search area by a via footprint (0 = innermost ring only)"
+    )]
+    pub fanout_rings: usize,
+    #[arg(
+        long,
         help = "Post-process routed bands to swing shallow polygonal pad entries to the last cane's alternate tangent"
     )]
     pub pad_entry: bool,
