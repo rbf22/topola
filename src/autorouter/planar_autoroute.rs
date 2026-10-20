@@ -281,13 +281,14 @@ impl PlanarAutorouteExecutionStepper {
                     Err(err) => return Err(err),
                 };
 
+            let navnodes = navmesh.graph().node_count();
             log::debug!(
                 "ratline {:?} attempt on layer {}: {} navnodes",
                 self.configuration.ratlines[self.curr_ratline_index],
                 origin
                     .primitive_ref(autorouter.board().layout().drawing())
                     .layer(),
-                navmesh.graph().node_count()
+                navnodes
             );
 
             let mut router = Router::new(autorouter.board.layout_mut(), self.options.router);
@@ -301,6 +302,7 @@ impl PlanarAutorouteExecutionStepper {
                 route.restore_search_state(state);
             }
             route.set_obstacle_penalties(self.configuration.obstacle_penalties.clone());
+            route.set_step_limit(self.options.step_limit_for(navnodes));
             self.route = Some(route);
 
             return Ok(());
@@ -899,6 +901,8 @@ mod tests {
                 improve_pad_entry: false,
                 pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
                 escape_stubs: false,
+                per_ratline_step_limit: None,
+                navmesh_step_factor: None,
                 surgical_ripup: false,
                 shuffle_seed: 0,
             },

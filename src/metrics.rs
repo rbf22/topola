@@ -81,11 +81,12 @@ macro_rules! metrics_struct {
                 )?;
                 writeln!(
                     f,
-                    "search: pops {} (stale {}), visit_navnode {}x, path_reconstruct {}x",
+                    "search: pops {} (stale {}), visit_navnode {}x, path_reconstruct {}x, budget_aborts {}",
                     self.frontier_pops.load(Ordering::Relaxed),
                     self.stale_frontier_pops.load(Ordering::Relaxed),
                     self.visit_navnode_calls.load(Ordering::Relaxed),
                     self.path_reconstructions.load(Ordering::Relaxed),
+                    self.search_budget_aborts.load(Ordering::Relaxed),
                 )?;
                 writeln!(
                     f,
@@ -170,13 +171,14 @@ macro_rules! metrics_struct {
                 )?;
                 write!(
                     f,
-                    "step_to internals: guide {}x ({:.1}ms), infringe {}x ({:.1}ms, cands {} @ {:.1}ms), collide {}x ({:.1}ms)\n  inserts {} ({:.1}ms), removes {} ({:.1}ms), move_dot {} ({:.1}ms), bend_mod {} ({:.1}ms), bow_upd {} ({:.1}ms)",
+                    "step_to internals: guide {}x ({:.1}ms), infringe {}x ({:.1}ms, cands {} @ {:.1}ms, bboxrej {}), collide {}x ({:.1}ms)\n  inserts {} ({:.1}ms), removes {} ({:.1}ms), move_dot {} ({:.1}ms), bend_mod {} ({:.1}ms), bow_upd {} ({:.1}ms)",
                     self.guide_calls.load(Ordering::Relaxed),
                     ms(self.guide_nanos.load(Ordering::Relaxed)),
                     self.infringement_queries.load(Ordering::Relaxed),
                     ms(self.infringement_nanos.load(Ordering::Relaxed)),
                     self.infringement_candidates.load(Ordering::Relaxed),
                     ms(self.infringement_candidate_nanos.load(Ordering::Relaxed)),
+                    self.infringement_bbox_rejects.load(Ordering::Relaxed),
                     self.collision_queries.load(Ordering::Relaxed),
                     ms(self.collision_nanos.load(Ordering::Relaxed)),
                     self.geometry_inserts.load(Ordering::Relaxed),
@@ -230,6 +232,7 @@ metrics_struct!(
     stale_frontier_pops,
     visit_navnode_calls,
     path_reconstructions,
+    search_budget_aborts,
     probes,
     probes_memoized,
     ghost_probes,
@@ -290,6 +293,7 @@ metrics_struct!(
     infringement_nanos,
     infringement_candidates,
     infringement_candidate_nanos,
+    infringement_bbox_rejects,
     collision_queries,
     collision_nanos,
     geometry_inserts,

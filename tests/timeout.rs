@@ -36,6 +36,8 @@ fn autoroute_command(board: &Board<SpecctraMesadata>) -> Command {
             improve_pad_entry: false,
             pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
             escape_stubs: false,
+            per_ratline_step_limit: None,
+            navmesh_step_factor: None,
             surgical_ripup: false,
             shuffle_seed: 0,
         },
@@ -135,6 +137,106 @@ fn max_steps_terminates_early_and_keeps_geometry_clean() {
     );
     common::assert_no_loose_nodes(invoker.autorouter());
     invoker.undo().unwrap();
+}
+
+#[test]
+fn per_ratline_step_limit_reaches_autoroute_and_keeps_geometry_clean() {
+    // End-to-end plumbing check for `PlanarAutorouteOptions::
+    // per_ratline_step_limit`: with a 1-step cap no search can ever
+    // finish, so a completed run must leave the board untouched. If
+    // the option stopped being wired into `RouteStepper` this would
+    // route bands instead.
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+
+    let initial_node_count = invoker.autorouter().board().layout().drawing().node_count();
+    let Command::Autoroute(selection, mut options) =
+        autoroute_command(invoker.autorouter().board())
+    else {
+        unreachable!()
+    };
+    options.per_ratline_step_limit = Some(1);
+    options.timeout = topola::stepper::TimeoutOptions {
+        initial: f64::INFINITY,
+        progress_bonus: 0.0,
+    };
+
+    let timed_out = invoker
+        .execute_with_timeout(
+            Command::Autoroute(selection, options),
+            Some(Duration::from_secs(120)),
+            Some(1_000_000),
+            || false,
+            |_| {},
+        )
+        .unwrap();
+    assert!(!timed_out);
+
+    assert_eq!(
+        invoker.autorouter().board().layout().drawing().node_count(),
+        initial_node_count,
+    );
+    // Nothing was ever routed, so the command produced no history
+    // entry to undo.
+}
+
+#[test]
+fn navmesh_step_factor_scales_cap_and_defers_to_explicit_limit() {
+    // `navmesh_step_factor` adapts the cap to each search's size but
+    // must never override an explicit `per_ratline_step_limit`.
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let invoker = common::create_invoker_and_assert(autorouter);
+    let Command::Autoroute(_, mut options) = autoroute_command(invoker.autorouter().board()) else {
+        unreachable!()
+    };
+
+    options.per_ratline_step_limit = None;
+    options.navmesh_step_factor = None;
+    assert_eq!(options.step_limit_for(1000), None);
+
+    options.navmesh_step_factor = Some(2.5);
+    assert_eq!(options.step_limit_for(1000), Some(2500));
+    assert_eq!(options.step_limit_for(4), Some(10));
+
+    options.per_ratline_step_limit = Some(7);
+    assert_eq!(options.step_limit_for(1000), Some(7));
+}
+
+#[test]
+fn navmesh_step_factor_reaches_autoroute_and_keeps_geometry_clean() {
+    // Same plumbing check as the fixed cap: a zero factor caps every
+    // search at zero steps, so a completed run leaves the board
+    // untouched — proving the factor is wired into `RouteStepper`.
+    let autorouter = common::load_design("tests/unilayer/0603_breakout/0603_breakout.dsn");
+    let mut invoker = common::create_invoker_and_assert(autorouter);
+
+    let initial_node_count = invoker.autorouter().board().layout().drawing().node_count();
+    let Command::Autoroute(selection, mut options) =
+        autoroute_command(invoker.autorouter().board())
+    else {
+        unreachable!()
+    };
+    options.navmesh_step_factor = Some(0.0);
+    options.timeout = topola::stepper::TimeoutOptions {
+        initial: f64::INFINITY,
+        progress_bonus: 0.0,
+    };
+
+    let timed_out = invoker
+        .execute_with_timeout(
+            Command::Autoroute(selection, options),
+            Some(Duration::from_secs(120)),
+            Some(1_000_000),
+            || false,
+            |_| {},
+        )
+        .unwrap();
+    assert!(!timed_out);
+
+    assert_eq!(
+        invoker.autorouter().board().layout().drawing().node_count(),
+        initial_node_count,
+    );
 }
 
 #[test]

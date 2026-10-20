@@ -115,6 +115,22 @@ pub struct PlanarAutorouteOptions {
     /// before outer pads can wall them in.
     #[serde(default)]
     pub escape_stubs: bool,
+    /// Per-attempt cap on router steps spent on a single ratline's
+    /// search. Without one, a ratline whose frontier keeps expanding
+    /// can consume the entire command budget before later ratlines are
+    /// ever attempted; exceeding the cap fails the attempt like a
+    /// frontier-exhausted search, letting reconfiguration move on.
+    /// `None` leaves attempts unbounded.
+    #[serde(default)]
+    pub per_ratline_step_limit: Option<usize>,
+    /// Adaptive per-attempt cap: the attempt fails once it has consumed
+    /// `factor × navmesh nodes` steps, sized to the ratline's own
+    /// search space rather than a global constant — sparse nets get a
+    /// small budget, dense escapes get room, and a search that cycles
+    /// its frontier many times over is almost all rework churn.
+    /// Ignored when `per_ratline_step_limit` is set (explicit wins).
+    #[serde(default)]
+    pub navmesh_step_factor: Option<f64>,
     /// When a ratline fails on bands routed earlier, rip up only the
     /// blocking bands and requeue their ratlines right after the failed
     /// one, instead of backtracing to the first ordering difference and
@@ -128,6 +144,19 @@ pub struct PlanarAutorouteOptions {
     /// traverse different ordering trajectories.
     #[serde(default)]
     pub shuffle_seed: u64,
+}
+
+impl PlanarAutorouteOptions {
+    /// The per-attempt step cap for a search over `navnodes` navnodes:
+    /// the explicit `per_ratline_step_limit` wins; otherwise the cap
+    /// scales with the ratline's own search space when
+    /// `navmesh_step_factor` is set. `None` leaves attempts unbounded.
+    pub fn step_limit_for(&self, navnodes: usize) -> Option<usize> {
+        self.per_ratline_step_limit.or_else(|| {
+            self.navmesh_step_factor
+                .map(|factor| (factor * navnodes as f64) as usize)
+        })
+    }
 }
 
 #[derive(Error, Debug, Clone)]

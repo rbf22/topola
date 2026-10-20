@@ -176,6 +176,18 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "N",
+        help = "Cap router steps a single ratline's search may consume before the attempt fails (as if its frontier exhausted). Without a cap, one expanding search can starve every later ratline of budget"
+    )]
+    pub per_ratline_steps: Option<u64>,
+    #[arg(
+        long,
+        value_name = "F",
+        help = "Adaptive per-ratline step cap: a search fails after consuming F times its own navmesh node count in steps — sized per ratline, unlike the constant --per-ratline-steps. Ignored if --per-ratline-steps is set"
+    )]
+    pub navmesh_step_factor: Option<f64>,
+    #[arg(
+        long,
+        value_name = "N",
         help = "Seed for the preconfiguration ratline shuffle (single-run only; --jobs derives seeds per worker)"
     )]
     pub seed: Option<u64>,
