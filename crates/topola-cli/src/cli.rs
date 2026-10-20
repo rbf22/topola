@@ -230,6 +230,12 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "N",
+        help = "Consecutive failures a ratline may accumulate per layer before it is respanned onto an alternate same-net pair and eventually declared dead (default 64). Lower values bound stalls tighter at the risk of abandoning slow rescues"
+    )]
+    pub deadline_failures: Option<usize>,
+    #[arg(
+        long,
+        value_name = "N",
         help = "Seed for the preconfiguration ratline shuffle (single-run only; --jobs derives seeds per worker)"
     )]
     pub seed: Option<u64>,

@@ -133,7 +133,9 @@ pub fn make_planar_options(args: &Cli, board: &Board<SpecctraMesadata>) -> Plana
         navmesh_step_factor: args.navmesh_step_factor,
         surgical_ripup: args.surgical_ripup,
         shuffle_seed: args.seed.unwrap_or(0),
-        deadline_failures_per_layer: DEADLINE_FAILURES_PER_LAYER,
+        deadline_failures_per_layer: args
+            .deadline_failures
+            .unwrap_or(DEADLINE_FAILURES_PER_LAYER),
     }
 }
 

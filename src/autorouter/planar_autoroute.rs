@@ -133,6 +133,14 @@ pub struct PlanarAutorouteExecutionStepper {
     /// attempt when a status is returned), this stays with the routed
     /// ratline so bookkeeping attributes progress correctly.
     last_routed_ratline: Option<RatlineUid>,
+    /// Ratlines skipped because an endpoint was navmesh-unreachable —
+    /// the sealed-pad failure class. They produce no `Err` (the
+    /// frontier must keep moving), so the reconfigurator drains this
+    /// queue each step to count them against the failure deadline;
+    /// otherwise a ratline whose endpoint is permanently ringed could
+    /// neither accumulate failures nor be respanned onto reachable
+    /// endpoints.
+    unreachable_failed: Vec<RatlineUid>,
     /// The options for the autorouting process, defining how routing should be carried out.
     options: PlanarAutorouteOptions,
     /// Edits applied outside any ratline's route — board data updates
@@ -191,6 +199,7 @@ impl PlanarAutorouteExecutionStepper {
             slot_ratlines: vec![],
             attempt_ratline: None,
             last_routed_ratline: None,
+            unreachable_failed: Vec::new(),
             lazy_stubs,
             stubbed: BTreeMap::new(),
             stub_failed: BTreeSet::new(),
@@ -324,11 +333,15 @@ impl PlanarAutorouteExecutionStepper {
                         // the same ratline at the head of every
                         // reconfiguration and aborts the command.
                         // An empty edit slot keeps `layout_edits`
-                        // index-aligned with the ratline list.
+                        // index-aligned with the ratline list. The
+                        // skip still counts as a failure for the
+                        // reconfigurator's deadline bookkeeping.
                         log::debug!(
                             "ratline {:?} endpoint unreachable in navmesh — skipping",
                             self.configuration.ratlines[self.curr_ratline_index]
                         );
+                        self.unreachable_failed
+                            .push(self.configuration.ratlines[self.curr_ratline_index]);
                         self.dissolve_route_stepper_and_push_edits();
                         self.curr_ratline_index += 1;
                         continue;
@@ -555,6 +568,13 @@ impl PlanarAutorouteExecutionStepper {
                 .terminating_dot_map
                 .retain(|&(_, dot), _| dot != pad);
         }
+    }
+
+    /// Drains ratlines skipped for a navmesh-unreachable endpoint since
+    /// the last drain — the reconfigurator counts each against the
+    /// failing ratline's deadline streak.
+    pub fn take_unreachable_failed(&mut self) -> Vec<RatlineUid> {
+        std::mem::take(&mut self.unreachable_failed)
     }
 
     /// Finishes routing early: the in-flight ratline's partial band is

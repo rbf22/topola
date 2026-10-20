@@ -344,16 +344,17 @@ impl PlanarAutorouteReconfigurator {
         &self.dead
     }
 
-    /// Counts a route-attempt failure for the ratline at the stepper's
-    /// current position; once the streak reaches
+    /// Counts a route-attempt failure for `ratline` — a returned
+    /// `Err` or a navmesh-unreachable endpoint skip both count; once
+    /// the streak reaches
     /// [`crate::autorouter::PlanarAutorouteOptions::deadline_failures_per_layer`]
     /// per board layer the ratline is respanned onto an alternate
     /// same-net pair, and declared dead once those are exhausted.
-    fn note_route_failure(&mut self, autorouter: &mut Autorouter<impl AccessMesadata>) {
-        let index = *self.stepper.curr_ratline_index();
-        let Some(&ratline) = self.stepper.configuration().ratlines.get(index) else {
-            return;
-        };
+    fn note_route_failure(
+        &mut self,
+        autorouter: &mut Autorouter<impl AccessMesadata>,
+        ratline: RatlineUid,
+    ) {
         // The streak counts this ratline's failures since it last
         // routed successfully — its own success is the only evidence
         // it remains viable, so nothing else may reset it. A ratline
@@ -365,6 +366,7 @@ impl PlanarAutorouteReconfigurator {
             *entry += 1;
             *entry
         };
+        log::trace!("ratline {ratline:?} streak {streak}");
         let layers = autorouter.board.layout().drawing().layer_count().max(1);
         if streak >= self.options.deadline_failures_per_layer * layers {
             // The ratsnest fixes which pad pairs become ratlines — a
@@ -745,7 +747,17 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
             }
         }
 
-        match self.stepper.step(autorouter) {
+        let result = self.stepper.step(autorouter);
+        // Endpoint-unreachable skips produce no `Err` — the stepper
+        // queues them so their streaks still accumulate toward the
+        // deadline; otherwise a ratline whose pad is permanently
+        // ringed could neither fail nor respan onto reachable
+        // endpoints.
+        for ratline in self.stepper.take_unreachable_failed() {
+            self.note_route_failure(autorouter, ratline);
+        }
+
+        match result {
             Ok(ControlFlow::Break(maybe_edit)) => Ok(ControlFlow::Break(maybe_edit.map(|edit| {
                 let mut merged =
                     BoardEdit::new_from_edits(BoardDataEdit::new(), self.escape_stub_edit.clone());
@@ -780,7 +792,10 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                     self.finish_early(autorouter);
                     return self.step(autorouter);
                 }
-                self.note_route_failure(autorouter);
+                let index = *self.stepper.curr_ratline_index();
+                if let Some(&ratline) = self.stepper.configuration().ratlines.get(index) {
+                    self.note_route_failure(autorouter, ratline);
+                }
                 self.reconfigure(autorouter)
             }
         }
