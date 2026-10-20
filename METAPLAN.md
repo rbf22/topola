@@ -1124,3 +1124,89 @@ Surprises surfaced by the deterministic matrix:
 For a stuck run: `sample <pid> 5` (already pinpointed the A\* drain),
 `samply record`, or `cargo flamegraph` — the release profile has
 debug info enabled.
+
+## Simulated-annealing global pre-planner — implemented (opt-in `--anneal`)
+
+A global SA pre-planner (`autorouter::anneal`) decides *where and in
+what order* the existing router works — layer assignments, route
+order, congestion seeds, corridor carves, and (continuous mode)
+planned mid-route vias — then hands the plan to the multilayer
+machinery. The router itself is untouched: `anneal` lives inside
+`MultilayerAutorouteOptions`, so `.cmd` replay, undo/redo, and
+`--jobs` all work unchanged. Deterministic by construction —
+hand-rolled splitmix64/xorshift (no `rand` dep), iteration-bounded,
+no wall-clock reads; congestion seeds are written absolutely so a
+replay can't double-seed, and continuation bookkeeping is torn down
+at command end (blocker-log `RatlineUid` refs purged).
+
+Two modes behind `--anneal-mode`:
+
+- `continuous` — per-ratline parametric 3D curves `(x,y,z)` under
+  Metropolis acceptance with **bounded soft-core repulsion**
+  `σ²/(d²+σ²)` (not the paper's divergent `1/d²`). Crossings are
+  finite-energy events — curves pass through each other while hot,
+  so homotopy changes are ordinary accepted moves, and the
+  hard-core limit emerges from the schedule. Obstacle weight ramps
+  0.1→1 over cooling; quantized z-run boundaries become planned
+  vias handed off as weave-style continuations.
+- `discrete` — SA over `(layer_map, order)` with corridor-conflict
+  energy; emits the same `AnnealPlan` minus splits. Its `crossings`
+  metric counts accepted relayer moves (accept/reject counters are
+  continuous-only instrumentation).
+
+### Benchmarks — `--deterministic --max-steps --seed 0`
+
+| board | mode | unrouted | unconnected | vias | wall s | anneal | crossings | splits |
+|---|---|---|---|---|---|---|---|---|
+| astable (16 rl) | `--multilayer` | 4 | 16 | 6 | 0.2 | — | — | — |
+| | `+cont` | 5 | 12 | 28 | 1.2 | 0.9 s | 22 | 5 |
+| | `+disc` | 1 | 14 | 17 | 0.2 | 0.002 s | 110 | 0 |
+| heart (176 rl) | (base) | 148 | 285 | — | 0.8 | — | — | — |
+| | `--multilayer` | 165 | 310 | 32 | 0.4 | — | — | — |
+| | `+cont` | 168 | 322 | 304 | 82.5 | 81.8 s | 672 | 74 |
+| | `+disc` | 147 | 306 | 123 | 1.8 | 0.02 s | 1133 | 0 |
+| candE (2403 rl) | (base) | 2365 | 7472 | 0 | 3.3 | — | — | — |
+| | `--multilayer` | 2139 | 6661 | 485 | 127.6 | — | — | — |
+| | `+cont` (60 iters) | *run below* | | | | | | |
+| | `+disc` | *run below* | | | | | | |
+
+Seed sweep (0–2, direct `--seed`): identical unrouted/unconnected
+on both repo boards under both modes — plans converge to the same
+family regardless of trajectory noise. `--jobs N` also composes
+(3-worker astable discrete lands at the same 1/14).
+
+### Findings
+
+- **Discrete annealing is a small, nearly-free win.** Best
+  unrouted count on astable (1 vs 4) and heart (147 vs 148 base /
+  165 ml) for ~1–25 ms of pre-planning — ordering + congestion
+  seeding + a less-greedy layer map, all cheap.
+- **Continuous 3D annealing works mechanically but loses
+  end-to-end.** Pass-through happens (22–672 accepted crossings —
+  the soft-core does its job) and quantization is clean, yet
+  outcomes are *worse* than plain `--multilayer` on both repo
+  boards (5 vs 4; 168 vs 165) at 5–200× wall time.
+- **Planned splits mostly never land.** `splits=74` on heart but
+  only **2 continuations materialized** (ratline total 176→178);
+  astable planned 5, placed ~0. On congested boards the annealed
+  via sites infringe and `place_split` degrades to a plain layer
+  assignment — so continuous mode's headline output (mid-route
+  vias) contributes almost nothing; its practical effect is
+  layer_map+order+congestion like the discrete mode, just slower
+  and (here) worse.
+- **Via inflation is real either way**: annealed runs emit 17–123
+  vias vs 6–32 for the matching non-annealed mode — the layer_map
+  forces fanouts the router wouldn't choose. (Continuous's 304 on
+  heart is mostly fanout, not continuations.)
+- **The kernel doesn't scale.** Per sweep: a full `system_energy`
+  re-eval plus two repulsion evals per proposal; per-sweep cost
+  grows superlinearly with curve×neighbor density — 0.9 s at 16
+  ratlines, ~82 s at 176, and >22 CPU-min (killed unfinished) at
+  2403. The candE golden row is therefore bounded to
+  `--anneal-iterations 60`; continuous mode as written is a
+  small-board experiment.
+- **Verdict**: the pre-planner architecture earned its place, and
+  the discrete mode is worth keeping on merit. Continuous mode
+  stays behind its flag as a research path — realizing its promise
+  needs incremental energy evaluation, split-site feasibility
+  screening, and consolidation of z-wiggles, not more iterations.
