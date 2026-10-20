@@ -106,8 +106,8 @@ ROWS+=(
 [[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--multilayer --anneal --anneal-mode continuous --anneal-iterations 60|100000")
 [[ -n "${CANDE_DSN:-}" && -f "${CANDE_DSN:-}" ]] && ROWS+=("$CANDE_DSN|--multilayer --anneal --anneal-mode discrete|100000")
 
-printf '%-36s %-58s %7s %9s %11s %8s %8s  %s\n' \
-    "board" "mode" "steps" "unrouted" "unconnected" "wall_s" "ses_sha" "status" >&2
+printf '%-36s %-58s %7s %9s %11s %6s %8s %8s %8s  %s\n' \
+    "board" "mode" "steps" "unrouted" "unconnected" "vias" "wlen" "wall_s" "ses_sha" "status" >&2
 
 RESULTS=()
 FAILURES=0
@@ -117,8 +117,8 @@ for row in "${ROWS[@]}"; do
     name="$(slug "$dsn")$(echo -n "$modes" | tr ' -' '__' | tr -d '\n')"
     [[ -n "${ROW_FILTER:-}" && "$name" != *"$ROW_FILTER"* ]] && continue
     if [[ ! -f "$dsn" ]]; then
-        printf '%-36s %-58s %7s %9s %11s %8s %8s  %s\n' \
-            "$name" "-" "-" "-" "-" "-" "-" "missing" >&2
+        printf '%-36s %-58s %7s %9s %11s %6s %8s %8s %8s  %s\n' \
+            "$name" "-" "-" "-" "-" "-" "-" "-" "-" "missing" >&2
         continue
     fi
 
@@ -127,7 +127,7 @@ done
 
 if [[ "$WRITE_GOLDEN" == 1 ]]; then
     {
-        printf '#board\tmode\tsteps\tseed\tunrouted\tunconnected\ttotal\tses_sha256\twall_s\tstatus\n'
+        printf '#board\tmode\tsteps\tseed\tunrouted\tunconnected\ttotal\tses_sha256\twall_s\tstatus\tvias\tsegs\twlen\tref_vias\tref_segs\tref_wlen\n'
         printf '%s\n' "${RESULTS[@]}" | tr '|' '\t'
     } >"$GOLDEN"
     echo "wrote $GOLDEN" >&2
@@ -135,9 +135,10 @@ elif [[ "$CHECK" == 1 && -f "$GOLDEN" ]]; then
     echo "" >&2
     echo "== golden check ==" >&2
     for res in "${RESULTS[@]}"; do
-        IFS='|' read -r dsn modes budget seed unrouted unconnected total sha wall status <<<"$res"
+        IFS='|' read -r dsn modes budget seed unrouted unconnected total sha wall status _ <<<"$res"
         key="$dsn|$modes|$budget|$seed"
-        golden_row=$(grep -F -e "$dsn" "$GOLDEN" | grep -F -e "$modes" | awk -F'\t' -v b="$budget" -v s="$seed" '$3==b && $4==s' | head -1)
+        golden_row=$(awk -F'\t' -v d="$dsn" -v m="$modes" -v b="$budget" -v s="$seed" \
+            '$1==d && $2==m && $3==b && $4==s' "$GOLDEN" | head -1)
         if [[ -z "$golden_row" ]]; then
             printf '  ?? %s %s steps=%s seed=%s — no golden row\n' "$(slug "$dsn")" "$modes" "$budget" "$seed" >&2
             continue

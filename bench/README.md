@@ -112,7 +112,9 @@ Flags measured net-negative as defaults:
 
 - `--escape-stubs`: eager stubs are *fixed* geometry — un-rippable and
   a permanent foreign-net constraint. +199 unrouted on prog_rig; helps
-  only on sparse THT pads. See FINDINGS.md I17.
+  only on sparse THT pads. `--lazy-escape-stubs` (stub only on demand,
+  in the stepper) is the safe variant — baseline-identical where stubs
+  don't pay. See FINDINGS.md I17/F27/F28.
 - `--critical-first`: worst-tier mean ratio (7.3×).
 - `--navmesh-step-factor 8`: safe, small win (−10 on logicboard); the
   cap never bound on 3/5 measured boards — failures there are genuine,
@@ -133,3 +135,27 @@ post-fix by `scripts/bench.sh --write-golden` and replayed by
 `--check`. The per-board configs are the phase-2 winners documented
 above (issue208 substitutes `anneal-mode discrete` for its winning
 `continuous` row — 24 min wall is impractical for a regression gate).
+
+Columns: `board, mode, steps, seed, unrouted, unconnected, total,
+ses_sha256, wall_s, status` — the regression check compares only
+`unrouted`, `unconnected`, `ses_sha256`. The trailing six columns
+(`vias, segs, wlen, ref_vias, ref_segs, ref_wlen`) are informational
+I6 quality counters from `wire_stats` in `scripts/bench_lib.sh`:
+wire-segment count, via placements, and polyline wirelength for our
+`.ses` and the adjacent `<stem>_solved.dsn` reference (`-` when
+absent). Caveats:
+
+- `wlen`/`ref_wlen` are in each file's raw coordinate units — Topola
+  never rescales on load and corpus `(resolution)` labels are
+  unreliable (freerouting writes `mil 1000` on mm-scale files), so a
+  `wlen`/`ref_wlen` pair is comparable *within* a row, never across
+  boards.
+- `segs` counts `(wire …)` blocks — our writer emits one block per
+  navmesh edge; freerouting writes long polylines. Expect ~3–10×
+  inflation here even when the routing is equivalent; it's a
+  segmentation metric, not a quality verdict by itself.
+- Some references are degenerate comparators: `relaymodule_solved.dsn`
+  is via-only (`22|0|0`), several boards have no `_solved` at all.
+- For real quality analysis use `scripts/score_ses.py` (per-net
+  joint-length ratios, bend histograms, tortuosity) — the golden
+  columns are the cheap row-level signal, cross-checked against it.
