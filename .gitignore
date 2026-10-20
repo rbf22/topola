@@ -34,6 +34,10 @@ fp-info-cache
 *.ses
 dist/
 bench/out/
+bench/corpora-src/
+bench/corpus_index.tsv
+bench/corpus_index.err
+__pycache__/
 
 # ignore manpages
 topola.1

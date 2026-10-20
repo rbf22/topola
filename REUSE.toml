@@ -28,3 +28,20 @@ SPDX-License-Identifier = "MIT"
 path = "flake.lock"
 SPDX-FileCopyrightText = "2024 Topola contributors"
 SPDX-License-Identifier = "MIT"
+
+# PCBench boards are individually licensed by their upstream authors;
+# the vendored subset uses only permissively licensed designs (MIT /
+# Apache-2.0 / BSD / CC0 / CC-BY / LGPL). See bench/corpus.tsv notes and
+# tests/external/README.md for per-board provenance.
+[[annotations]]
+path = "tests/external/pcbench/**"
+SPDX-FileCopyrightText = "PCBench board authors (see metadata.json upstream)"
+SPDX-License-Identifier = "LicenseRef-PCBench"
+
+# Freerouting fixtures are user-submitted reproductions shipped under
+# the freerouting project's GPL umbrella — vendored with the caveat in
+# tests/external/README.md.
+[[annotations]]
+path = "tests/external/freerouting/**"
+SPDX-FileCopyrightText = "freerouting fixture authors"
+SPDX-License-Identifier = "GPL-3.0-only"
