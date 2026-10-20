@@ -293,6 +293,46 @@ pub fn assert_that_all_ratlines_besides_gnd_are_autorouted(
     );
 }
 
+/// Consistency check for the rerouted board after an undo-all→replay
+/// cycle: a legitimately re-routed result may leave ratlines unrouted
+/// (replayed searches land in different ordering basins once slot
+/// recycling perturbs iteration order), but the band registry and the
+/// connectivity union-find must agree — a registered band spanning
+/// disconnected dots is the signature of lost connectivity (I14).
+/// Something must also have routed: an empty registry means the replay
+/// degenerated entirely.
+pub fn assert_band_registry_consistent(autorouter: &mut Autorouter<impl AccessMesadata>) {
+    let conncomps = ConnectedComponents::new(autorouter.board());
+    assert!(autorouter.board().bands().count() > 0);
+
+    for principal_layer in 0..autorouter.board().layout().drawing().layer_count() {
+        for ratline in autorouter
+            .ratsnests()
+            .on_principal_layer(principal_layer)
+            .graph()
+            .edge_indices()
+            .map(|index| RatlineUid {
+                principal_layer,
+                index,
+            })
+        {
+            let (origin_dot, destination_dot) = ratline.ref_(autorouter).endpoint_dots();
+
+            if autorouter
+                .board()
+                .band_between_nodes(origin_dot, destination_dot)
+                .is_some()
+            {
+                assert_eq!(
+                    conncomps.unionfind().find(origin_dot.index()),
+                    conncomps.unionfind().find(destination_dot.index()),
+                    "registered band {ratline:?} spans dots the union-find keeps apart"
+                );
+            }
+        }
+    }
+}
+
 /*pub fn assert_number_of_conncomps(
     autorouter: &mut Autorouter<impl MesadataTrait>,
     conncomp_count: usize,
