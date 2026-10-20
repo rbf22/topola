@@ -219,6 +219,13 @@ pub struct Cli {
     pub seed: Option<u64>,
     #[arg(
         long,
+        value_name = "N",
+        requires = "multilayer",
+        help = "Seed for the multilayer layer-assignment plan: nonzero uses conflict-directed assignment (ratlines with colliding corridors get different layers); 0 keeps every ratline's preferred layer (--jobs derives seeds per worker)"
+    )]
+    pub layer_seed: Option<u64>,
+    #[arg(
+        long,
         help = "Disable wall-clock-driven reconfiguration: per-ratline timeouts never fire, so reconfiguration is purely failure-driven. Combine with --max-steps and --seed for reproducible benchmark runs"
     )]
     pub deterministic: bool,

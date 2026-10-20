@@ -61,7 +61,7 @@ fn main() -> Result<(), std::io::Error> {
                 args.deterministic,
                 selection.clone(),
                 make_planar_options(&args, &board),
-                0,
+                args.layer_seed.unwrap_or(0),
                 make_anneal_options(&args),
                 &board,
             );
