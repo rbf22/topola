@@ -492,8 +492,10 @@ pub struct Pins {
 
 #[derive(ReadDsn, WriteSes, Debug, Clone, PartialEq)]
 pub struct Class {
+    // Some exporters emit anonymous `(class (circuit …) (rule …))`
+    // blocks — the name is optional, not mandatory.
     #[anon]
-    pub name: String,
+    pub name: Option<String>,
     #[anon_vec]
     pub nets: Vec<String>,
     pub circuit: Circuit,

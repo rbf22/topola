@@ -28,6 +28,17 @@ impl<W: io::Write> WriteSes<W> for String {
     }
 }
 
+/// Optional anonymous leaf — writes nothing when `None`
+/// (e.g. `Class::name` on anonymous classes).
+impl<W: io::Write> WriteSes<W> for Option<String> {
+    fn write_dsn(&self, writer: &mut ListWriter<W>) -> Result<(), io::Error> {
+        if let Some(value) = self {
+            writer.write_value(value)?;
+        }
+        Ok(())
+    }
+}
+
 impl<W: io::Write> WriteSes<W> for bool {
     fn write_dsn(&self, writer: &mut ListWriter<W>) -> Result<(), io::Error> {
         writer.write_leaf(

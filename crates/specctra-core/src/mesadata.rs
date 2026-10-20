@@ -166,10 +166,15 @@ impl SpecctraMesadata {
                         // this can't panic because we did iterate over
                         // `pcb.network.classes[].nets` above
                         let net = net_netname.get_by_right(netname).unwrap();
-                        net_netclass.insert(*net, class.name.clone());
+                        net_netclass.insert(*net, class.name.clone().unwrap_or_default());
                     }
                 })
-                .map(|class| (class.name.clone(), SpecctraRule::from_dsn(&class.rule))),
+                .map(|class| {
+                    (
+                        class.name.clone().unwrap_or_default(),
+                        SpecctraRule::from_dsn(&class.rule),
+                    )
+                }),
         );
 
         let mut structure_rule = super::structure::Rule {

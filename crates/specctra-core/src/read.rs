@@ -83,10 +83,27 @@ impl<R: std::io::BufRead> ReadDsn<R> for Parser {
             space_in_quoted_tokens: tokenizer
                 .read_optional(&["space_in_quoted_tokens"])?
                 .inspect(|v| tokenizer.space_in_quoted = *v),
-            host_cad: tokenizer.read_optional(&["host_cad"])?,
-            host_version: tokenizer.read_optional(&["host_version"])?,
+            // Some exporters (EasyEDA) quote these values without
+            // declaring `string_quote`, so the tokenizer splits them on
+            // interior spaces. Read all leaves and rejoin — a lone
+            // outer quote pair is the undeclared quoting, strip it.
+            host_cad: tokenizer
+                .read_optional_leaves("host_cad")?
+                .map(rejoin_undeclared_quotes),
+            host_version: tokenizer
+                .read_optional_leaves("host_version")?
+                .map(rejoin_undeclared_quotes),
         })
     }
+}
+
+fn rejoin_undeclared_quotes(leaves: Vec<String>) -> String {
+    let joined = leaves.join(" ");
+    joined
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .map(str::to_string)
+        .unwrap_or(joined)
 }
 
 impl<R: std::io::BufRead> ReadDsn<R> for String {
@@ -97,6 +114,21 @@ impl<R: std::io::BufRead> ReadDsn<R> for String {
         } else {
             Err(ParseError::ExpectedLeaf.add_context(inptoken.context))
         }
+    }
+}
+
+/// Optional anonymous leaf — e.g. `Class::name`, which some exporters
+/// (freerouting, EasyEDA) omit entirely on anonymous classes.
+impl<R: std::io::BufRead> ReadDsn<R> for Option<String> {
+    fn read_dsn(tokenizer: &mut ListTokenizer<R>) -> Result<Self, ParseErrorContext> {
+        let input = tokenizer.consume_token()?;
+        Ok(if let ListToken::Leaf { .. } = input.token {
+            tokenizer.return_token(input);
+            Some(tokenizer.read_value::<String>()?)
+        } else {
+            tokenizer.return_token(input);
+            None
+        })
     }
 }
 
@@ -342,6 +374,25 @@ impl<R: std::io::BufRead> ListTokenizer<R> {
             let value = self.read_value::<T>()?;
             self.consume_token()?.expect_end()?;
             Some(value)
+        } else {
+            self.return_token(input);
+            None
+        })
+    }
+
+    /// Reads an optional `(name leaf*)` list, returning the raw leaf
+    /// values. Unlike `read_optional` this tolerates values the lexer
+    /// split into several leaves, e.g. quoted strings in files that
+    /// never declared `string_quote`.
+    fn read_optional_leaves(
+        &mut self,
+        name: &'static str,
+    ) -> Result<Option<Vec<String>>, ParseErrorContext> {
+        let input = self.consume_token()?;
+        Ok(if input.token.is_start_of(&[name]) {
+            let leaves = self.read_array::<String>()?;
+            self.consume_token()?.expect_end()?;
+            Some(leaves)
         } else {
             self.return_token(input);
             None
