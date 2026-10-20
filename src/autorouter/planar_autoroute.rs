@@ -535,10 +535,41 @@ impl PlanarAutorouteExecutionStepper {
                 })
         };
 
+        self.curr_ratline_index = self.first_unattempted_position(autorouter);
+
         if self.curr_ratline_index < self.configuration.ratlines.len() {
             self.start_routing_ratline(autorouter)?;
         }
         Ok(result)
+    }
+
+    /// The earliest ratline-list position that still needs an attempt:
+    /// no recorded attempt slot and no routed band. Resuming any later
+    /// would silently skip it — it would never be attempted — which is
+    /// how slot/position alignment and routing completeness both break
+    /// when an emitted ordering lands a continuation or requeued
+    /// ratline ahead of the nominal resume point. When the emit
+    /// contract holds (survivors keep their prefix, requeued go after
+    /// the resume point) every pre-resume position has a slot or a
+    /// band, so this equals the nominal resume point.
+    fn first_unattempted_position(&self, autorouter: &Autorouter<impl AccessMesadata>) -> usize {
+        let slotted: BTreeSet<RatlineUid> = self.slot_ratlines.iter().flatten().copied().collect();
+        (0..self
+            .curr_ratline_index
+            .min(self.configuration.ratlines.len()))
+            .find(|&index| {
+                if slotted.contains(&self.configuration.ratlines[index]) {
+                    return false;
+                }
+                let (origin, destination) = self
+                    .configuration
+                    .ratline_terminating_dots(autorouter, index);
+                autorouter
+                    .board
+                    .band_between_nodes(origin, destination)
+                    .is_none()
+            })
+            .unwrap_or(self.curr_ratline_index)
     }
 
     /// Installs an ordering whose first difference from the live one
@@ -574,6 +605,10 @@ impl PlanarAutorouteExecutionStepper {
         }
         if new_index >= self.board_data_edits.len() {
             self.curr_ratline_index = new_index.min(self.configuration.ratlines.len());
+            // Positions between the walked prefix and `new_index` are
+            // unchanged but unattempted — a tail permutation that
+            // shares a long prefix must not jump past them.
+            self.curr_ratline_index = self.first_unattempted_position(autorouter);
         } else {
             // The just-dissolved in-flight slot now covers the first
             // changed position — that position holds a different
@@ -853,6 +888,33 @@ mod tests {
         Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
     }
 
+    fn options_0603() -> PlanarAutorouteOptions {
+        PlanarAutorouteOptions {
+            principal_layer: 0,
+            presort_by: PresortBy::RatlineIntersectionCountAndLength,
+            permutate: true,
+            reconfigure_by: ReconfigureBy::default(),
+            congestion_penalty: 500.0,
+            router: RouterOptions {
+                wrap_around_bands: true,
+                squeeze_through_under_bends: false,
+                routed_band_width: 100.0,
+            },
+            timeout: TimeoutOptions {
+                initial: 1.0,
+                progress_bonus: 0.005,
+            },
+            max_reconfigurations: None,
+            improve_pad_entry: false,
+            pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
+            escape_stubs: false,
+            per_ratline_step_limit: None,
+            navmesh_step_factor: None,
+            surgical_ripup: false,
+            shuffle_seed: 0,
+        }
+    }
+
     /// A terminating-dot entry for a via that no longer exists must not
     /// outlive the via: `remove_terminating_dots` purges it so the
     /// ratline falls back to its endpoint dots instead of dereferencing
@@ -884,30 +946,7 @@ mod tests {
                 rip_up: vec![],
                 protected: BTreeSet::new(),
             },
-            PlanarAutorouteOptions {
-                principal_layer: 0,
-                presort_by: PresortBy::RatlineIntersectionCountAndLength,
-                permutate: true,
-                reconfigure_by: ReconfigureBy::default(),
-                congestion_penalty: 500.0,
-                router: RouterOptions {
-                    wrap_around_bands: true,
-                    squeeze_through_under_bends: false,
-                    routed_band_width: 100.0,
-                },
-                timeout: TimeoutOptions {
-                    initial: 1.0,
-                    progress_bonus: 0.005,
-                },
-                max_reconfigurations: None,
-                improve_pad_entry: false,
-                pad_entry_min_angle: std::f64::consts::FRAC_PI_4,
-                escape_stubs: false,
-                per_ratline_step_limit: None,
-                navmesh_step_factor: None,
-                surgical_ripup: false,
-                shuffle_seed: 0,
-            },
+            options_0603(),
         )
         .unwrap();
 
@@ -931,5 +970,121 @@ mod tests {
                 .ratline_terminating_dots(&autorouter, 0),
             endpoints,
         );
+    }
+
+    fn stepper_for(
+        autorouter: &mut Autorouter<SpecctraMesadata>,
+        ratlines: Vec<RatlineUid>,
+    ) -> PlanarAutorouteExecutionStepper {
+        PlanarAutorouteExecutionStepper::new(
+            autorouter,
+            PlanarAutorouteConfiguration {
+                ratlines,
+                terminating_dot_map: BTreeMap::new(),
+                obstacle_penalties: BTreeMap::new(),
+                rip_up: vec![],
+                protected: BTreeSet::new(),
+            },
+            options_0603(),
+        )
+        .unwrap()
+    }
+
+    fn board_ratlines(autorouter: &Autorouter<SpecctraMesadata>, count: usize) -> Vec<RatlineUid> {
+        autorouter
+            .ratsnests()
+            .on_principal_layer(0)
+            .graph()
+            .edge_indices()
+            .take(count)
+            .map(|index| RatlineUid {
+                principal_layer: 0,
+                index,
+            })
+            .collect()
+    }
+
+    /// An emitted ordering may land an unattempted ratline ahead of
+    /// the attempted ratline's new position — a weave continuation
+    /// inserted before it, or a requeue to the front. Resuming at the
+    /// attempted ratline's position would skip it forever: it has no
+    /// recorded attempt slot and no band, so `install_configuration`
+    /// must resume at the first such position instead.
+    #[test]
+    fn install_configuration_resumes_at_first_unattempted_position() {
+        let mut autorouter = {
+            let design_file = File::open(
+                "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",
+            )
+            .unwrap();
+            let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+            Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+        };
+        let ratlines = board_ratlines(&autorouter, 3);
+        let [a, b, c] = [ratlines[0], ratlines[1], ratlines[2]];
+
+        let mut stepper = stepper_for(&mut autorouter, vec![a, b, c]);
+        // `a` was attempted; `b`'s in-flight attempt was dissolved and
+        // reverted (as `surgical_rip_up` does before installing).
+        stepper.slot_ratlines = vec![Some(a), Some(b)];
+        stepper.curr_ratline_index = 1;
+
+        stepper
+            .install_configuration(
+                &mut autorouter,
+                PlanarAutorouteConfiguration {
+                    ratlines: vec![c, a, b],
+                    terminating_dot_map: BTreeMap::new(),
+                    obstacle_penalties: BTreeMap::new(),
+                    rip_up: vec![],
+                    protected: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+
+        // `b`'s new position is 2, but `c` at position 0 has neither a
+        // slot nor a band — resuming at 2 would skip it permanently.
+        assert_eq!(stepper.curr_ratline_index, 0);
+    }
+
+    /// Same skip on the tail-permutation path: when the first
+    /// difference lands past the walked prefix, the positions in
+    /// between are unchanged but still unattempted — jumping straight
+    /// to `new_index` would never route them.
+    #[test]
+    fn install_tail_configuration_resumes_at_first_unattempted_position() {
+        let mut autorouter = {
+            let design_file = File::open(
+                "tests/unilayer/4x4_1206_led_matrix_breakout/4x4_1206_led_matrix_breakout.dsn",
+            )
+            .unwrap();
+            let design = SpecctraDesign::load(BufReader::new(design_file)).unwrap();
+            Autorouter::new(design.make_board(&mut BoardEdit::new())).unwrap()
+        };
+        let ratlines = board_ratlines(&autorouter, 4);
+        let [a, b, c, d] = [ratlines[0], ratlines[1], ratlines[2], ratlines[3]];
+
+        let mut stepper = stepper_for(&mut autorouter, vec![a, b, c, d]);
+        stepper.slot_ratlines = vec![Some(a), Some(b)];
+        stepper.curr_ratline_index = 1;
+
+        // Ordering keeps the whole walked prefix and `c`, drops `d`:
+        // the first difference is past every recorded slot.
+        stepper
+            .install_tail_configuration(
+                &mut autorouter,
+                PlanarAutorouteConfiguration {
+                    ratlines: vec![a, b, c],
+                    terminating_dot_map: BTreeMap::new(),
+                    obstacle_penalties: BTreeMap::new(),
+                    rip_up: vec![],
+                    protected: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+
+        // Without the gap check `curr_ratline_index` would land at 3,
+        // leaving `c` (position 2, unattempted) forever unrouted.
+        assert_eq!(stepper.curr_ratline_index, 2);
     }
 }
