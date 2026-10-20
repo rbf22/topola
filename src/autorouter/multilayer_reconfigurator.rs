@@ -238,9 +238,25 @@ impl MultilayerAutorouteReconfigurator {
         self.timeout = TimeVsProgressAccumulatorTimeout::new_from_options(self.options.timeout);
 
         loop {
-            let Some(configuration) = self.reconfigurer.next_configuration(autorouter) else {
+            let Some(mut configuration) = self.reconfigurer.next_configuration(autorouter) else {
                 return Ok(ControlFlow::Break(None));
             };
+
+            // Ratlines declared dead by the planar reconfigurator are
+            // unroutable: keep layer rotations from re-attempting them
+            // so the frontier advances instead of cycling the same
+            // sealed ratline through every layer forever.
+            let dead = self.stepper.planar().dead_ratlines();
+            if !dead.is_empty() {
+                configuration
+                    .planar
+                    .ratlines
+                    .retain(|ratline| !dead.contains(ratline));
+                configuration
+                    .planar
+                    .terminating_dot_map
+                    .retain(|(ratline, _), _| !dead.contains(ratline));
+            }
 
             match self.stepper.reconfigure(autorouter, configuration) {
                 Ok(_) => {

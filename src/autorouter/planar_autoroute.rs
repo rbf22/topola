@@ -668,11 +668,24 @@ impl PlanarAutorouteExecutionStepper {
                 .configuration
                 .ratlines
                 .iter()
-                .position(|uid| uid == ratline)
-                .unwrap();
-            let (origin, destination) = self
-                .configuration
-                .ratline_terminating_dots(autorouter, index);
+                .position(|uid| uid == ratline);
+            let (origin, destination) = if let Some(index) = index {
+                self.configuration
+                    .ratline_terminating_dots(autorouter, index)
+            } else {
+                // A ratline already dropped from the live ordering —
+                // e.g. declared dead and scrubbed — can still hold a
+                // band that must be ripped. Fall back to its own
+                // endpoints through the terminating-dot map.
+                let (origin, destination) = ratline.ref_(autorouter).endpoint_dots();
+                let map = &self.configuration.terminating_dot_map;
+                (
+                    map.get(&(*ratline, origin)).copied().unwrap_or(origin),
+                    map.get(&(*ratline, destination))
+                        .copied()
+                        .unwrap_or(destination),
+                )
+            };
 
             let Some(band) = autorouter.board.band_between_nodes(origin, destination) else {
                 continue;

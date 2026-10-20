@@ -62,7 +62,39 @@ pub struct PlanarAutorouteReconfigurator {
     /// introspection; protection is monotone-shrinking so a revoked
     /// ratline is never re-protected by this reconfigurator.
     desperated: BTreeSet<RatlineUid>,
+    /// Route-attempt failures per ratline since it last failed while
+    /// no band had been routed in between — `(streak,
+    /// routed_at_last_failure)`. A ratline only accumulates the streak
+    /// while the whole board is frozen: any successful route resets
+    /// everyone's patience, so ratlines rescued mid-churn are never
+    /// declared dead. Without a bound, a permanently sealed ratline
+    /// reconfigures forever: each emitted ordering retries it, it
+    /// fails, and the cycle repeats until the step budget is gone
+    /// (under `--deterministic` the timeout never fires, so this loop
+    /// is unbounded there).
+    failure_counts: BTreeMap<RatlineUid, (usize, usize)>,
+    /// Bands committed so far — the progress watermark the failure
+    /// streaks reset against. Only first-time ratlines count: a band
+    /// ripped and re-routed is churn, not progress, and must not buy
+    /// a sealed ratline infinite patience.
+    routed_count: usize,
+    /// Ratlines that have routed at least once — re-routes after
+    /// rip-up are excluded from `routed_count` via this set.
+    routed_ever: BTreeSet<RatlineUid>,
+    /// Ratlines that exhausted their failure budget — declared
+    /// unroutable for this command and dropped from every emitted
+    /// configuration so the frontier can advance past them.
+    dead: BTreeSet<RatlineUid>,
 }
+
+/// Consecutive failures (with no first-time route in between) a
+/// ratline may accumulate per routing layer before it is declared
+/// dead. Layered boards legitimately retry a ratline under several
+/// layer assignments, so the budget scales with layer count. Measured:
+/// astable's hardest ratline needs ~54 stalled failures before it
+/// routes — 64/layer leaves that headroom while still bounding the
+/// candE-style deadlock (sealed ratlines stall at thousands of cycles).
+const DEADLINE_FAILURES_PER_LAYER: usize = 64;
 
 impl PlanarAutorouteReconfigurator {
     pub fn new(
@@ -134,6 +166,10 @@ impl PlanarAutorouteReconfigurator {
             reconfiguration_count: 0,
             protected,
             desperated: BTreeSet::new(),
+            failure_counts: BTreeMap::new(),
+            routed_count: 0,
+            routed_ever: BTreeSet::new(),
+            dead: BTreeSet::new(),
         })
     }
 
@@ -276,6 +312,42 @@ impl PlanarAutorouteReconfigurator {
         self.finished = true;
     }
 
+    /// Ratlines declared unroutable after exhausting their failure
+    /// budget — the multilayer reconfigurator consults this to scrub
+    /// them from its emitted configurations too.
+    pub fn dead_ratlines(&self) -> &BTreeSet<RatlineUid> {
+        &self.dead
+    }
+
+    /// Counts a route-attempt failure for the ratline at the stepper's
+    /// current position; declares it dead once it has failed
+    /// [`DEADLINE_FAILURES_PER_LAYER`] times per board layer.
+    fn note_route_failure(&mut self, autorouter: &Autorouter<impl AccessMesadata>) {
+        let index = *self.stepper.curr_ratline_index();
+        let Some(&ratline) = self.stepper.configuration().ratlines.get(index) else {
+            return;
+        };
+        let entry = self
+            .failure_counts
+            .entry(ratline)
+            .or_insert((0, self.routed_count));
+        if entry.1 < self.routed_count {
+            // Another ratline routed since this one's last failure —
+            // the board is still moving, so its retries are healthy
+            // exploration, not a stall.
+            *entry = (1, self.routed_count);
+        } else {
+            entry.0 += 1;
+        }
+        let streak = entry.0;
+        let layers = autorouter.board.layout().drawing().layer_count().max(1);
+        if streak >= DEADLINE_FAILURES_PER_LAYER * layers {
+            if self.dead.insert(ratline) {
+                log::debug!("ratline {ratline:?} declared dead after {streak} stalled attempts",);
+            }
+        }
+    }
+
     /// Whether the number of reconfigurations has reached
     /// [`PlanarAutorouteOptions::max_reconfigurations`]. Always `false` when
     /// no limit is set.
@@ -315,6 +387,25 @@ impl PlanarAutorouteReconfigurator {
             else {
                 break;
             };
+
+            // Dead ratlines are unroutable: omit them so the search
+            // advances instead of re-permuting a sealed ratline
+            // forever. Their terminating-dot map entries go too — the
+            // ratline will never be attempted again.
+            if !self.dead.is_empty() {
+                configuration
+                    .ratlines
+                    .retain(|ratline| !self.dead.contains(ratline));
+                configuration
+                    .rip_up
+                    .retain(|ratline| !self.dead.contains(ratline));
+                configuration
+                    .protected
+                    .retain(|ratline| !self.dead.contains(ratline));
+                configuration
+                    .terminating_dot_map
+                    .retain(|(ratline, _), _| !self.dead.contains(ratline));
+            }
 
             self.apply_protection(autorouter, &mut configuration);
 
@@ -525,6 +616,16 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                 merged
             }))),
             Ok(ControlFlow::Continue(status)) => {
+                if matches!(status, PlanarAutorouteContinueStatus::Routed(_)) {
+                    match self.stepper.attempt_ratline() {
+                        Some(ratline) => {
+                            if self.routed_ever.insert(*ratline) {
+                                self.routed_count += 1;
+                            }
+                        }
+                        None => self.routed_count += 1,
+                    }
+                }
                 Ok(ControlFlow::Continue(ReconfiguratorStatus::Running(status)))
             }
             Err(err) => {
@@ -541,6 +642,7 @@ impl<M: AccessMesadata> Step<Autorouter<M>, Option<BoardEdit>, PlanarAutorouteRe
                     self.finish_early(autorouter);
                     return self.step(autorouter);
                 }
+                self.note_route_failure(autorouter);
                 self.reconfigure(autorouter)
             }
         }
@@ -713,5 +815,50 @@ mod tests {
             .expect("the command should finish early")
             .expect("a finished command yields its edit");
         assert!(edit.layout_edit.created_segs().next().is_none());
+    }
+
+    /// A ratline that keeps failing route attempts must not re-permute
+    /// forever. Once its cumulative failures reach the deadline it is
+    /// declared dead and dropped from every emitted configuration — the
+    /// frontier then advances instead of burning the step budget on a
+    /// sealed ratline (this loop is unbounded under `--deterministic`,
+    /// where the timeout never fires).
+    #[test]
+    fn sealed_ratline_is_declared_dead_and_command_terminates() {
+        let mut autorouter = autorouter_led_matrix();
+        let selection = PinSelection::new_select_layer(autorouter.board(), 0);
+
+        // A bounded per-attempt step limit keeps each failure cheap;
+        // an unbounded reconfiguration budget lets the loop run. The
+        // fixture's unroutable ratlines must hit the deadline and drop
+        // out of the emitted orderings, letting the command end instead
+        // of permuting them forever.
+        let mut opts = options(Some(500), false);
+        opts.max_reconfigurations = None;
+        let mut reconfigurator = autorouter.planar_autoroute(&selection, opts).unwrap();
+
+        let mut maybe_edit = None;
+        for _ in 0..5_000_000 {
+            if let ControlFlow::Break(edit) = reconfigurator.step(&mut autorouter).unwrap() {
+                maybe_edit = Some(edit);
+                break;
+            }
+        }
+
+        maybe_edit.expect("the command must terminate, not permute forever");
+        assert!(
+            !reconfigurator.dead.is_empty(),
+            "permanently failing ratlines should be declared dead"
+        );
+        for ratline in &reconfigurator.dead {
+            assert!(
+                !reconfigurator
+                    .stepper
+                    .configuration()
+                    .ratlines
+                    .contains(ratline),
+                "a dead ratline must not remain in the live ordering"
+            );
+        }
     }
 }
